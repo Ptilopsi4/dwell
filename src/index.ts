@@ -124,11 +124,39 @@ async function submitAndReply(
 			markdown: async (s) => {
 				const watch = await conversation.watch(context);
 				let cursor = "";
+				// 工具概述：callId → 摘要（从 transcript 的 assistant toolCall 取参数），done 后报告一次
+				const callSummary = new Map<string, string>();
+				const reported = new Set<string>();
+				let scanned = 0;
+				const summarize = (name: string, args: Record<string, unknown>): string => {
+					const arg = args.command ?? args.path ?? JSON.stringify(args);
+					return `> 🔧 ${name} · ${String(arg).replace(/\s+/g, " ").slice(0, 80)}`;
+				};
 				try {
 					const settledP = submission.wait(context);
 					void settledP.then(() => {}, () => {});
 					await watch.start(async (value) => {
-						const live = (value.docs as Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } } } | undefined>)["pi.live"];
+						// 增量扫描 transcript：登记 toolCall 参数
+						const entries = (value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } }[] }[] }[] }).entries ?? [];
+						for (let i = scanned; i < entries.length; i++) {
+							const e = entries[i];
+							if (e.kind !== "pi.assistant") continue;
+							for (const c of e.model?.[0]?.content ?? []) {
+								if (c.type === "toolCall" && c.toolCall !== undefined) {
+									callSummary.set(c.toolCall.id, summarize(c.toolCall.name, c.toolCall.arguments));
+							}
+							}
+						}
+						scanned = entries.length;
+						// 工具完成：报告概述行
+						const live = (value.docs as Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined>)["pi.live"];
+						for (const slot of live?.tools ?? []) {
+							if (slot.status === "done" && !reported.has(slot.callId) && callSummary.has(slot.callId)) {
+								reported.add(slot.callId);
+							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n`);
+						}
+						}
+						// 模型文本流
 						const parts = live?.generation?.message?.content ?? [];
 						const text = parts.flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
 						if (text.length === 0) return;
