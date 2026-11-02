@@ -28,8 +28,9 @@ async function main(): Promise<void> {
 	await sessions.load();
 	setApprovalCallback((conversationId, command, reason) => {
 		const chatId = sessions.chatOf(conversationId);
+		console.log(`[dwell] 审批请求: conv=${String(conversationId)} chat=${chatId ?? "未找到"} (${reason}) ${command.slice(0, 60)}`);
 		if (chatId === undefined) return;
-		void sendText(chatId, `⚠ 需要审批（${reason}）：\n${command.slice(0, 200)}\n\n回复 -approve 批准（默认 10 分钟）或 -deny 拒绝`).catch(() => {});
+		sendApprovalCard(chatId, conversationId, command, reason);
 	});
 	startEventLoop((raw) => void handleMessage(raw as unknown as LarkMessage));
 	startEventLoop((raw) => void handleCardAction(raw), "card.action.trigger");
