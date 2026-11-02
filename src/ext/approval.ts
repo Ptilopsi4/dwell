@@ -6,24 +6,26 @@ import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 export const approvals = new Map<number, number>();
 
 /** 审批请求回调（index.ts 注册：转发到飞书提醒用户）。 */
-export let onApprovalNeeded: ((conversationId: number, command: string, reason: string) => void) | null = null;
+export let onApprovalNeeded: ((conversationId: number, command: string, match: string) => void) | null = null;
 
-export function setApprovalCallback(fn: (conversationId: number, command: string, reason: string) => void): void {
+export function setApprovalCallback(fn: (conversationId: number, command: string, match: string) => void): void {
 	onApprovalNeeded = fn;
 }
 
-const DANGEROUS: [RegExp, string][] = [
-	[/\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*)\b/i, "递归强删"],
-	[/\bssh\b|\bscp\b|\brsync\b.*-e.*ssh/, "远程访问"],
-	[/curl[^|]*\s(-d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/, "数据外发"],
-	[/wget[^|]*--post/, "数据外发"],
-	[/npm\s+install\s+-g|apt(-get)?\s+install|pip3?\s+install/, "安装软件"],
-	[/\bdocker\b|\b systemctl\b|\bcrontab\b/, "系统操作"],
+const DANGEROUS: RegExp[] = [
+	/\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*)\b/i,
+	/\bssh\b|\bscp\b|\brsync\b.*-e.*ssh/,
+	/curl[^|]*\s(-d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/,
+	/wget[^|]*--post/,
+	/npm\s+install\s+-g|apt(-get)?\s+install|pip3?\s+install/,
+	/\bdocker\b|\b systemctl\b|\bcrontab\b/,
 ];
 
-export function dangerReason(command: string): string | null {
-	for (const [pattern, reason] of DANGEROUS) {
-		if (pattern.test(command)) return reason;
+/** 返回命中的敏感片段（如 "rm -rf"），未命中返回 null。 */
+export function dangerMatch(command: string): string | null {
+	for (const pattern of DANGEROUS) {
+		const m = pattern.exec(command);
+		if (m !== null) return m[0];
 	}
 	return null;
 }
@@ -51,12 +53,12 @@ export function makeApprovalExtension() {
 					if (/\bsudo\b/.test(command)) {
 						return { block: "dwell 用户无 sudo 权限（服务以 no-new-privileges 运行），此命令无法执行。向用户说明并改用不需要提权的方案。" };
 					}
-					const reason = dangerReason(command);
-					if (reason === null) return undefined;
+					const match = dangerMatch(command);
+					if (match === null) return undefined;
 					if (windowOpen(api.conversationId)) return undefined;
 					// 放行与否由窗口决定；通知走回调，不阻塞 hook
-					onApprovalNeeded?.(api.conversationId, command, reason);
-					return { block: `该命令被审批策略拦截（${reason}）。请明确告诉用户：回复 /approve 批准（默认 10 分钟窗口）或 /deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
+					onApprovalNeeded?.(api.conversationId, command, match);
+					return { block: `该命令被审批策略拦截（${match}）。请明确告诉用户：回复 /approve 批准（默认 10 分钟窗口）或 /deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
 				},
 			}),
 		],

@@ -26,11 +26,11 @@ async function main(): Promise<void> {
 	harness = await openDwell();
 	sessions = new Sessions(harness);
 	await sessions.load();
-	setApprovalCallback((conversationId, command, reason) => {
+	setApprovalCallback((conversationId, command, match) => {
 		const chatId = sessions.chatOf(conversationId);
-		console.log(`[dwell] 审批请求: conv=${String(conversationId)} chat=${chatId ?? "未找到"} (${reason}) ${command.slice(0, 60)}`);
+		console.log(`[dwell] 审批请求: conv=${String(conversationId)} chat=${chatId ?? "未找到"} (${match}) ${command.slice(0, 60)}`);
 		if (chatId === undefined) return;
-		sendApprovalCard(chatId, conversationId, command, reason);
+		sendApprovalCard(chatId, conversationId, command, match);
 	});
 	startEventLoop((raw) => void handleMessage(raw as unknown as LarkMessage));
 	startEventLoop((raw) => void handleCardAction(raw), "card.action.trigger");
@@ -131,7 +131,7 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 }
 
 /** 发送带按钮的审批卡片（Card 2.0）。 */
-function sendApprovalCard(chatId: string, conversationId: number, command: string, reason: string): void {
+function sendApprovalCard(chatId: string, conversationId: number, command: string, match: string): void {
 	const value = (action: string, minutes = 0) => JSON.stringify({ action, minutes, conversationId });
 	const card = {
 		schema: "2.0",
@@ -139,7 +139,7 @@ function sendApprovalCard(chatId: string, conversationId: number, command: strin
 		header: {
 			title: { tag: "plain_text", content: "需要你的批准" },
 			text_tag_list: [
-				{ tag: "text_tag", text: { tag: "plain_text", content: reason }, color: "orange" },
+				{ tag: "text_tag", text: { tag: "plain_text", content: match }, color: "carmine" },
 			],
 			template: "grey",
 			icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" },
