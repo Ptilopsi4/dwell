@@ -42,3 +42,10 @@ docker compose up -d --build
 - **群聊是互信域**：共享工作目录（`work/<chat_id>/`）+ 回复可参与任务线意味着参与者可访问该线上处理过的内容。敏感内容请用私聊
 - 权限：`/new` `/cancel` `/status` 管理员（或线主）；审批=触发者/线主/管理员；白名单外回复固定提示
 - 安全：敏感凭证启动后从进程环境移除（bash 工具 `printenv` 拿不到）；状态文件在 agent 可写域之外
+
+## Web panel
+
+- 访问：`http://<服务器IP>:7788/?token=<DWELL_PANEL_TOKEN>`（监听 0.0.0.0，配合内网穿透使用，勿暴露公网）
+- 功能：多会话线切换（记忆选择）、实时 transcript（SSE）、工具调用/结果行、运行状态、发消息（IME 安全）
+- 主题：深色默认，◐/◑ 切换，跟随系统 + 手动记忆
+- 配置：`DWELL_PANEL_PORT` + `DWELL_PANEL_TOKEN`（缺一不启动）；本地开发 `DWELL_PANEL_ONLY=1` 只起 panel 不连飞书
