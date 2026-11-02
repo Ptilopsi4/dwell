@@ -103,7 +103,68 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 	}
 }
 
+/** 流式回复：watch pi.live 的节流 partial，前缀检测 append 增量（轮切换/重试自动重置游标），settled 后补齐最终答案。 */
 async function submitAndReply(
+	conversation: Conversation,
+	submission: Awaited<ReturnType<Conversation["submit"]>>,
+	target: ReplyTarget,
+): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	try {
+		await channel.stream(target.chatId, {
+			markdown: async (s) => {
+				const watch = await conversation.watch(context);
+				let cursor = "";
+				try {
+					const settledP = submission.wait(context);
+					void settledP.then(() => {}, () => {});
+					await watch.start(async (value) => {
+						const live = (value.docs as Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } } } | undefined>)["pi.live"];
+						const parts = live?.generation?.message?.content ?? [];
+						const text = parts.flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
+						if (text.length === 0) return;
+						if (text.startsWith(cursor) && text.length > cursor.length) {
+							await s.append(text.slice(cursor.length));
+							cursor = text;
+						} else if (!text.startsWith(cursor)) {
+							// 新轮或重试：响应从头开始，重置游标并加分隔
+							cursor = text;
+							await s.append(`\n\n${text}`);
+						}
+					});
+					// settled 后补齐最终答案（partial 节流可能落后）
+					const settled = await settledP;
+					let final = "";
+					if (settled.status === "done" && settled.type === "input") {
+						const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+						const answer = entry?.model?.[0] as AssistantMessage | undefined;
+						final = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+					} else {
+						final = `处理失败：${settled.status === "unanswered" ? settled.reason : settled.status}`;
+					}
+					if (final.startsWith(cursor) && final.length > cursor.length) {
+						await s.append(final.slice(cursor.length));
+					} else if (!final.startsWith(cursor) && final.length > 0 && cursor.length === 0) {
+						await s.append(final);
+					}
+				} finally {
+					await watch.stop();
+				}
+			},
+		}, { replyTo: target.messageId });
+	} catch (err) {
+		// 流式通道失败时退回普通回复
+		console.error("[dwell] 流式回复失败，退回普通回复:", err);
+		try {
+			await submitAndReplyPlain(conversation, submission, target);
+		} catch (err2) {
+			console.error("[dwell] 回复彻底失败:", err2);
+		}
+	}
+}
+
+/** 非流式回复（流式通道失败时的兑底）。 */
+async function submitAndReplyPlain(
 	conversation: Conversation,
 	submission: Awaited<ReturnType<Conversation["submit"]>>,
 	target: ReplyTarget,
