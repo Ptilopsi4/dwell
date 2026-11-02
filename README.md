@@ -16,7 +16,7 @@
 
 ## 飞书命令
 
-`-new` 新对话 / `-status` 任务状态 / `-cancel` 中止当前任务
+`/new` 新对话 / `/status` 任务状态 / `/cancel` 中止 / `/approve [分钟]` 批准危险命令 / `/deny` 拒绝
 
 ## 开发
 

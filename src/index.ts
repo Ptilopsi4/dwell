@@ -46,7 +46,7 @@ async function handleMessage(m: LarkMessage): Promise<void> {
 		const conversation = await sessions.forChat(m.chat_id);
 		const context = BACKGROUND_CONTEXT;
 
-		if (text.startsWith("-")) {
+		if (text.startsWith("/")) {
 			await runCommand(text, conversation, m);
 			return;
 		}
@@ -91,21 +91,21 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 	const context = BACKGROUND_CONTEXT;
 	const cmd = text.split(/\s+/)[0];
 	switch (cmd) {
-		case "-new":
+		case "/new":
 			await conversation.reset(undefined, context);
 			await replyTo(m, "已开启新对话。");
 			break;
-		case "-status": {
+		case "/status": {
 			const graph = await harness.taskGraph?.(context);
 			await replyTo(m, graph ? `运行中任务：\n${JSON.stringify(graph, null, 1).slice(0, 1500)}` : "当前无任务运行。");
 			break;
 		}
-		case "-cancel": {
+		case "/cancel": {
 			await conversation.abort(context);
 			await replyTo(m, "已中止当前任务。");
 			break;
 		}
-		case "-approve": {
+		case "/approve": {
 			const minutes = Number(text.split(/\s+/)[1]) || 10;
 			approvals.set(conversation.id as number, Date.now() + minutes * 60_000);
 			await replyTo(m, `已批准：本会话 ${minutes} 分钟内危险命令免拦截。`);
@@ -119,13 +119,13 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 			await submitAndReply(conversation, s, m);
 			break;
 		}
-		case "-deny": {
+		case "/deny": {
 			approvals.delete(conversation.id as number);
 			await replyTo(m, "已关闭批准窗口。");
 			break;
 		}
 		default:
-			await replyTo(m, `未知命令 ${cmd}。可用：-new / -status / -cancel / -approve [分钟] / -deny`);
+			await replyTo(m, `未知命令 ${cmd}。可用：/new /status /cancel /approve [分钟] /deny`);
 	}
 }
 

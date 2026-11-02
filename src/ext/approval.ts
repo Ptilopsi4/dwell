@@ -56,7 +56,7 @@ export function makeApprovalExtension() {
 					if (windowOpen(api.conversationId)) return undefined;
 					// 放行与否由窗口决定；通知走回调，不阻塞 hook
 					onApprovalNeeded?.(api.conversationId, command, reason);
-					return { block: `该命令被审批策略拦截（${reason}）。请明确告诉用户：回复 -approve 批准（默认 10 分钟窗口）或 -deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
+					return { block: `该命令被审批策略拦截（${reason}）。请明确告诉用户：回复 /approve 批准（默认 10 分钟窗口）或 /deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
 				},
 			}),
 		],
