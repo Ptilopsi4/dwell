@@ -1,0 +1,76 @@
+// 飞书事件消费：lark-cli event consume 子进程管理（ready marker / bounded 循环重启 / NDJSON 解析）。
+import { spawn } from "node:child_process";
+
+export interface LarkMessage {
+	chat_id: string;
+	chat_type: string;
+	message_id: string;
+	message_type: string;
+	sender_id: string;
+	sender_type: string;
+	/** text/post 等类型已由 lark-cli 预解码为纯文本 */
+	content: string;
+	mentions?: unknown[];
+}
+
+const EVENT_KEY = "im.message.receive_v1";
+
+/**
+ * 持续消费飞书消息事件。bounded --timeout 到期后退出码 0，循环重启；
+ * ready marker 之前退出视为失败，带退避重试。resolve 后才开始读 stdout 行。
+ */
+export function startEventLoop(onMessage: (m: LarkMessage) => void, onStop?: (err?: Error) => void): void {
+	void runLoop(onMessage, onStop);
+}
+
+async function runLoop(onMessage: (m: LarkMessage) => void, onStop?: (err?: Error) => void): Promise<void> {
+	let backoff = 1_000;
+	for (;;) {
+		const outcome = await consumeOnce(onMessage);
+		if (outcome === "timeout") {
+			backoff = 1_000; // 正常轮换，重置退避
+			continue;
+		}
+		// ready 前失败或异常退出：退避后重试
+		console.error(`[feishu] consumer ${outcome}，${backoff / 1000}s 后重启`);
+		await new Promise((r) => setTimeout(r, backoff));
+		backoff = Math.min(backoff * 2, 60_000);
+		if (backoff === 60_000) onStop?.(new Error(`consumer 反复失败: ${outcome}`));
+	}
+}
+
+/** 一次 bounded 消费。返回 "timeout"（正常到期）或错误描述。 */
+function consumeOnce(onMessage: (m: LarkMessage) => void): Promise<"timeout" | string> {
+	return new Promise((resolve) => {
+		const child = spawn(
+			"lark-cli",
+			["event", "consume", EVENT_KEY, "--as", "bot", "--timeout", "30m"],
+			{ stdio: ["pipe", "pipe", "pipe"], shell: true },
+		);
+		let ready = false;
+		let lastErr = "";
+
+		child.stderr?.on("data", (chunk: Buffer) => {
+			const text = chunk.toString();
+			if (text.includes(`[event] ready event_key=${EVENT_KEY}`)) ready = true;
+			if (!ready) lastErr += text;
+		});
+		child.stdout?.on("data", (chunk: Buffer) => {
+			if (!ready) return;
+			for (const line of chunk.toString().split("\n")) {
+				if (line.trim() === "") continue;
+				try {
+					onMessage(JSON.parse(line) as LarkMessage);
+				} catch {
+					console.error(`[feishu] 无法解析事件行: ${line.slice(0, 200)}`);
+				}
+			}
+		});
+		child.on("exit", (code) => {
+			if (code === 0) return resolve("timeout"); // --timeout 到期的正常退出
+			resolve(ready ? `异常退出 code=${code}` : `ready 前退出 code=${code}: ${lastErr.slice(-500)}`);
+		});
+		child.on("error", (err) => resolve(`spawn 失败: ${err.message}`));
+	});
+}
+
