@@ -130,7 +130,8 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 	}
 }
 
-/** 审批卡片（Card 2.0）：request 待审；approved/denied 为点击后的形态（选中钮实心禁用，其余灰禁用）。 */
+/** 审批卡片（Card 1.0：lark-cli 1.0.98 对 2.0 卡回调解析损坏，见 larksuite/cli#2759）。
+ *  request 待审；approved/denied 为点击后形态（选中钮文案更新+全部 disabled，header 变色）。 */
 function approvalCard(conversationId: number, command: string, match: string, state: { kind: "request" } | { kind: "approved"; minutes: number } | { kind: "denied" }): Record<string, unknown> {
 	const value = (action: string, minutes = 0) => JSON.stringify({ action, minutes, conversationId });
 	const done = state.kind !== "request";
@@ -138,21 +139,19 @@ function approvalCard(conversationId: number, command: string, match: string, st
 		? { title: { tag: "plain_text", content: "已拒绝" }, template: "red" }
 		: state.kind === "approved"
 			? { title: { tag: "plain_text", content: `已批准 · ${state.minutes} 分钟` }, template: "green" }
-			: { title: { tag: "plain_text", content: "需要你的批准" }, template: "grey", icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" } };
-	// 三个按钮：request 时可点；结束后选中者实心+文案更新，全部 disabled
+			: { title: { tag: "plain_text", content: "需要你的批准" }, template: "grey" };
 	const chosen = state.kind === "approved" ? state.minutes : 0;
 	const buttons = [
-		{ text: chosen === 10 || state.kind === "denied" ? "已批准 10 分钟" : "批准 10 分钟", type: chosen === 10 ? "primary_filled" : "primary" },
-		{ text: chosen === 30 || state.kind === "denied" ? "已批准 30 分钟" : "批准 30 分钟", type: chosen === 30 ? "primary_filled" : "primary" },
-		{ text: state.kind === "denied" ? "已拒绝" : "拒绝", type: state.kind === "denied" ? "danger_filled" : "danger" },
+		{ text: chosen === 10 || state.kind === "denied" ? "已批准 10 分钟" : "批准 10 分钟", type: "primary", v: value("approve", 10) },
+		{ text: chosen === 30 || state.kind === "denied" ? "已批准 30 分钟" : "批准 30 分钟", type: "primary", v: value("approve", 30) },
+		{ text: state.kind === "denied" ? "已拒绝" : "拒绝", type: "danger", v: value("deny") },
 	];
 	return {
-		schema: "2.0",
-		config: { width_mode: "fill" },
-		header: { ...header, text_tag_list: [{ tag: "text_tag", text: { tag: "plain_text", content: match }, color: "carmine" }] },
-		body: { elements: [
-			{ tag: "markdown", content: `即将执行：\n\`\`\`bash\n${command.slice(0, 300)}\n\`\`\`` },
-			{ tag: "column_set", horizontal_spacing: "large", columns: buttons.map((b, i) => ({
+		config: { wide_screen_mode: true },
+		header,
+		elements: [
+			{ tag: "div", text: { tag: "lark_md", content: `**\`${match}\`**\n即将执行：\n\`\`\`\n${command.slice(0, 300)}\n\`\`\`` } },
+			{ tag: "column_set", columns: buttons.map((b) => ({
 				tag: "column",
 				width: "weighted",
 				weight: 1,
@@ -160,12 +159,11 @@ function approvalCard(conversationId: number, command: string, match: string, st
 					tag: "button",
 					text: { tag: "plain_text", content: b.text },
 					type: b.type,
-					width: "fill",
-					...(done ? { disabled: true, disabled_tips: { tag: "plain_text", content: "审批已结束" } } : {}),
-					value: value(i === 2 ? "deny" : "approve", i === 0 ? 10 : 30),
+					...(done ? { disabled: true } : {}),
+					value: b.v,
 				}],
 			})) },
-		] },
+		],
 	};
 }
 
@@ -188,8 +186,12 @@ interface CardActionEvent {
 /** 卡片按钮回调：审批/拒绝后更新卡片并唤醒模型。 */
 async function handleCardAction(raw: Record<string, unknown>): Promise<void> {
 	const e = raw as unknown as CardActionEvent;
+	console.log(`[dwell] 卡片事件: tag=${e.action_tag ?? "?"} value=${(e.action_value ?? "").slice(0, 60)} op=${e.operator_id ?? "?"}`);
 	if (e.action_tag !== "button" || e.action_value === undefined || e.operator_id === undefined) return;
-	if (!ALLOW.includes(e.operator_id)) return; // 只有白名单用户能审
+	if (!ALLOW.includes(e.operator_id)) {
+		console.log(`[dwell] 卡片事件: operator 不在白名单 (${e.operator_id})，忽略`);
+		return;
+	}
 	let v: { action?: string; minutes?: number; conversationId?: number };
 	try {
 		v = JSON.parse(e.action_value) as typeof v;
@@ -201,7 +203,11 @@ async function handleCardAction(raw: Record<string, unknown>): Promise<void> {
 	if (conversationId === undefined) return;
 	const context = BACKGROUND_CONTEXT;
 	const conversation = await harness.conversation(conversationId as ConversationId, context);
-	if (conversation === undefined) return;
+	if (conversation === undefined) {
+		console.log(`[dwell] 卡片事件: conversation ${conversationId} 不存在`);
+		return;
+	}
+	console.log(`[dwell] 卡片事件: ${v.action} conv=${conversationId} token=${e.token !== undefined ? "有" : "无"}`);
 
 	if (e.token !== undefined) {
 		const minutes = v.minutes ?? 10;
