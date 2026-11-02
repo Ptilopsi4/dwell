@@ -135,7 +135,7 @@ async function submitAndReply(
 				try {
 					const settledP = submission.wait(context);
 					void settledP.then(() => {}, () => {});
-					await watch.start(async (value) => {
+					const handleFrame = async (value: unknown): Promise<void> => {
 						// 增量扫描 transcript：登记 toolCall 参数
 						const entries = (value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } }[] }[] }[] }).entries ?? [];
 						for (let i = scanned; i < entries.length; i++) {
@@ -149,7 +149,7 @@ async function submitAndReply(
 						}
 						scanned = entries.length;
 						// 工具完成：报告概述行
-						const live = (value.docs as Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined>)["pi.live"];
+						const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined> }).docs?.["pi.live"];
 						for (const slot of live?.tools ?? []) {
 							if (slot.status === "done" && !reported.has(slot.callId) && callSummary.has(slot.callId)) {
 								reported.add(slot.callId);
@@ -168,7 +168,10 @@ async function submitAndReply(
 							cursor = text;
 							await s.append(`\n\n${text}`);
 						}
-					});
+					};
+					// 占位卡发送期间 run 可能已推进：先处理初始快照，再监听后续帧
+					await handleFrame(watch.value);
+					watch.start((value) => handleFrame(value));
 					// settled 后补齐最终答案（partial 节流可能落后）
 					const settled = await settledP;
 					let final = "";
