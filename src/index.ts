@@ -171,13 +171,7 @@ async function submitAndReply(
 					};
 					// 占位卡发送期间 run 可能已推进：先处理初始快照，再监听后续帧
 					await handleFrame(watch.value);
-					let frameNo = 0;
-					watch.start((value) => {
-						frameNo++;
-						const lv = (value as unknown as { docs?: Record<string, { tools?: { callId: string; status: string }[] }> }).docs?.["pi.live"];
-						console.log(`[dwell:stream] 帧${frameNo} tools=${(lv?.tools ?? []).map((t) => `${t.callId}:${t.status}`).join(",") || "-"}`);
-						return handleFrame(value);
-					});
+					watch.start((value) => handleFrame(value));
 					// settled 后补齐最终答案（partial 节流可能落后）
 					const settled = await settledP;
 					let final = "";
