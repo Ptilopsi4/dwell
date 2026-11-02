@@ -137,13 +137,13 @@ async function submitAndReply(
 					void settledP.then(() => {}, () => {});
 					const handleFrame = async (value: unknown): Promise<void> => {
 						// 增量扫描 transcript：登记 toolCall 参数
-						const entries = (value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } }[] }[] }[] }).entries ?? [];
+						const entries = (value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; id?: string; name?: string; arguments?: Record<string, unknown> }[] }[] }[] }).entries ?? [];
 						for (let i = scanned; i < entries.length; i++) {
 							const e = entries[i];
 							if (e.kind !== "pi.assistant") continue;
 							for (const c of e.model?.[0]?.content ?? []) {
-								if (c.type === "toolCall" && c.toolCall !== undefined) {
-									callSummary.set(c.toolCall.id, summarize(c.toolCall.name, c.toolCall.arguments));
+								if (c.type === "toolCall" && c.id !== undefined && c.name !== undefined) {
+									callSummary.set(c.id, summarize(c.name, c.arguments ?? {}));
 							}
 							}
 						}
@@ -171,7 +171,13 @@ async function submitAndReply(
 					};
 					// 占位卡发送期间 run 可能已推进：先处理初始快照，再监听后续帧
 					await handleFrame(watch.value);
-					watch.start((value) => handleFrame(value));
+					let frameNo = 0;
+					watch.start((value) => {
+						frameNo++;
+						const lv = (value as unknown as { docs?: Record<string, { tools?: { callId: string; status: string }[] }> }).docs?.["pi.live"];
+						console.log(`[dwell:stream] 帧${frameNo} tools=${(lv?.tools ?? []).map((t) => `${t.callId}:${t.status}`).join(",") || "-"}`);
+						return handleFrame(value);
+					});
 					// settled 后补齐最终答案（partial 节流可能落后）
 					const settled = await settledP;
 					let final = "";
