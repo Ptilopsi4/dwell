@@ -6,6 +6,7 @@ import { openDwell } from "./harness.ts";
 import { Sessions } from "./sessions.ts";
 import { startEventLoop, type LarkMessage } from "./feishu/consumer.ts";
 import { sendText, splitMessage } from "./feishu/reply.ts";
+import { approvals, setApprovalCallback } from "./ext/approval.ts";
 
 const ALLOW = (process.env.DWELL_ALLOW ?? "")
 	.split(",")
@@ -23,6 +24,11 @@ async function main(): Promise<void> {
 	harness = await openDwell();
 	sessions = new Sessions(harness);
 	await sessions.load();
+	setApprovalCallback((conversationId, command, reason) => {
+		const chatId = sessions.chatOf(conversationId);
+		if (chatId === undefined) return;
+		void sendText(chatId, `⚠ 需要审批（${reason}）：\n${command.slice(0, 200)}\n\n回复 -approve 批准（默认 10 分钟）或 -deny 拒绝`).catch(() => {});
+	});
 	startEventLoop(handleMessage);
 	console.log("[dwell] 就绪");
 }
@@ -90,8 +96,27 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 			await replyTo(m, "已中止当前任务。");
 			break;
 		}
+		case "-approve": {
+			const minutes = Number(text.split(/\s+/)[1]) || 10;
+			approvals.set(conversation.id as number, Date.now() + minutes * 60_000);
+			await replyTo(m, `已批准：本会话 ${minutes} 分钟内危险命令免拦截。`);
+			// 唤醒模型继续被拦的任务（run 已结束时作为新输入，运行中则 steer）
+			const s = await conversation.submit({
+				type: "input",
+				content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
+				whenBusy: "steer",
+				requestId: `${m.message_id}-approve`,
+			}, context);
+			void s.wait(context).then(() => {});
+			break;
+		}
+		case "-deny": {
+			approvals.delete(conversation.id as number);
+			await replyTo(m, "已关闭批准窗口。");
+			break;
+		}
 		default:
-			await replyTo(m, `未知命令 ${cmd}。可用：-new / -status / -cancel`);
+			await replyTo(m, `未知命令 ${cmd}。可用：-new / -status / -cancel / -approve [分钟] / -deny`);
 	}
 }
 

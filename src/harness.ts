@@ -7,6 +7,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createRegistry, defineExtension, Harness, section } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { makeApprovalExtension } from "./ext/approval.ts";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -17,7 +18,8 @@ const PREAMBLE = `你是 dwell，一个常驻服务器的通用助手。通过�
 - 用中文回答，技术术语保留英文
 - 回答直接给结论和内容，不写客套开场白
 - 单条回复保持简短（百字量级）；长内容给要点，被追问再展开
-- 文件操作在你的工作目录内进行；不确定的事直说不确定`;
+- 文件操作在你的工作目录内进行；不确定的事直说不确定
+- 命令被审批策略拦截时，如实告知用户需要回复 -approve，不要尝试绕过`;
 
 const DwellExtension = defineExtension({
 	name: "dwell",
@@ -39,6 +41,7 @@ export async function openDwell(models = zaiModels()): Promise<Harness> {
 	const registry = createRegistry();
 	registry.install(CodingTools);
 	registry.install(DwellExtension);
+	registry.install(makeApprovalExtension());
 
 	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），使 lark-cli 等服务凭证程序对模型不可见；
 	// 不影响 dwell 自身的消息收发（直接 spawn，不经工具 shell）。本机开发不设。

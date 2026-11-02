@@ -23,7 +23,15 @@ export class Sessions {
 		}
 	}
 
-	private async save(): Promise<void> {
+	/** 反查：conversationId → chat_id（审批提醒等需要主动发消息的场景）。 */
+	chatOf(conversationId: number): string | undefined {
+		for (const [chatId, convId] of this.map) {
+			if ((convId as number) === conversationId) return chatId;
+		}
+		return undefined;
+	}
+
+	async save(): Promise<void> {
 		await writeFile(this.file, JSON.stringify(Object.fromEntries(this.map), null, "\t"));
 	}
 
