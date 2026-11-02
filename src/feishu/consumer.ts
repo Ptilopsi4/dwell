@@ -54,6 +54,10 @@ function consumeOnce(onMessage: (m: Record<string, unknown>) => void, eventKey: 
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
+			// WARN 行（如事件丢弃）全量透传到日志，其余只在未就绪时留存
+			for (const line of text.split("\n")) {
+				if (line.startsWith("WARN:")) console.error(`[feishu:${eventKey}] ${line}`);
+			}
 			if (text.includes(`[event] ready event_key=${eventKey}`)) ready = true;
 			if (!ready) lastErr += text;
 		});
