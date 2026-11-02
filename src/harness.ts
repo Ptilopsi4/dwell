@@ -40,7 +40,13 @@ export async function openDwell(models = zaiModels()): Promise<Harness> {
 	registry.install(CodingTools);
 	registry.install(DwellExtension);
 
-	const env = ({ cwd }: { cwd?: string }) => new NodeExecutionEnv({ cwd: resolve(cwd ?? process.cwd()) });
+	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），使 lark-cli 等服务凭证程序对模型不可见；
+	// 不影响 dwell 自身的消息收发（直接 spawn，不经工具 shell）。本机开发不设。
+	const env = ({ cwd }: { cwd?: string }) =>
+		new NodeExecutionEnv({
+			cwd: resolve(cwd ?? process.cwd()),
+			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
+		});
 	const harness = await Harness.open(storage, { models, registry, env }, context);
 	harness.resume();
 	return harness;
