@@ -2,7 +2,8 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
-import { openDwell } from "./harness.ts";
+import { openDwell, scrubSecretEnv } from "./harness.ts";
+import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
@@ -17,6 +18,7 @@ const users = new Users();
 
 async function main(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
+	await initStateDir();
 	harness = await openDwell();
 	sessions = new Sessions(harness);
 	await sessions.load();
@@ -35,6 +37,8 @@ async function main(): Promise<void> {
 		onMessage: (msg) => void handleMessage(msg),
 		onCardAction: (evt) => void handleCardAction(evt),
 	});
+	// 凭证均已注入内存（credential store / SDK Client），从进程环境移除，堵死 bash 工具的 printenv 窃取面
+	scrubSecretEnv();
 	console.log(`[dwell] 就绪（bot: ${channel.botIdentity?.name ?? "?"}）`);
 }
 
@@ -60,7 +64,12 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 
 async function handleMessage(msg: NormalizedMessage): Promise<void> {
 	try {
-		if (msg.rawContentType !== "text" || msg.content.trim() === "") return;
+		if (msg.rawContentType !== "text" || msg.content.trim() === "") {
+		if (msg.rawContentType !== "text" && users.isAllowed(msg.senderId)) {
+			await channel.send(msg.chatId, { text: "目前只处理文本消息。" }, { replyTo: msg.messageId });
+		}
+		return;
+	}
 		if (!users.isAllowed(msg.senderId)) {
 			await channel.send(msg.chatId, { text: "未授权使用，请联系管理员开通。" }, { replyTo: msg.messageId });
 			return;
@@ -144,8 +153,9 @@ async function submitAndReply(
 					}
 					if (final.startsWith(cursor) && final.length > cursor.length) {
 						await s.append(final.slice(cursor.length));
-					} else if (!final.startsWith(cursor) && final.length > 0 && cursor.length === 0) {
-						await s.append(final);
+					} else if (!final.startsWith(cursor) && final.length > 0) {
+						// cursor 是作废 partial（重试/换轮）：分隔后追加完整最终答案，不丢尾
+						await s.append(`\n\n${final}`);
 					}
 				} finally {
 					await watch.stop();
@@ -220,6 +230,10 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			await replyTo(target, "已开启新对话。");
 			break;
 		case "/status": {
+			if (!admin) {
+				await replyTo(target, "/status 仅管理员可用。");
+				return;
+			}
 			const graph = await harness.taskGraph?.(context);
 			await replyTo(target, graph ? `运行中任务：\n${JSON.stringify(graph, null, 1).slice(0, 1500)}` : "当前无任务运行。");
 			break;
@@ -247,9 +261,10 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 		}
 		case "/deny":
 			if (admin) {
-				// 管理员：关闭该任务线全部窗口（救场）
+				// 管理员：关闭该任务线全部窗口与待审请求（救场）
 				const prefix = `${convId}:`;
 				for (const k of approvals.keys()) if (k.startsWith(prefix)) approvals.delete(k);
+				for (const k of pendingApprovals.keys()) if (k.startsWith(prefix)) pendingApprovals.delete(k);
 				await replyTo(target, "已关闭本任务线的全部批准窗口。");
 				return;
 			}
@@ -280,6 +295,10 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "用法：/disallow @某人");
 				return;
 			}
+			if (who.id === msg.senderId && users.adminCount() <= 1) {
+				await replyTo(target, "无法移除最后一名管理员（会自锁）。");
+				return;
+			}
 			await users.remove(who.id);
 			await replyTo(target, `已移除 ${who.name}。`);
 			break;
@@ -306,8 +325,8 @@ function approvalCard(
 			: { title: { tag: "plain_text", content: "需要你的批准" }, template: "grey" };
 	const chosen = state.kind === "approved" ? state.minutes : 0;
 	const buttons = [
-		{ text: chosen === 10 || state.kind === "denied" ? "已批准 10 分钟" : "批准 10 分钟", type: "primary", v: value("approve", 10) },
-		{ text: chosen === 30 || state.kind === "denied" ? "已批准 30 分钟" : "批准 30 分钟", type: "primary", v: value("approve", 30) },
+		{ text: chosen === 10 ? "已批准 10 分钟" : "批准 10 分钟", type: "primary", v: value("approve", 10) },
+		{ text: chosen === 30 ? "已批准 30 分钟" : "批准 30 分钟", type: "primary", v: value("approve", 30) },
 		{ text: state.kind === "denied" ? "已拒绝" : "拒绝", type: "danger", v: value("deny") },
 	];
 	return {
@@ -343,6 +362,14 @@ async function sendApprovalCard(chatId: string, conversationId: number, sender: 
 
 /** 卡片按钮回调：触发者/conversation owner/admin 可审，其余忽略。 */
 async function handleCardAction(evt: CardActionEvent): Promise<void> {
+	try {
+		await handleCardActionInner(evt);
+	} catch (err) {
+		console.error("[dwell] 卡片回调处理出错:", err);
+	}
+}
+
+async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 	const v = evt.action.value as { action?: string; minutes?: number; conversationId?: number; sender?: string } | undefined;
 	if (v?.action !== "approve" && v?.action !== "deny") return;
 	if (!users.isAllowed(evt.operator.openId)) return;
@@ -361,6 +388,7 @@ async function handleCardAction(evt: CardActionEvent): Promise<void> {
 
 	const key = windowKey(conversationId, v.sender);
 	const pending = pendingApprovals.get(key);
+	if (pending === undefined) return; // 历史卡/已处理：点击无效，防隔夜开窗
 	const minutes = v.minutes ?? 10;
 	const state = v.action === "approve" ? { kind: "approved" as const, minutes } : { kind: "denied" as const };
 	if (pending !== undefined) {
@@ -368,6 +396,7 @@ async function handleCardAction(evt: CardActionEvent): Promise<void> {
 	}
 
 	if (v.action === "approve") {
+		pendingApprovals.delete(key);
 		approvals.set(key, Date.now() + minutes * 60_000);
 		const s = await conversation.submit({
 			type: "input",
@@ -377,6 +406,7 @@ async function handleCardAction(evt: CardActionEvent): Promise<void> {
 		}, context);
 		void submitAndReply(conversation, s, { chatId: evt.chatId, messageId: evt.messageId });
 	} else {
+		pendingApprovals.delete(key);
 		approvals.delete(key);
 		const s = await conversation.submit({
 			type: "input",

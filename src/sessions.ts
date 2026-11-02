@@ -1,10 +1,11 @@
 // 会话路由与映射：chat_id（私聊）/ (chat,sender)（群平消息）/ (chat,thread)（话题群）→ conversation；
 // replyTo 命中 message-map 则跟随该任务线。messageMap 持久化，上限淘汰 + 显式降级。
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
 import { DATA_DIR, MODEL } from "./harness.ts";
+import { stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
@@ -18,8 +19,8 @@ export class Sessions {
 	private convKeys = new Map<string, ConversationId>(); // 路由键 → conversation
 	private owners = new Map<ConversationId, string>(); // conversation → owner open_id
 	private messageMap = new Map<string, ConversationId>(); // messageId → conversation（任务线锚点）
-	private file = join(DATA_DIR, "sessions.json");
-	private mapFile = join(DATA_DIR, "message-map.json");
+	private file = stateFile("sessions.json");
+	private mapFile = stateFile("message-map.json");
 	private harness: Harness;
 
 	constructor(harness: Harness) {
@@ -33,25 +34,25 @@ export class Sessions {
 				this.convKeys.set(key, v.id as ConversationId);
 				this.owners.set(v.id as ConversationId, v.owner);
 			}
-		} catch {
-			// 首次运行
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] sessions.json 损坏，任务线映射将重建:", err);
 		}
 		try {
 			const saved = JSON.parse(await readFile(this.mapFile, "utf8")) as Record<string, number>;
 			for (const [mid, cid] of Object.entries(saved)) this.messageMap.set(mid, cid as ConversationId);
-		} catch {
-			// 首次运行
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] message-map.json 损坏，replyTo 路由将全部降级:", err);
 		}
 	}
 
 	private async save(): Promise<void> {
 		const out: Record<string, { id: number; owner: string }> = {};
 		for (const [key, id] of this.convKeys) out[key] = { id: id as number, owner: this.owners.get(id) ?? "" };
-		await writeFile(this.file, JSON.stringify(out, null, "\t"));
+		await writeStateJson(this.file, out);
 	}
 
 	private async saveMap(): Promise<void> {
-		await writeFile(this.mapFile, JSON.stringify(Object.fromEntries(this.messageMap), null, "\t"));
+		await writeStateJson(this.mapFile, Object.fromEntries(this.messageMap));
 	}
 
 	/** 记录消息锚点（进过任务线的消息都记，供后续 replyTo 跟随）。 */

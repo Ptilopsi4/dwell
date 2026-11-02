@@ -1,14 +1,13 @@
-// 用户与角色：DWELL_ADMINS / DWELL_ALLOW 播种，data/users.json 为运行时真相（/allow 热更新）。
-import { join } from "node:path";
-import { readFile, writeFile } from "node:fs/promises";
-import { DATA_DIR } from "./harness.ts";
+// 用户与角色：DWELL_ADMINS / DWELL_ALLOW 播种，state/users.json 为运行时真相（/allow 热更新）。
+import { readFile } from "node:fs/promises";
+import { stateFile, writeStateJson } from "./state.ts";
 
 export type Role = "member" | "admin";
 
 export class Users {
 	private members = new Set<string>();
 	private admins = new Set<string>();
-	private file = join(DATA_DIR, "users.json");
+	private file = stateFile("users.json");
 
 	constructor() {
 		for (const id of (process.env.DWELL_ALLOW ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
@@ -25,13 +24,14 @@ export class Users {
 			// users.json 是运行时真相：存在即整体覆盖 env 播种
 			this.members = new Set(saved.members ?? []);
 			this.admins = new Set(saved.admins ?? []);
-		} catch {
-			await this.save(); // 首次运行：把 env 播种落盘
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] users.json 损坏，角色回退为 env 播种:", err);
+			await this.save(); // 首次运行或损坏：把 env 播种落盘
 		}
 	}
 
 	private async save(): Promise<void> {
-		await writeFile(this.file, JSON.stringify({ members: [...this.members], admins: [...this.admins] }, null, "\t"));
+		await writeStateJson(this.file, { members: [...this.members], admins: [...this.admins] });
 	}
 
 	isAllowed(openId: string): boolean {
@@ -40,6 +40,10 @@ export class Users {
 
 	isAdmin(openId: string): boolean {
 		return this.admins.has(openId);
+	}
+
+	adminCount(): number {
+		return this.admins.size;
 	}
 
 	async add(openId: string, role: Role): Promise<void> {

@@ -5,5 +5,4 @@ services:
     env_file: .env
     volumes:
       - ./data:/data
-      # lark-cli 凭证持久化；容器内路径部署时以 `lark-cli auth login` 实测为准
-      - ./lark-auth:/home/dwell/.config/lark-cli
+      - ./state:/state

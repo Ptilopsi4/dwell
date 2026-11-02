@@ -3,7 +3,7 @@
 服务器常驻通用 agent：飞书 bot 进出，pi-durable 每步 checkpoint，重启续跑。
 
 - 方案与决策记录：`.pi/PLAN.md`
-- 架构：`lark-cli event consume`（NDJSON 子进程）→ 白名单/命令 → pi-durable conversation（每 chat 独立 cwd）→ GLM-5.3 → `lark-cli im` 回复
+- 架构：飞书官方 SDK Channel（单 WebSocket 收发）→ 会话路由/权限 → pi-durable conversation（多用户多线）→ GLM（zai-coding-cn）→ 流式卡片回复
 
 ## 环境变量
 
@@ -33,7 +33,6 @@ npm start         # 常驻运行
 ```sh
 cp .env.example .env   # 填 key 与白名单
 docker compose up -d --build
-# 首次：容器内完成 lark-cli 登录（凭证挂 volume 持久化）
 ```
 
 ## 多用户与安全边界
@@ -41,4 +40,5 @@ docker compose up -d --build
 - 角色：`DWELL_ADMINS`（管理员）/ `DWELL_ALLOW`（成员）播种，运行时用 `/allow <open_id> [admin]`、`/disallow <open_id>` 热更新（持久化到 `data/users.json`，重启不丢）
 - 会话路由：私聊=个人线；群聊平消息=每人独立任务线（互不污染、并行）；回复某条消息=参与该任务线；话题群=话题即任务
 - **群聊是互信域**：共享工作目录（`work/<chat_id>/`）+ 回复可参与任务线意味着参与者可访问该线上处理过的内容。敏感内容请用私聊
-- 权限：`/new` `/cancel` `/allow` `/disallow` 管理员（或线主）；审批=触发者/线主/管理员；白名单外回复固定提示
+- 权限：`/new` `/cancel` `/status` 管理员（或线主）；审批=触发者/线主/管理员；白名单外回复固定提示
+- 安全：敏感凭证启动后从进程环境移除（bash 工具 `printenv` 拿不到）；状态文件在 agent 可写域之外

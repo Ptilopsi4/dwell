@@ -19,12 +19,15 @@ export function setApprovalCallback(fn: (conversationId: number, sender: string,
 
 const DANGEROUS: RegExp[] = [
 	/\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*)\b/i,
-	/\bssh\b|\bscp\b|\brsync\b.*-e.*ssh/,
-	/curl[^|]*\s(-d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/,
+	/\bssh\b|\bscp\b|\brsync\b.*(-e\s*ssh|@)/,
+	/curl[^|]*\s(-[a-z]*d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/,
 	/wget[^|]*--post/,
 	/npm\s+install\s+-g|apt(-get)?\s+install|pip3?\s+install/,
 	/\bdocker\b|\bsystemctl\b|\bcrontab\b/,
 ];
+
+/** 状态文件名兑底：路径已移出 agent 可写域，此检查防 cwd 相对猜测（减速带非硬墙）。 */
+const STATE_FILES = /users\.json|sessions\.json|message-map\.json|(\/|\.)state\//;
 
 /** 返回命中的敏感片段（如 "rm -rf"），未命中返回 null。 */
 export function dangerMatch(command: string): string | null {
@@ -59,9 +62,12 @@ export function makeApprovalExtension() {
 				beforeTool: (call, api) => {
 					if (call.name !== "bash") return undefined;
 					const command = (call.arguments as { command?: string }).command ?? "";
+					if (STATE_FILES.test(command)) {
+						return { block: "不允许访问服务状态文件。" };
+					}
 					// sudo 在本环境永不可能成功（NoNewPrivileges + dwell 无 sudo 组），直接说明，不走审批
 					if (/\bsudo\b/.test(command)) {
-						return { block: "dwell 用户无 sudo 权限（服务以 no-new-privileges 运行），此命令无法执行。向用户说明并改用不需要提权的方案。" };
+						return { block: "dwell 用户无 sudo 权限（服务以非 root 运行），此命令无法执行。向用户说明并改用不需要提权的方案。" };
 					}
 					const match = dangerMatch(command);
 					if (match === null) return undefined;
