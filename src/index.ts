@@ -6,7 +6,7 @@ import { openDwell } from "./harness.ts";
 import { Sessions } from "./sessions.ts";
 import { startEventLoop, type LarkMessage } from "./feishu/consumer.ts";
 import { lark, sendText, splitMessage, updateCard } from "./feishu/reply.ts";
-import { approvals, setApprovalCallback } from "./ext/approval.ts";
+import { approvals, pendingApprovals, setApprovalCallback } from "./ext/approval.ts";
 
 type ReplyTarget = { chat_id: string; message_id: string };
 
@@ -130,29 +130,48 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 	}
 }
 
-/** 发送带按钮的审批卡片（Card 2.0）。 */
-function sendApprovalCard(chatId: string, conversationId: number, command: string, match: string): void {
+/** 审批卡片（Card 2.0）：request 待审；approved/denied 为点击后的形态（选中钮实心禁用，其余灰禁用）。 */
+function approvalCard(conversationId: number, command: string, match: string, state: { kind: "request" } | { kind: "approved"; minutes: number } | { kind: "denied" }): Record<string, unknown> {
 	const value = (action: string, minutes = 0) => JSON.stringify({ action, minutes, conversationId });
-	const card = {
+	const done = state.kind !== "request";
+	const header = state.kind === "denied"
+		? { title: { tag: "plain_text", content: "已拒绝" }, template: "red" }
+		: state.kind === "approved"
+			? { title: { tag: "plain_text", content: `已批准 · ${state.minutes} 分钟` }, template: "green" }
+			: { title: { tag: "plain_text", content: "需要你的批准" }, template: "grey", icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" } };
+	// 三个按钮：request 时可点；结束后选中者实心+文案更新，全部 disabled
+	const chosen = state.kind === "approved" ? state.minutes : 0;
+	const buttons = [
+		{ text: chosen === 10 || state.kind === "denied" ? "已批准 10 分钟" : "批准 10 分钟", type: chosen === 10 ? "primary_filled" : "primary" },
+		{ text: chosen === 30 || state.kind === "denied" ? "已批准 30 分钟" : "批准 30 分钟", type: chosen === 30 ? "primary_filled" : "primary" },
+		{ text: state.kind === "denied" ? "已拒绝" : "拒绝", type: state.kind === "denied" ? "danger_filled" : "danger" },
+	];
+	return {
 		schema: "2.0",
 		config: { width_mode: "fill" },
-		header: {
-			title: { tag: "plain_text", content: "需要你的批准" },
-			text_tag_list: [
-				{ tag: "text_tag", text: { tag: "plain_text", content: match }, color: "carmine" },
-			],
-			template: "grey",
-			icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" },
-		},
+		header: { ...header, text_tag_list: [{ tag: "text_tag", text: { tag: "plain_text", content: match }, color: "carmine" }] },
 		body: { elements: [
 			{ tag: "markdown", content: `即将执行：\n\`\`\`bash\n${command.slice(0, 300)}\n\`\`\`` },
-			{ tag: "column_set", horizontal_spacing: "large", columns: [
-				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 10 分钟" }, type: "primary", width: "fill", value: value("approve", 10) }] },
-				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 30 分钟" }, type: "primary", width: "fill", value: value("approve", 30) }] },
-				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "danger", width: "fill", value: value("deny") }] },
-			] },
+			{ tag: "column_set", horizontal_spacing: "large", columns: buttons.map((b, i) => ({
+				tag: "column",
+				width: "weighted",
+				weight: 1,
+				elements: [{
+					tag: "button",
+					text: { tag: "plain_text", content: b.text },
+					type: b.type,
+					width: "fill",
+					...(done ? { disabled: true, disabled_tips: { tag: "plain_text", content: "审批已结束" } } : {}),
+					value: value(i === 2 ? "deny" : "approve", i === 0 ? 10 : 30),
+				}],
+			})) },
 		] },
 	};
+}
+
+/** 发送待审审批卡片。 */
+function sendApprovalCard(chatId: string, conversationId: number, command: string, match: string): void {
+	const card = approvalCard(conversationId, command, match, { kind: "request" });
 	void lark(["im", "+messages-send", "--as", "bot", "--chat-id", chatId, "--msg-type", "interactive", "--content", "-"], JSON.stringify(card))
 		.catch((err) => console.error("[dwell] 审批卡片发送失败:", err));
 }
@@ -186,12 +205,11 @@ async function handleCardAction(raw: Record<string, unknown>): Promise<void> {
 
 	if (e.token !== undefined) {
 		const minutes = v.minutes ?? 10;
-		void updateCard({
-			token: e.token,
-			header: v.action === "approve" ? `已批准 · ${minutes} 分钟` : "已拒绝",
-			template: v.action === "approve" ? "green" : "red",
-			lines: [],
-		}).catch(() => {});
+		const pending = pendingApprovals.get(conversationId);
+		if (pending !== undefined) {
+			const state = v.action === "approve" ? { kind: "approved" as const, minutes } : { kind: "denied" as const };
+			void updateCard({ token: e.token, card: approvalCard(conversationId, pending.command, pending.match, state) }).catch(() => {});
+		}
 	}
 
 	if (v.action === "approve") {

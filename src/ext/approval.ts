@@ -5,6 +5,9 @@ import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 /** conversationId → 审批窗口到期时间戳（ms）。进程内存即可：重启丢窗口，最坏是重新批一次。 */
 export const approvals = new Map<number, number>();
 
+/** 最近一次待审批命令的上下文（卡片点击后更新卡片形态用）。 */
+export const pendingApprovals = new Map<number, { command: string; match: string }>();
+
 /** 审批请求回调（index.ts 注册：转发到飞书提醒用户）。 */
 export let onApprovalNeeded: ((conversationId: number, command: string, match: string) => void) | null = null;
 
@@ -57,6 +60,7 @@ export function makeApprovalExtension() {
 					if (match === null) return undefined;
 					if (windowOpen(api.conversationId)) return undefined;
 					// 放行与否由窗口决定；通知走回调，不阻塞 hook
+					pendingApprovals.set(api.conversationId, { command, match });
 					onApprovalNeeded?.(api.conversationId, command, match);
 					return { block: `该命令被审批策略拦截（${match}）。请明确告诉用户：回复 /approve 批准（默认 10 分钟窗口）或 /deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
 				},

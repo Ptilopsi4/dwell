@@ -3,24 +3,14 @@ import { exec } from "node:child_process";
 
 export interface CardUpdate {
 	token: string;
-	header: string;
-	template: string;
-	lines: string[];
+	/** 完整的新卡片 JSON（延时更新要求整卡替换） */
+	card: Record<string, unknown>;
 }
 
 /** 更新已发送的交互卡片（延时更新 API，token 30 分钟内最多 2 次）。 */
-export function updateCard(card: CardUpdate): Promise<string> {
+export function updateCard(update: CardUpdate): Promise<string> {
 	return lark(["api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot", "--data", "-"],
-		JSON.stringify({ token: card.token, card: simpleCard(card.header, card.template, card.lines) }));
-}
-
-/** Card 2.0 展示型卡片（无按钮）。lines 为空则只留标题。 */
-export function simpleCard(header: string, template: string, lines: string[]): Record<string, unknown> {
-	return {
-		schema: "2.0",
-		header: { title: { tag: "plain_text", content: header }, template },
-		...(lines.length > 0 ? { body: { elements: [{ tag: "markdown", content: lines.join("\n") }] } } : {}),
-	};
+		JSON.stringify({ token: update.token, card: update.card }));
 }
 
 /** 跑一条 lark-cli 命令，stdin 传内容。失败抛错并带 stderr。 */
