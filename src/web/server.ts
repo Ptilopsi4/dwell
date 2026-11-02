@@ -42,7 +42,7 @@ export function startPanel({ harness, sessions, port, token }: PanelOptions): vo
 		if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
 			void readFile(panelFile, "utf8")
 				.then((html) => {
-					res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+					res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
 					res.end(html);
 				})
 				.catch(() => json(res, 500, { error: "panel missing" }));

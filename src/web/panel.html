@@ -198,7 +198,7 @@ function renderEntry(entry) {
 		if (text) {
 			const el = msg("dwell", "dwell", "", null);
 			const body = el.querySelector(".body");
-			body.style.whiteSpace = "normal";
+			body.style.whiteSpace = "pre-line";
 			body.innerHTML = mdRender(text);
 			return el;
 		}
@@ -237,9 +237,9 @@ function mdRender(text) {
 	const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 	return esc
 		.replace(/```([\s\S]*?)```/g, function (_, c) {
-			return '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;white-space:pre-wrap;display:block;padding:6px 0">' + c.replace(/^\n/, "") + "</span>";
+			return '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;white-space:pre-wrap;display:block;padding:6px 10px;background:var(--sel);border-radius:4px">' + c.replace(/^\n/, "") + "</span>";
 		})
-		.replace(/`([^`\n]+)`/g, '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px">$1</span>')
+		.replace(/`([^`\n]+)`/g, '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;background:var(--sel);padding:1px 4px;border-radius:3px">$1</span>')
 		.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
 }
 
