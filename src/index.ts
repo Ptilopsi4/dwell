@@ -145,7 +145,7 @@ function sendApprovalCard(chatId: string, conversationId: number, command: strin
 			icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" },
 		},
 		body: { elements: [
-			{ tag: "markdown", content: `dwell 要执行：\n\`\`\`bash\n${command.slice(0, 300)}\n\`\`\`` },
+			{ tag: "markdown", content: `即将执行：\n\`\`\`bash\n${command.slice(0, 300)}\n\`\`\`` },
 			{ tag: "column_set", horizontal_spacing: "large", columns: [
 				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 10 分钟" }, type: "primary", width: "fill", value: value("approve", 10) }] },
 				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 30 分钟" }, type: "primary", width: "fill", value: value("approve", 30) }] },
