@@ -62,7 +62,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 	try {
 		if (msg.rawContentType !== "text" || msg.content.trim() === "") return;
 		if (!users.isAllowed(msg.senderId)) {
-			await channel.send(msg.chatId, { text: "未授权使用，请联系管理员开通。" }, { replyTo: msg.messageId });
+			await channel.send(msg.chatId, { text: `未授权使用。你的 ID：${msg.senderId}\n请联系管理员执行：/allow ${msg.senderId}` }, { replyTo: msg.messageId });
 			return;
 		}
 
@@ -136,6 +136,9 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 	const isOwner = msg.senderId === owner;
 
 	switch (cmd) {
+		case "/whoami":
+			await replyTo(target, `你的 ID：${msg.senderId}${users.isAdmin(msg.senderId) ? "（管理员）" : ""}`);
+			break;
 		case "/new":
 			if (!isOwner && !admin) {
 				await replyTo(target, `这是 ${owner === msg.senderId ? "你" : "其他人"}的任务线，仅线主或管理员可重置。`);
