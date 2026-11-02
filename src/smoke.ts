@@ -1,4 +1,4 @@
-// 冒烟测试：提问一句，打印答案。有 DEEPSEEK_API_KEY 走真实链路；没有则用 faux 模型验证 durable 装配（storage/工具/checkpoint）。
+// 冒烟测试：提问一句，打印答案。有 ZAI_CODING_CN_API_KEY 走真实链路；没有则用 faux 模型验证 durable 装配（storage/工具/checkpoint）。
 // 用法：node src/smoke.ts "你的问题"
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -11,10 +11,10 @@ const prompt = process.argv[2] ?? "用一句话介绍你自己，然后列出你
 
 let harness;
 let model = MODEL;
-if (process.env.DEEPSEEK_API_KEY) {
+if (process.env.ZAI_CODING_CN_API_KEY) {
 	harness = await openDwell();
 } else {
-	console.error("（DEEPSEEK_API_KEY 未设置，用 faux 模型验证 durable 链路）");
+	console.error("（ZAI_CODING_CN_API_KEY 未设置，用 faux 模型验证 durable 链路）");
 	const faux = fauxProvider();
 	faux.setResponses([fauxAssistantMessage([fauxText("[faux] dwell 链路正常：装配、SQLite storage、提交与等待均工作。")])]);
 	const models = createModels();

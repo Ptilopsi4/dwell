@@ -1,6 +1,6 @@
 // chat_id ↔ conversation 映射。低频写，JSON 文件写穿足够，不进 SQLite。
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { DATA_DIR, MODEL } from "./harness.ts";
@@ -37,7 +37,7 @@ export class Sessions {
 			if (found !== undefined) return found;
 		}
 
-		const cwd = join(DATA_DIR, "work", chatId);
+		const cwd = resolve(join(DATA_DIR, "work", chatId));
 		await mkdir(cwd, { recursive: true });
 		const conversation = await this.harness.createConversation(
 			{ ownership: { kind: "ownerless" }, agent: { model: MODEL, cwd } },

@@ -11,7 +11,7 @@
 |---|---|
 | `DEEPSEEK_API_KEY` | DeepSeek 凭证（必填） |
 | `DWELL_ALLOW` | 飞书 open_id 白名单，逗号分隔（不设则拒绝所有消息） |
-| `DWELL_MODEL` | 模型 id，默认 `deepseek-flash` |
+| `DWELL_MODEL` | 模型 id，默认 `glm-5.3` |
 | `DWELL_DATA` | 数据目录（sqlite/sessions/会话工作目录），默认 `./data`，容器内 `/data` |
 
 ## 飞书命令
