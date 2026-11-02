@@ -1,4 +1,4 @@
-// 危险命令审批（简版 Mandate）：bash 危险模式默认 block，用户 -approve 开启会话级时间窗后放行。
+// 危险命令审批（简版 Mandate）：bash 危险模式默认 block，用户 /approve 开启会话级时间窗后放行。
 // 时间窗即授权范围——批准一次，窗口内该会话不再逐条问（借 dsh-superagent Mandate 思想）。
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 
@@ -18,7 +18,7 @@ const DANGEROUS: RegExp[] = [
 	/curl[^|]*\s(-d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/,
 	/wget[^|]*--post/,
 	/npm\s+install\s+-g|apt(-get)?\s+install|pip3?\s+install/,
-	/\bdocker\b|\b systemctl\b|\bcrontab\b/,
+	/\bdocker\b|\bsystemctl\b|\bcrontab\b/,
 ];
 
 /** 返回命中的敏感片段（如 "rm -rf"），未命中返回 null。 */

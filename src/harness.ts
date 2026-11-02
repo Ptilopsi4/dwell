@@ -1,4 +1,4 @@
-// dwell harness 装配：SQLite storage + DeepSeek + CodingTools + dwell 系统提示。
+// dwell harness 装配：SQLite storage + zai-coding-cn (GLM) + CodingTools + dwell 系统提示。
 // 全部配置来自环境变量，见 README。
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";

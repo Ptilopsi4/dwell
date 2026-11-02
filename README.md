@@ -3,13 +3,13 @@
 服务器常驻通用 agent：飞书 bot 进出，pi-durable 每步 checkpoint，重启续跑。
 
 - 方案与决策记录：`.pi/PLAN.md`
-- 架构：`lark-cli event consume`（NDJSON 子进程）→ 白名单/命令 → pi-durable conversation（每 chat 独立 cwd）→ DeepSeek → `lark-cli im` 回复
+- 架构：`lark-cli event consume`（NDJSON 子进程）→ 白名单/命令 → pi-durable conversation（每 chat 独立 cwd）→ GLM-5.3 → `lark-cli im` 回复
 
 ## 环境变量
 
 | 变量 | 说明 |
 |---|---|
-| `DEEPSEEK_API_KEY` | DeepSeek 凭证（必填） |
+| `ZAI_CODING_CN_API_KEY` | 智谱 Coding Plan 凭证（必填） |
 | `DWELL_ALLOW` | 飞书 open_id 白名单，逗号分隔（不设则拒绝所有消息） |
 | `DWELL_MODEL` | 模型 id，默认 `glm-5.3` |
 | `DWELL_DATA` | 数据目录（sqlite/sessions/会话工作目录），默认 `./data`，容器内 `/data` |
