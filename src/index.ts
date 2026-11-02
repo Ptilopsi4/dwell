@@ -73,7 +73,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };
 		if (degraded) {
-			await replyTo(target, "（原任务线已归档，已开启新任务线）");
+			await replyTo(target, "原任务线已归档，这条作为新任务开始。");
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
@@ -152,7 +152,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			break;
 		case "/new":
 			if (!isOwner && !admin) {
-				await replyTo(target, `这是 ${owner === msg.senderId ? "你" : "其他人"}的任务线，仅线主或管理员可重置。`);
+				await replyTo(target, "这是他人的任务线，仅线主或管理员可重置。");
 				return;
 			}
 			await conversation.reset(undefined, context);
@@ -164,8 +164,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			break;
 		}
 		case "/cancel":
-			if (!admin) {
-				await replyTo(target, "群聊中 /cancel 仅管理员可用（会中止当前任务线）。");
+			if (!isOwner && !admin) {
+				await replyTo(target, "仅线主或管理员可中止当前任务。");
 				return;
 			}
 			await conversation.abort(context);
@@ -185,13 +185,15 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			break;
 		}
 		case "/deny":
-			if (!admin) {
-				approvals.delete(windowKey(convId, msg.senderId));
-				await replyTo(target, "已关闭你的批准窗口。");
+			if (admin) {
+				// 管理员：关闭该任务线全部窗口（救场）
+				const prefix = `${convId}:`;
+				for (const k of approvals.keys()) if (k.startsWith(prefix)) approvals.delete(k);
+				await replyTo(target, "已关闭本任务线的全部批准窗口。");
 				return;
 			}
 			approvals.delete(windowKey(convId, msg.senderId));
-			await replyTo(target, "已关闭批准窗口。");
+			await replyTo(target, "已关闭你的批准窗口。");
 			break;
 		case "/allow": {
 			if (!admin) {
@@ -204,7 +206,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				return;
 			}
 			await users.add(who.id, parts[2] === "admin" ? "admin" : "member");
-			await replyTo(target, `已添加 ${who.name} 为${parts[2] === "admin" ? "管理员" : "成员"}（立即生效，已持久化）。`);
+			await replyTo(target, `已添加 ${who.name} 为${parts[2] === "admin" ? "管理员" : "成员"}（立即生效）。`);
 			break;
 		}
 		case "/disallow": {
