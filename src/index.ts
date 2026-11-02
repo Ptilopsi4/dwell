@@ -125,7 +125,18 @@ async function replyTo(target: ReplyTarget, text: string): Promise<void> {
 	await channel.send(target.chatId, { markdown: text }, { replyTo: target.messageId });
 }
 
-/** 命令权限矩阵：/new owner|admin；/cancel 自己|admin；/allow /deny admin（/deny 自己的窗口也可）。 */
+/** 命令参数解析：@提及（mentions 占位符）→ openId+姓名；否则原样返回。 */
+function resolveArg(parts: string[], msg: NormalizedMessage): { id: string; name: string } | null {
+	const arg = parts[1];
+	if (arg === undefined) return null;
+	const mention = msg.mentions.find((m) => m.key === arg || arg.includes(m.key));
+	if (mention !== undefined && mention.openId !== undefined) {
+		return { id: mention.openId, name: mention.name ?? mention.openId };
+	}
+	return { id: arg, name: arg };
+}
+
+/** 命令权限矩阵：/new owner|admin；/cancel admin；/allow /deny admin。 */
 async function runCommand(text: string, conversation: Conversation, msg: NormalizedMessage, target: ReplyTarget): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	const parts = text.split(/\s+/);
@@ -187,13 +198,13 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "/allow 仅管理员可用。");
 				return;
 			}
-			const openId = parts[1];
-			if (openId === undefined || !openId.startsWith("ou_")) {
-				await replyTo(target, "用法：/allow <open_id> [admin]");
+			const who = resolveArg(parts, msg);
+			if (who === null || !who.id.startsWith("ou_")) {
+				await replyTo(target, "用法：/allow @某人 [admin]");
 				return;
 			}
-			await users.add(openId, parts[2] === "admin" ? "admin" : "member");
-			await replyTo(target, `已添加 ${openId} 为 ${parts[2] === "admin" ? "管理员" : "成员"}（立即生效，已持久化）。`);
+			await users.add(who.id, parts[2] === "admin" ? "admin" : "member");
+			await replyTo(target, `已添加 ${who.name} 为${parts[2] === "admin" ? "管理员" : "成员"}（立即生效，已持久化）。`);
 			break;
 		}
 		case "/disallow": {
@@ -201,16 +212,17 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "/disallow 仅管理员可用。");
 				return;
 			}
-			if (parts[1] === undefined) {
-				await replyTo(target, "用法：/disallow <open_id>");
+			const who = resolveArg(parts, msg);
+			if (who === null) {
+				await replyTo(target, "用法：/disallow @某人");
 				return;
 			}
-			await users.remove(parts[1]);
-			await replyTo(target, `已移除 ${parts[1]}。`);
+			await users.remove(who.id);
+			await replyTo(target, `已移除 ${who.name}。`);
 			break;
 		}
 		default:
-			await replyTo(target, `未知命令 ${cmd}。可用：/new /status /cancel /approve [分钟] /deny /allow <id> [admin] /disallow <id>`);
+			await replyTo(target, `未知命令 ${cmd}。可用：/whoami /new /status /cancel /approve [分钟] /deny /allow @某人 [admin] /disallow @某人`);
 	}
 }
 
