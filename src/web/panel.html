@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dwell panel</title>
+<style>
+:root[data-theme="dark"] {
+	--bg: #101418; --fg: #d7dde3; --dim: #78838d; --line: #232a31;
+	--accent: #6fb3e0; --user: #c8a97e; --tool: #8fbf9f; --err: #e08f8f;
+	--input-bg: #161b21; --sel: #1c232a;
+}
+:root[data-theme="light"] {
+	--bg: #fafafa; --fg: #24292f; --dim: #6a737d; --line: #e4e8eb;
+	--accent: #2b6ea6; --user: #8a6d3b; --tool: #3d7a52; --err: #b35555;
+	--input-bg: #f0f2f4; --sel: #e9edf0;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+	background: var(--bg); color: var(--fg);
+	font: 14px/1.65 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+	display: flex; flex-direction: column;
+}
+header {
+	display: flex; align-items: center; gap: 12px;
+	padding: 10px 20px; border-bottom: 1px solid var(--line); flex: none;
+}
+header .brand { font-weight: 600; letter-spacing: .5px; }
+header .brand .dot { color: var(--accent); }
+select, button {
+	background: var(--input-bg); color: var(--fg); border: 1px solid var(--line);
+	border-radius: 4px; padding: 4px 10px; font: inherit; cursor: pointer;
+}
+select { max-width: 320px; }
+#theme { margin-left: auto; color: var(--dim); font-family: inherit; }
+#status { font-size: 12px; color: var(--dim); }
+#status.on { color: var(--ok); }
+
+main { flex: 1; overflow-y: auto; padding: 18px 20px 28px; }
+.msg { display: grid; grid-template-columns: 64px 1fr; gap: 14px; padding: 7px 0; }
+.msg + .msg { border-top: 1px solid var(--line); }
+.msg .who {
+	font: 600 12px/1.9 ui-monospace, "Cascadia Code", Consolas, monospace;
+	color: var(--dim); text-align: right; user-select: none;
+}
+.msg.user .who { color: var(--user); }
+.msg.dwell .who { color: var(--accent); }
+.msg .body { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+.msg.tool .who { color: var(--tool); }
+.msg.tool .body {
+	font: 12.5px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--tool);
+}
+.msg.tool.err .body { color: var(--err); }
+.msg .meta { font-size: 11.5px; color: var(--dim); margin-top: 2px; grid-column: 2; }
+.msg.user .body { border-left: 2px solid var(--user); padding-left: 10px; }
+.msg.dwell .body { max-width: 88ch; }
+.msg.tool .body { color: var(--fg); opacity: .85; }
+.msg.tool-call + .msg.tool { border-top: 0; }
+main:has(.empty) { display: flex; }
+main:has(.empty) .empty { margin: auto; }
+#live {
+	display: none; padding: 10px 20px; border-top: 1px solid var(--line);
+	color: var(--dim); font-size: 12.5px; flex: none;
+}
+#live.on { display: block; }
+#live .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--dim);
+	border-top-color: transparent; border-radius: 50%; margin-right: 8px;
+	animation: r 0.9s linear infinite; vertical-align: -1px; }
+@keyframes r { to { transform: rotate(360deg); } }
+
+footer {
+	display: flex; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); flex: none;
+}
+#input {
+	flex: 1; background: var(--input-bg); color: var(--fg);
+	border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px; font: inherit;
+	resize: none; min-height: 40px; max-height: 160px;
+}
+#input:focus { outline: 1px solid var(--accent); }
+#errline { display: none; padding: 0 20px 8px; color: var(--err); font-size: 12px; flex: none; }
+#send { padding: 0 22px; }
+#send:disabled { opacity: .5; cursor: default; }
+.empty { color: var(--dim); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+	<span class="brand">dwell<span class="dot">_</span>panel</span>
+	<select id="conv" title="会话线"></select>
+	<span id="status">连接中…</span>
+	<button id="theme" title="切换主题">☀</button>
+</header>
+<main id="main"><div class="empty">选择会话线后显示对话</div></main>
+<div id="live"><span class="spin"></span><span id="liveText">运行中</span></div>
+<div id="errline"></div>
+<footer>
+	<textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
+	<button id="send">发送</button>
+</footer>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const token = params.get("token") ?? "";
+const HEAD = { "x-panel-token": token, "content-type": "application/json" };
+let convId = null, es = null, rendered = new Set(), sending = false;
+
+// 主题
+const applyTheme = (t) => {
+	document.documentElement.dataset.theme = t;
+	$("theme").textContent = t === "dark" ? "☀" : "🌙";
+	localStorage.setItem("dwell-theme", t);
+};
+applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
+$("theme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+$("theme").textContent = document.documentElement.dataset.theme === "dark" ? "◑" : "◐";
+
+// 会话列表
+async function loadConvs() {
+	const res = await fetch(`/api/conversations?token=${encodeURIComponent(token)}`);
+	const list = await res.json();
+	const sel = $("conv");
+	sel.innerHTML = "";
+	for (const c of list) {
+		const opt = document.createElement("option");
+		opt.value = c.id;
+		const short = c.key.length > 36 ? c.key.slice(0, 34) + "…" : c.key;
+		opt.textContent = `#${c.id} ${short}`;
+		sel.appendChild(opt);
+	}
+	if (list.length > 0) {
+		const saved = localStorage.getItem("dwell-conv");
+		const hit = list.find((c) => String(c.id) === saved);
+		sel.value = hit ? hit.id : list[list.length - 1].id;
+		switchConv(sel.value);
+	}
+}
+$("conv").onchange = (e) => { localStorage.setItem("dwell-conv", e.target.value); switchConv(e.target.value); };
+
+function disconnect() { if (es) { es.close(); es = null; } rendered = new Set(); }
+
+function switchConv(id) {
+	convId = id;
+	disconnect();
+	$("main").innerHTML = "";
+	es = new EventSource(`/api/events?conv=${id}&token=${encodeURIComponent(token)}`);
+	es.addEventListener("sync", (e) => { $("status").textContent = "已连接"; $("status").classList.add("on"); render(JSON.parse(e.data)); });
+	es.onerror = () => { $("status").textContent = "重连中…"; $("status").classList.remove("on"); };
+}
+
+function render(data) {
+	const main = $("main");
+	const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 48;
+	const empty = main.querySelector(".empty"); if (empty) empty.remove();
+	for (const entry of data.entries ?? []) {
+		if (rendered.has(entry.id)) continue;
+		rendered.add(entry.id);
+		const node = renderEntry(entry);
+		if (node) main.appendChild(node);
+	}
+	// live 状态
+	const live = data.live ?? {};
+	const busy = live.run !== undefined;
+	$("live").classList.toggle("on", busy);
+	if (busy) {
+		const tools = (live.tools ?? []).map((t) => `${t.name}:${t.status}`);
+		const partial = (live.generation?.message?.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+		$("liveText").textContent = tools.length > 0 ? `运行中 · ${tools.join(" ")}` : (partial ? "生成中…" : "运行中");
+	}
+	if (nearBottom) main.scrollTop = main.scrollHeight;
+}
+
+function renderEntry(entry) {
+	const msg = (cls, who, body, meta) => {
+		const el = document.createElement("div");
+		el.className = `msg ${cls}`;
+		el.innerHTML = `<span class="who"></span><div class="body"></div>`;
+		el.querySelector(".who").textContent = who;
+		el.querySelector(".body").textContent = body;
+		if (meta) {
+			const m = document.createElement("div"); m.className = "meta"; m.textContent = meta;
+			el.appendChild(m);
+		}
+		return el;
+	};
+	const model = entry.model?.[0];
+	if (entry.kind === "pi.user") {
+		const name = entry.data?.senderName || entry.data?.sender || "";
+		return msg("user", name ? String(name).slice(0, 8) : "user", contentText(model?.content), null);
+	}
+	if (entry.kind === "pi.assistant") {
+		const parts = model?.content ?? [];
+		const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("");
+		if (text) {
+			const el = msg("dwell", "dwell", "", null);
+			const body = el.querySelector(".body");
+			body.style.whiteSpace = "normal";
+			body.innerHTML = mdRender(text);
+			return el;
+		}
+		const calls = parts.filter((c) => c.type === "toolCall");
+		if (calls.length > 0) {
+			const el = document.createElement("div");
+			el.className = "msg tool";
+			el.innerHTML = `<span class="who">tool</span><div class="body"></div>`;
+			el.querySelector(".body").textContent = calls.map((c) => `${c.name} · ${summaryArgs(c.arguments)}`).join("\n");
+			return el;
+		}
+		return null;
+	}
+	if (entry.kind === "pi.tool-result") {
+		const err = (entry.data?.diagnostics ?? []).length > 0;
+		const raw = contentText(model?.content);
+		let body = raw.length > 400 ? raw.slice(0, 400).replace(/\n[^\n]*$/, "") + "\n…（已截断，共 " + raw.length + " 字符）" : raw;
+		if (body === "") body = err ? "（错误，无输出）" : "";
+		return msg(err ? "tool err" : "tool", "↳", body, entry.model?.[0]?.toolName ?? "");
+	}
+	if (entry.kind === "panel.message" || entry.kind === "chat.message") {
+		return msg("user", "user", contentText(model?.content), null);
+	}
+	return null;
+}
+function contentText(content) {
+	return (content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+}
+function summaryArgs(a) {
+	const s = a?.command ?? a?.path ?? JSON.stringify(a) ?? "";
+	const t = String(s).replace(/\s+/g, " ");
+	return t.length > 72 ? t.slice(0, 72) + "…" : t;
+}
+// 轻量 Markdown（先转义再替换标记，保持 textContent 级安全）
+function mdRender(text) {
+	const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	return esc
+		.replace(/```([\s\S]*?)```/g, function (_, c) {
+			return '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;white-space:pre-wrap;display:block;padding:6px 0">' + c.replace(/^\n/, "") + "</span>";
+		})
+		.replace(/`([^`\n]+)`/g, '<span style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px">$1</span>')
+		.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+}
+
+// 发送
+async function send() {
+	const text = $("input").value.trim();
+	if (!text || sending || convId === null) return;
+	sending = true; $("send").disabled = true;
+	try {
+		const res = await fetch(`/api/send?token=${encodeURIComponent(token)}`, {
+			method: "POST", headers: HEAD,
+			body: JSON.stringify({ conv: Number(convId), content: text }),
+		});
+		if (!res.ok) throw new Error(await res.text());
+		$("input").value = ""; $("input").style.height = "";
+	} catch (err) { flashErr("发送失败: " + err.message); }
+	sending = false; $("send").disabled = false; $("input").focus();
+}
+function flashErr(text) {
+	$("errline").textContent = text;
+	$("errline").style.display = "block";
+	setTimeout(() => { $("errline").style.display = "none"; }, 3000);
+}
+$("send").onclick = send;
+$("input").addEventListener("keydown", (e) => {
+	if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+$("input").addEventListener("input", function () {
+	this.style.height = ""; this.style.height = Math.min(this.scrollHeight, 160) + "px";
+});
+
+loadConvs();
+</script>
+</body>
+</html>

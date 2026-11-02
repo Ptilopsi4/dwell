@@ -85,6 +85,11 @@ export class Sessions {
 		return undefined;
 	}
 
+	/** panel 用：全部会话线概览（不含 owner 之外的敏感信息）。 */
+	listConversations(): { id: number; key: string; owner: string }[] {
+		return [...this.convKeys.entries()].map(([key, id]) => ({ id: id as number, key, owner: this.owners.get(id) ?? "" }));
+	}
+
 	private async create(key: string, owner: string, cwdName: string): Promise<Conversation> {
 		const context = BACKGROUND_CONTEXT;
 		const cwd = resolve(join(DATA_DIR, "work", cwdName));
