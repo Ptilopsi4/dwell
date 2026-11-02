@@ -1,7 +1,9 @@
 FROM node:26-slim
 
-# lark-cli（官方 npm 包），供事件消费与消息回复
-RUN npm install -g @larksuite/cli
+# lark-cli（官方 npm 包）的 postinstall 需要 curl 下载二进制，slim 镜像不带
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @larksuite/cli
 
 WORKDIR /app
 COPY package.json package-lock.json ./
