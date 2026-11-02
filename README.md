@@ -35,3 +35,10 @@ cp .env.example .env   # 填 key 与白名单
 docker compose up -d --build
 # 首次：容器内完成 lark-cli 登录（凭证挂 volume 持久化）
 ```
+
+## 多用户与安全边界
+
+- 角色：`DWELL_ADMINS`（管理员）/ `DWELL_ALLOW`（成员）播种，运行时用 `/allow <open_id> [admin]`、`/disallow <open_id>` 热更新（持久化到 `data/users.json`，重启不丢）
+- 会话路由：私聊=个人线；群聊平消息=每人独立任务线（互不污染、并行）；回复某条消息=参与该任务线；话题群=话题即任务
+- **群聊是互信域**：共享工作目录（`work/<chat_id>/`）+ 回复可参与任务线意味着参与者可访问该线上处理过的内容。敏感内容请用私聊
+- 权限：`/new` `/cancel` `/allow` `/disallow` 管理员（或线主）；审批=触发者/线主/管理员；白名单外回复固定提示

@@ -1,17 +1,19 @@
-// 危险命令审批（简版 Mandate）：bash 危险模式默认 block，用户 /approve 开启会话级时间窗后放行。
-// 时间窗即授权范围——批准一次，窗口内该会话不再逐条问（借 dsh-superagent Mandate 思想）。
+// 危险命令审批（简版 Mandate）：bash 危险模式默认 block，审批窗口内放行。
+// 窗口键 = (conversationId, sender)：谁触发谁申请，互不搭车。
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 
-/** conversationId → 审批窗口到期时间戳（ms）。进程内存即可：重启丢窗口，最坏是重新批一次。 */
-export const approvals = new Map<number, number>();
+/** conversationId → 当前 run 的发起者（submit 前设置，run 归属判定用）。 */
+export const runSender = new Map<number, string>();
 
-/** 最近一次待审批命令的上下文（卡片点击后更新卡片形态用）。 */
-export const pendingApprovals = new Map<number, { command: string; match: string }>();
+/** 审批窗口：(conversationId, sender) → 到期时间戳。 */
+export const approvals = new Map<string, number>();
 
-/** 审批请求回调（index.ts 注册：转发到飞书提醒用户）。 */
-export let onApprovalNeeded: ((conversationId: number, command: string, match: string) => void) | null = null;
+/** 待审批上下文：key 同审批窗口，卡片点击后更新形态 / 校验归属用。 */
+export const pendingApprovals = new Map<string, { command: string; match: string; trigger: string; conversationOwner?: string }>();
 
-export function setApprovalCallback(fn: (conversationId: number, command: string, match: string) => void): void {
+export let onApprovalNeeded: ((conversationId: number, sender: string, command: string, match: string) => void) | null = null;
+
+export function setApprovalCallback(fn: (conversationId: number, sender: string, command: string, match: string) => void): void {
 	onApprovalNeeded = fn;
 }
 
@@ -33,11 +35,16 @@ export function dangerMatch(command: string): string | null {
 	return null;
 }
 
-export function windowOpen(conversationId: number): boolean {
-	const expiry = approvals.get(conversationId);
+export function windowKey(conversationId: number, sender: string): string {
+	return `${conversationId}:${sender}`;
+}
+
+export function windowOpen(conversationId: number, sender: string): boolean {
+	const key = windowKey(conversationId, sender);
+	const expiry = approvals.get(key);
 	if (expiry === undefined) return false;
 	if (expiry < Date.now()) {
-		approvals.delete(conversationId);
+		approvals.delete(key);
 		return false;
 	}
 	return true;
@@ -58,11 +65,12 @@ export function makeApprovalExtension() {
 					}
 					const match = dangerMatch(command);
 					if (match === null) return undefined;
-					if (windowOpen(api.conversationId)) return undefined;
-					// 放行与否由窗口决定；通知走回调，不阻塞 hook
-					pendingApprovals.set(api.conversationId, { command, match });
-					onApprovalNeeded?.(api.conversationId, command, match);
-					return { block: `该命令被审批策略拦截（${match}）。请明确告诉用户：回复 /approve 批准（默认 10 分钟窗口）或 /deny 拒绝。批准后继续原任务；不要尝试其他方式绕过。` };
+					const convId = api.conversationId as number;
+					const sender = runSender.get(convId) ?? "";
+					if (windowOpen(convId, sender)) return undefined;
+					pendingApprovals.set(windowKey(convId, sender), { command, match, trigger: sender });
+					onApprovalNeeded?.(convId, sender, command, match);
+					return { block: `该命令被审批策略拦截（${match}）。请明确告诉用户：等待审批卡片按钮或回复 /approve 批准（默认 10 分钟窗口）。批准后继续原任务；不要尝试其他方式绕过。` };
 				},
 			}),
 		],
