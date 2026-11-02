@@ -1,6 +1,35 @@
 // 飞书回复：文本发送（stdin 传参避免转义）与长文本分段。
 import { exec } from "node:child_process";
 
+export interface CardUpdate {
+	token: string;
+	/** Card 1.0 必须指定可见者（至少操作者本人） */
+	openId: string;
+	header: string;
+	template: string;
+	lines: string[];
+}
+
+/** 更新已发送的交互卡片（延时更新 API，token 30 分钟内最多 2 次）。 */
+export function updateCard(card: CardUpdate): Promise<string> {
+	const body = JSON.stringify({
+		token: card.token,
+		card: { ...simpleCard(card.header, card.template, card.lines), open_ids: [card.openId] },
+	});
+	return lark(["api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot", "--data", "-"], body);
+}
+
+/** 构造 Card 1.0 卡片 JSON（无按钮的展示型）。 */
+export function simpleCard(header: string, template: string, lines: string[]): Record<string, unknown> {
+	return {
+		config: { wide_screen_mode: true },
+		header: { title: { tag: "plain_text", content: header }, template },
+		elements: [
+			{ tag: "div", text: { tag: "lark_md", content: lines.join("\n") } },
+		],
+	};
+}
+
 /** 跑一条 lark-cli 命令，stdin 传内容。失败抛错并带 stderr。 */
 export function lark(args: string[], stdin?: string): Promise<string> {
 	return new Promise((resolve, reject) => {

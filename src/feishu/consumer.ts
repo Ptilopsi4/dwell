@@ -13,20 +13,22 @@ export interface LarkMessage {
 	mentions?: unknown[];
 }
 
-const EVENT_KEY = "im.message.receive_v1";
-
 /**
- * 持续消费飞书消息事件。bounded --timeout 到期后退出码 0，循环重启；
- * ready marker 之前退出视为失败，带退避重试。resolve 后才开始读 stdout 行。
+ * 持续消费一个 EventKey（lark-cli 一进程一 key，多 key 就多次调用）。
+ * bounded --timeout 到期后退出码 0，循环重启；ready marker 之前退出视为失败，带退避重试。
  */
-export function startEventLoop(onMessage: (m: LarkMessage) => void, onStop?: (err?: Error) => void): void {
-	void runLoop(onMessage, onStop);
+export function startEventLoop(
+	onMessage: (m: Record<string, unknown>) => void,
+	eventKey = "im.message.receive_v1",
+	onStop?: (err?: Error) => void,
+): void {
+	void runLoop(onMessage, eventKey, onStop);
 }
 
-async function runLoop(onMessage: (m: LarkMessage) => void, onStop?: (err?: Error) => void): Promise<void> {
+async function runLoop(onMessage: (m: Record<string, unknown>) => void, eventKey: string, onStop?: (err?: Error) => void): Promise<void> {
 	let backoff = 1_000;
 	for (;;) {
-		const outcome = await consumeOnce(onMessage);
+		const outcome = await consumeOnce(onMessage, eventKey);
 		if (outcome === "timeout") {
 			backoff = 1_000; // 正常轮换，重置退避
 			continue;
@@ -40,11 +42,11 @@ async function runLoop(onMessage: (m: LarkMessage) => void, onStop?: (err?: Erro
 }
 
 /** 一次 bounded 消费。返回 "timeout"（正常到期）或错误描述。 */
-function consumeOnce(onMessage: (m: LarkMessage) => void): Promise<"timeout" | string> {
+function consumeOnce(onMessage: (m: Record<string, unknown>) => void, eventKey: string): Promise<"timeout" | string> {
 	return new Promise((resolve) => {
 		const child = spawn(
 			"lark-cli",
-			["event", "consume", EVENT_KEY, "--as", "bot", "--timeout", "30m"],
+			["event", "consume", eventKey, "--as", "bot", "--timeout", "30m"],
 			{ stdio: ["pipe", "pipe", "pipe"], shell: true },
 		);
 		let ready = false;
@@ -52,7 +54,7 @@ function consumeOnce(onMessage: (m: LarkMessage) => void): Promise<"timeout" | s
 
 		child.stderr?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
-			if (text.includes(`[event] ready event_key=${EVENT_KEY}`)) ready = true;
+			if (text.includes(`[event] ready event_key=${eventKey}`)) ready = true;
 			if (!ready) lastErr += text;
 		});
 		child.stdout?.on("data", (chunk: Buffer) => {
@@ -60,7 +62,7 @@ function consumeOnce(onMessage: (m: LarkMessage) => void): Promise<"timeout" | s
 			for (const line of chunk.toString().split("\n")) {
 				if (line.trim() === "") continue;
 				try {
-					onMessage(JSON.parse(line) as LarkMessage);
+					onMessage(JSON.parse(line) as Record<string, unknown>);
 				} catch {
 					console.error(`[feishu] 无法解析事件行: ${line.slice(0, 200)}`);
 				}
