@@ -13,7 +13,6 @@ export function setApprovalCallback(fn: (conversationId: number, command: string
 }
 
 const DANGEROUS: [RegExp, string][] = [
-	[/\bsudo\b/, "提权操作"],
 	[/\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*)\b/i, "递归强删"],
 	[/\bssh\b|\bscp\b|\brsync\b.*-e.*ssh/, "远程访问"],
 	[/curl[^|]*\s(-d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/, "数据外发"],
@@ -48,6 +47,10 @@ export function makeApprovalExtension() {
 				beforeTool: (call, api) => {
 					if (call.name !== "bash") return undefined;
 					const command = (call.arguments as { command?: string }).command ?? "";
+					// sudo 在本环境永不可能成功（NoNewPrivileges + dwell 无 sudo 组），直接说明，不走审批
+					if (/\bsudo\b/.test(command)) {
+						return { block: "dwell 用户无 sudo 权限（服务以 no-new-privileges 运行），此命令无法执行。向用户说明并改用不需要提权的方案。" };
+					}
 					const reason = dangerReason(command);
 					if (reason === null) return undefined;
 					if (windowOpen(api.conversationId)) return undefined;

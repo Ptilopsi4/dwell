@@ -1,7 +1,7 @@
 // dwell 主程序：harness + 飞书事件循环 + 消息管线（白名单 → 命令 → submit → 回复）。
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, type Harness } from "@earendil-works/pi-durable";
+import { AssistantEntry, type Conversation, type Harness } from "@earendil-works/pi-durable";
 import { openDwell } from "./harness.ts";
 import { Sessions } from "./sessions.ts";
 import { startEventLoop, type LarkMessage } from "./feishu/consumer.ts";
@@ -52,16 +52,7 @@ async function handleMessage(m: LarkMessage): Promise<void> {
 			{ type: "input", content: text, requestId: m.message_id, whenBusy: "steer" },
 			context,
 		);
-		const settled = await submission.wait(context);
-		if (settled.status === "done" && settled.type === "input") {
-			const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
-			const answer = entry?.model?.[0] as AssistantMessage | undefined;
-			const reply = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-			await replyTo(m, reply || "（空回复）");
-		} else {
-			const reason = settled.status === "unanswered" ? settled.reason : settled.status;
-			await replyTo(m, `处理失败：${reason}`);
-		}
+		await submitAndReply(conversation, submission, m);
 	} catch (err) {
 		console.error("[dwell] 消息处理出错:", err);
 		try {
@@ -69,6 +60,21 @@ async function handleMessage(m: LarkMessage): Promise<void> {
 		} catch {
 			// 回复失败不再重试，错误已进日志
 		}
+	}
+}
+
+/** 等 submission 完成，把最终回复发回飞书。 */
+async function submitAndReply(conversation: Conversation, submission: Awaited<ReturnType<Conversation["submit"]>>, m: LarkMessage): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	const settled = await submission.wait(context);
+	if (settled.status === "done" && settled.type === "input") {
+		const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+		const answer = entry?.model?.[0] as AssistantMessage | undefined;
+		const reply = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+		await replyTo(m, reply || "（空回复）");
+	} else {
+		const reason = settled.status === "unanswered" ? settled.reason : settled.status;
+		await replyTo(m, `处理失败：${reason}`);
 	}
 }
 
@@ -107,7 +113,7 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 				whenBusy: "steer",
 				requestId: `${m.message_id}-approve`,
 			}, context);
-			void s.wait(context).then(() => {});
+			await submitAndReply(conversation, s, m);
 			break;
 		}
 		case "-deny": {
