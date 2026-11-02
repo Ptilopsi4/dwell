@@ -130,20 +130,28 @@ async function runCommand(text: string, conversation: Awaited<ReturnType<Session
 	}
 }
 
-/** 发送带按钮的审批卡片。 */
+/** 发送带按钮的审批卡片（Card 2.0）。 */
 function sendApprovalCard(chatId: string, conversationId: number, command: string, reason: string): void {
 	const value = (action: string, minutes = 0) => JSON.stringify({ action, minutes, conversationId });
 	const card = {
-		config: { wide_screen_mode: true },
-		header: { title: { tag: "plain_text", content: `⚠ 需要审批：${reason}` }, template: "orange" },
-		elements: [
-			{ tag: "div", text: { tag: "lark_md", content: `命令：\`\`\`${command.slice(0, 300)}\`\`\`\n批准后窗口内同类命令不再逐条询问。` } },
-			{ tag: "action", actions: [
-				{ tag: "button", text: { tag: "plain_text", content: "批准 10 分钟" }, type: "primary", value: value("approve", 10) },
-				{ tag: "button", text: { tag: "plain_text", content: "批准 30 分钟" }, type: "primary", value: value("approve", 30) },
-				{ tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "danger", value: value("deny") },
+		schema: "2.0",
+		config: { width_mode: "fill" },
+		header: {
+			title: { tag: "plain_text", content: "需要你的批准" },
+			text_tag_list: [
+				{ tag: "text_tag", text: { tag: "plain_text", content: reason }, color: "orange" },
+			],
+			template: "grey",
+			icon: { tag: "standard_icon", token: "chat-forbidden_outlined", color: "orange" },
+		},
+		body: { elements: [
+			{ tag: "markdown", content: `dwell 要执行：\n\`\`\`bash\n${command.slice(0, 300)}\n\`\`\`` },
+			{ tag: "column_set", horizontal_spacing: "large", columns: [
+				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 10 分钟" }, type: "primary", width: "fill", value: value("approve", 10) }] },
+				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "批准 30 分钟" }, type: "primary", width: "fill", value: value("approve", 30) }] },
+				{ tag: "column", width: "weighted", weight: 1, elements: [{ tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "danger", width: "fill", value: value("deny") }] },
 			] },
-		],
+		] },
 	};
 	void lark(["im", "+messages-send", "--as", "bot", "--chat-id", chatId, "--msg-type", "interactive", "--content", "-"], JSON.stringify(card))
 		.catch((err) => console.error("[dwell] 审批卡片发送失败:", err));
@@ -176,14 +184,13 @@ async function handleCardAction(raw: Record<string, unknown>): Promise<void> {
 	const conversation = await harness.conversation(conversationId as ConversationId, context);
 	if (conversation === undefined) return;
 
-	if (e.token !== undefined && e.operator_id !== undefined && e.chat_id !== undefined) {
+	if (e.token !== undefined) {
 		const minutes = v.minutes ?? 10;
 		void updateCard({
 			token: e.token,
-			openId: e.operator_id,
-			header: v.action === "approve" ? `✅ 已批准（${minutes} 分钟）` : "❌ 已拒绝",
+			header: v.action === "approve" ? `已批准 · ${minutes} 分钟` : "已拒绝",
 			template: v.action === "approve" ? "green" : "red",
-			lines: v.action === "approve" ? ["窗口内危险命令免拦截，agent 将继续执行。"] : ["agent 将收到拒绝通知并改用其他方案。"],
+			lines: [],
 		}).catch(() => {});
 	}
 
