@@ -1,68 +1,104 @@
 <!doctype html>
-<html lang="zh-CN" data-bs-theme="dark">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dwell panel</title>
-<link href="/vendor/bootstrap.min.css" rel="stylesheet">
+<link href="/vendor/basecoat.cdn.min.css" rel="stylesheet">
 <style>
+/* 布局骨架（Basecoat CDN 不含通用工具类，布局自管；颜色一律走 Basecoat 语义 token） */
 html, body { height: 100%; }
-body { display: flex; overflow: hidden; }
+body {
+	display: flex; overflow: hidden;
+	background: var(--background); color: var(--foreground);
+	font: 14px/1.7 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
 #side {
 	width: 264px; flex: none; display: flex; flex-direction: column;
-	border-right: var(--bs-border-width) solid var(--bs-border-color);
-	background: var(--bs-tertiary-bg); min-height: 0;
+	border-right: 1px solid var(--border); background: var(--card); min-height: 0;
 }
 #side .brand {
-	padding: .8rem 1rem .6rem; display: flex; align-items: center; gap: .5rem;
-	border-bottom: var(--bs-border-width) solid var(--bs-border-color);
+	padding: .85rem 1rem .7rem; display: flex; align-items: center; gap: .55rem;
+	border-bottom: 1px solid var(--border);
 }
-#side .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bs-success); }
-#side .brand .dot.off { background: var(--bs-danger); }
-#side .brand small { color: var(--bs-secondary-color); }
-#convlist { flex: 1; overflow-y: auto; padding: .5rem .5rem; min-height: 0; }
-#convlist .list-group-item { cursor: pointer; border-radius: .375rem; margin-bottom: 2px; padding: .5rem .75rem; }
-#convlist .list-group-item .sub { font-size: .72rem; color: var(--bs-secondary-color); }
-#convlist .list-group-item.archived { opacity: .45; }
-.sidefoot { padding: .5rem; border-top: var(--bs-border-width) solid var(--bs-border-color); display: flex; flex-direction: column; gap: .25rem; }
-#approvals { max-height: 32%; overflow-y: auto; padding: .5rem; border-top: var(--bs-border-width) solid var(--bs-border-color); }
+#side .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--primary); }
+#side .brand .dot.off { background: var(--destructive); }
+#side .brand small { color: var(--muted-foreground); }
+#convlist { flex: 1; overflow-y: auto; padding: .5rem; min-height: 0; }
+.conv {
+	padding: .5rem .7rem; cursor: pointer; border-radius: var(--radius-md); margin-bottom: 2px;
+	border: 1px solid transparent;
+}
+.conv:hover { background: var(--accent); }
+.conv.active { background: var(--accent); border-color: var(--border); }
+.conv .name {
+	font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conv .sub { font: 11px ui-monospace, Consolas, monospace; color: var(--muted-foreground); margin-top: 1px; }
+.conv.archived { opacity: .45; }
+.sidefoot { padding: .5rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: .25rem; align-items: stretch; }
+.sidefoot .btn { justify-content: flex-start; }
+#approvals { max-height: 32%; overflow-y: auto; padding: .6rem .75rem; border-top: 1px solid var(--border); }
+#approvals .cap { font: 600 12px ui-monospace, Consolas, monospace; color: var(--primary); margin-bottom: .4rem; }
+.appr { border-left: 3px solid var(--primary); padding: .25rem 0 .4rem .6rem; margin-bottom: .5rem; }
+.appr .cmd {
+	font: 11.5px ui-monospace, Consolas, monospace; color: var(--muted-foreground);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.appr .ops { margin-top: .35rem; display: flex; gap: .4rem; }
 #mainArea { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #topbar {
 	display: flex; align-items: center; gap: .5rem;
-	padding: .5rem 1rem; border-bottom: var(--bs-border-width) solid var(--bs-border-color);
+	padding: .55rem 1.1rem; border-bottom: 1px solid var(--border);
 }
 #topbar .title { font-weight: 600; }
 #topbar .spacer { flex: 1; }
 main { flex: 1; overflow-y: auto; padding: 1rem 1.25rem 1.5rem; }
-main .empty { color: var(--bs-secondary-color); text-align: center; padding: 3rem 0; }
-.msg { display: grid; grid-template-columns: 72px 1fr; gap: .75rem; padding: .45rem 0; }
-.msg + .msg { border-top: 1px solid var(--bs-border-color-translucent); }
-.msg .who { font: 600 11.5px/1.4 ui-monospace, Consolas, monospace; text-align: right; color: var(--bs-secondary-color); user-select: none; }
+main .empty { color: var(--muted-foreground); text-align: center; padding: 3rem 0; }
+.msg { display: grid; grid-template-columns: 72px 1fr; gap: .8rem; padding: .45rem 0; }
+.msg + .msg { border-top: 1px solid var(--border); }
+.msg .who { font: 600 11.5px/1.4 ui-monospace, Consolas, monospace; text-align: right; color: var(--muted-foreground); user-select: none; }
 .msg .when { display: block; font: 10px/1.5 ui-monospace, Consolas, monospace; font-weight: 400; opacity: .7; }
-.msg.user .who { color: var(--bs-warning-text-emphasis); }
-.msg.dwell .who { color: var(--bs-link-color); }
+.msg.user .who { color: var(--primary); }
+.msg.dwell .who { color: var(--foreground); }
 .msg .body { white-space: pre-wrap; word-break: break-word; min-width: 0; }
-.msg.user .body { border-left: 2px solid var(--bs-warning); padding-left: .6rem; }
+.msg.user .body { border-left: 2px solid var(--primary); padding-left: .6rem; }
 .msg.dwell .body { max-width: 84ch; }
-.msg.tool .body { font: 12.5px/1.6 ui-monospace, Consolas, monospace; color: var(--bs-secondary-color); }
-.msg.tool.result .body { color: var(--bs-body-color); opacity: .82; }
-.msg.tool.err .body { color: var(--bs-danger); }
-.msg .meta { font-size: .72rem; color: var(--bs-secondary-color); grid-column: 2; }
+.msg.tool .body { font: 12.5px/1.6 ui-monospace, Consolas, monospace; color: var(--muted-foreground); }
+.msg.tool.result .body { color: var(--foreground); opacity: .82; }
+.msg.tool.err .body { color: var(--destructive); }
+.msg .meta { font-size: .72rem; color: var(--muted-foreground); grid-column: 2; }
 .codeblk {
 	font: 12.5px/1.6 ui-monospace, Consolas, monospace; display: block;
-	padding: .5rem .75rem; background: var(--bs-secondary-bg); border-radius: .375rem;
-	white-space: pre-wrap; margin: .25rem 0;
+	padding: .5rem .75rem; background: var(--muted); border-radius: var(--radius-md);
+	white-space: pre-wrap; margin: .25rem 0; border: 1px solid var(--border);
 }
 .code-inline {
-	font: 12.5px ui-monospace, Consolas, monospace; background: var(--bs-secondary-bg);
-	padding: .1rem .3rem; border-radius: .25rem;
+	font: 12.5px ui-monospace, Consolas, monospace; background: var(--muted);
+	padding: .1rem .3rem; border-radius: var(--radius-sm); border: 1px solid var(--border);
 }
-#live { display: none; padding: .4rem 1.25rem; border-top: var(--bs-border-width) solid var(--bs-border-color); color: var(--bs-secondary-color); font: 12.5px ui-monospace, Consolas, monospace; flex: none; }
-#live.on { display: block; color: var(--bs-warning-text-emphasis); }
-.spinner-border-sm { width: .8rem; height: .8rem; border-width: .13em; margin-right: .5rem; vertical-align: -.1rem; }
-footer { padding: .7rem 1rem; border-top: var(--bs-border-width) solid var(--bs-border-color); display: flex; gap: .5rem; flex: none; }
+#live { display: none; padding: .45rem 1.25rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font: 12.5px ui-monospace, Consolas, monospace; flex: none; }
+#live.on { display: block; color: var(--primary); }
+#live .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--primary); border-top-color: transparent; border-radius: 50%; margin-right: .5rem; animation: r .9s linear infinite; vertical-align: -1px; }
+@keyframes r { to { transform: rotate(360deg); } }
+footer { padding: .7rem 1rem; border-top: 1px solid var(--border); display: flex; gap: .5rem; flex: none; align-items: flex-end; }
 #input { flex: 1; resize: none; min-height: 42px; max-height: 160px; }
+#toasts { position: fixed; right: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 50; }
+.toast-item {
+	background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border);
+	border-radius: var(--radius-md); padding: .55rem .9rem; font-size: 13px;
+	box-shadow: 0 4px 16px rgb(0 0 0 / .25);
+}
+.toast-item.err { border-color: var(--destructive); }
+dialog.dialog { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); color: var(--popover-foreground); padding: 0; min-width: min(440px, 92vw); }
+dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
+.dlg-body { padding: 1.1rem 1.2rem; }
+.dlg-body h6 { margin: 0 0 .8rem; font-weight: 600; }
+.dlg-row { display: flex; gap: .5rem; justify-content: flex-end; margin-top: .9rem; }
+.urow { display: flex; align-items: center; gap: .5rem; padding: .45rem 0; border-top: 1px solid var(--border); font: 12.5px ui-monospace, Consolas, monospace; }
+.urow .mid { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { #side { display: none; } }
+@media (prefers-reduced-motion: reduce) { #live .spin { animation: none; } }
 </style>
 </head>
 <body>
@@ -73,47 +109,42 @@ footer { padding: .7rem 1rem; border-top: var(--bs-border-width) solid var(--bs-
 		<small id="status">连接中</small>
 	</div>
 	<div id="convlist"></div>
-	<div id="approvals" class="d-none">
-		<div class="fw-semibold small text-warning-emphasis mb-1">需要你的审批</div>
-		<div id="apprList" class="vstack gap-2"></div>
+	<div id="approvals" hidden>
+		<div class="cap">需要你的审批</div>
+		<div id="apprList"></div>
 	</div>
 	<div class="sidefoot">
-		<button class="btn btn-sm btn-outline-secondary text-start" id="newConv">＋ 新会话线</button>
-		<button class="btn btn-sm btn-outline-secondary text-start" id="usersBtn">用户管理</button>
-		<button class="btn btn-sm btn-outline-secondary text-start" id="theme">浅色</button>
+		<button class="btn" data-variant="outline" data-size="sm" id="newConv">＋ 新会话线</button>
+		<button class="btn" data-variant="outline" data-size="sm" id="usersBtn">用户管理</button>
+		<button class="btn" data-variant="outline" data-size="sm" id="theme">浅色</button>
 	</div>
 </aside>
 <div id="mainArea">
 	<div id="topbar">
 		<span class="title" id="convTitle">—</span>
-		<span class="badge text-bg-secondary" id="convType"></span>
+		<span class="badge" data-variant="secondary" id="convType"></span>
 		<span class="spacer"></span>
-		<div class="btn-group btn-group-sm" role="group">
-			<button class="btn btn-outline-secondary" id="renameBtn">重命名</button>
-			<button class="btn btn-outline-secondary" id="resetBtn">清空</button>
-			<button class="btn btn-outline-danger" id="abortBtn" disabled>中止</button>
-			<button class="btn btn-outline-secondary" id="archiveBtn">归档</button>
-		</div>
+		<button class="btn" data-variant="ghost" data-size="sm" id="renameBtn">重命名</button>
+		<button class="btn" data-variant="ghost" data-size="sm" id="resetBtn">清空</button>
+		<button class="btn" data-variant="ghost" data-size="sm" id="abortBtn" disabled>中止</button>
+		<button class="btn" data-variant="ghost" data-size="sm" id="archiveBtn">归档</button>
 	</div>
 	<main id="main"><div class="empty">选择左侧会话线</div></main>
-	<div id="live"><span class="spinner-border spinner-border-sm"></span><span id="liveText">运行中</span></div>
+	<div id="live"><span class="spin"></span><span id="liveText">运行中</span></div>
 	<footer>
-		<textarea class="form-control" id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
-		<button class="btn btn-primary" id="send">发送</button>
+		<textarea class="textarea" id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
+		<button class="btn" data-size="sm" id="send">发送</button>
 	</footer>
 </div>
 
-<div class="modal fade" id="sheetModal" tabindex="-1">
-	<div class="modal-dialog modal-dialog-centered modal-sm">
-		<div class="modal-content">
-			<div class="modal-header py-2"><h6 class="modal-title" id="sheetTitle"></h6></div>
-			<div class="modal-body" id="sheetBody"></div>
-		</div>
-	</div>
-</div>
-<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
+<dialog class="dialog" id="sheet">
+	<form class="dlg-body" method="dialog">
+		<h6 id="sheetTitle"></h6>
+		<div id="sheetBody"></div>
+	</form>
+</dialog>
+<div id="toasts"></div>
 
-<script src="/vendor/bootstrap.bundle.min.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -127,51 +158,51 @@ const api = async (path, body) => {
 };
 let convs = [], convId = null, es = null, rendered = new Set(), sending = false, showArchived = false;
 
-/* 主题 */
+/* 主题：.dark class（Basecoat token 随之切换） */
 const applyTheme = (t) => {
-	document.documentElement.dataset.bsTheme = t;
+	document.documentElement.classList.toggle("dark", t === "dark");
 	$("theme").textContent = t === "dark" ? "浅色" : "深色";
 	localStorage.setItem("dwell-theme", t);
 };
 applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? "dark");
-$("theme").onclick = () => applyTheme(document.documentElement.dataset.bsTheme === "dark" ? "light" : "dark");
+$("theme").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
 
-function toast(msg, kind) {
+function toast(msg, err) {
 	const el = document.createElement("div");
-	el.className = `toast align-items-center text-bg-${kind ?? "secondary"} border-0`;
-	el.innerHTML = `<div class="d-flex"><div class="toast-body"></div>
-		<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
-	el.querySelector(".toast-body").textContent = msg;
+	el.className = "toast-item" + (err ? " err" : "");
+	el.textContent = msg;
 	$("toasts").appendChild(el);
-	new bootstrap.Toast(el, { delay: 2600 }).show();
-	el.addEventListener("hidden.bs.toast", () => el.remove());
+	setTimeout(() => el.remove(), 2800);
 }
 
-/* 模态弹层 */
-const modal = new bootstrap.Modal("#sheetModal");
+/* 弹层（原生 dialog） */
 const sheetPrompt = (title, initial, onOk) => {
 	$("sheetTitle").textContent = title;
-	$("sheetBody").innerHTML = `<input type="text" class="form-control form-control-sm" id="sheetIn">
-		<div class="d-flex gap-2 mt-3 justify-content-end">
-		<button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">取消</button>
-		<button class="btn btn-sm btn-primary" id="sheetOk">确定</button></div>`;
-	const input = $("sheetBody").querySelector("#sheetIn");
+	$("sheetBody").innerHTML = `
+		<input class="input" type="text" id="sheetIn" style="width:100%">
+		<div class="dlg-row">
+			<button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">取消</button>
+			<button class="btn" data-size="sm" id="sheetOk" type="button">确定</button>
+		</div>`;
+	const input = $("sheetIn");
 	input.value = initial ?? "";
-	modal.show();
+	$("sheet").showModal();
 	input.focus(); input.select();
-	$("sheetBody").querySelector("#sheetOk").onclick = () => {
+	$("sheetOk").onclick = () => {
 		const v = input.value.trim();
-		if (v !== "") { modal.hide(); onOk(v); }
+		if (v !== "") { $("sheet").close(); onOk(v); }
 	};
-	input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) $("sheetBody").querySelector("#sheetOk").click(); });
+	input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); $("sheetOk").click(); } });
 };
 const sheetConfirm = (title, onOk) => {
 	$("sheetTitle").textContent = title;
-	$("sheetBody").innerHTML = `<div class="d-flex gap-2 mt-2 justify-content-end">
-		<button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">取消</button>
-		<button class="btn btn-sm btn-danger" id="sheetOk">确定</button></div>`;
-	modal.show();
-	$("sheetBody").querySelector("#sheetOk").onclick = () => { modal.hide(); onOk(); };
+	$("sheetBody").innerHTML = `
+		<div class="dlg-row" style="margin-top:.2rem">
+			<button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">取消</button>
+			<button class="btn" data-variant="destructive" data-size="sm" id="sheetOk" type="button">确定</button>
+		</div>`;
+	$("sheet").showModal();
+	$("sheetOk").onclick = () => { $("sheet").close(); onOk(); };
 };
 
 /* 会话列表 */
@@ -182,19 +213,21 @@ async function loadConvs(keep) {
 	const visible = convs.filter((c) => showArchived || !c.archived);
 	for (const c of visible) {
 		const el = document.createElement("div");
-		el.className = "list-group-item list-group-item-action" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
+		el.className = "conv" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
 		const label = c.name !== c.key ? c.name : c.key.replace(/^oc_/, "").slice(0, 20) + "…";
 		const typeZh = { direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type;
-		el.innerHTML = `<div class="d-flex justify-content-between align-items-center">
-			<span class="text-truncate"></span><small class="sub"></small></div>`;
-		el.querySelector("span").textContent = label;
-		el.querySelector("small").textContent = `${typeZh} #${c.id}${c.archived ? " 已归档" : ""}`;
+		el.innerHTML = `<div class="name"></div><div class="sub"></div>`;
+		el.querySelector(".name").textContent = label;
+		el.querySelector(".sub").textContent = `${typeZh} #${c.id}${c.archived ? " 已归档" : ""}`;
 		el.title = c.key;
 		el.onclick = () => switchConv(c.id);
 		box.appendChild(el);
 	}
 	const arch = document.createElement("button");
-	arch.className = "btn btn-sm btn-link text-secondary-emphasis text-decoration-none px-2";
+	arch.className = "btn";
+	arch.dataset.variant = "ghost";
+	arch.dataset.size = "sm";
+	arch.style.justifyContent = "flex-start";
 	arch.textContent = showArchived ? "隐藏归档" : "显示归档";
 	arch.onclick = () => { showArchived = !showArchived; loadConvs(true); };
 	box.appendChild(arch);
@@ -280,14 +313,12 @@ function renderEntry(entry) {
 		const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("");
 		if (text) {
 			const el = msg("dwell", "dwell", "", null, model?.timestamp);
-			const body = el.querySelector(".body");
-			body.innerHTML = mdRender(text);
+			el.querySelector(".body").innerHTML = mdRender(text);
 			return el;
 		}
 		const calls = parts.filter((c) => c.type === "toolCall");
 		if (calls.length > 0) {
-			const el = msg("tool call", "tool", calls.map((c) => `${c.name} ${summaryArgs(c.arguments)}`).join("\n"), null, model?.timestamp);
-			return el;
+			return msg("tool call", "tool", calls.map((c) => `${c.name} ${summaryArgs(c.arguments)}`).join("\n"), null, model?.timestamp);
 		}
 		return null;
 	}
@@ -329,7 +360,7 @@ async function send() {
 	try {
 		await api("send", { conv: Number(convId), content: text });
 		$("input").value = ""; $("input").style.height = "";
-	} catch (err) { toast("发送失败 " + err.message, "danger"); }
+	} catch (err) { toast("发送失败 " + err.message, true); }
 	sending = false; $("send").disabled = false; $("input").focus();
 }
 $("send").onclick = send;
@@ -342,27 +373,27 @@ $("input").addEventListener("input", function () {
 
 /* 顶栏操作 */
 $("resetBtn").onclick = () => sheetConfirm("清空当前会话上下文？", async () => {
-	await api("reset", { conv: Number(convId) }).catch((e) => toast(e.message, "danger"));
+	await api("reset", { conv: Number(convId) }).catch((e) => toast(e.message, true));
 	toast("已开启新对话");
 });
 $("abortBtn").onclick = () => sheetConfirm("中止当前任务？", async () => {
-	await api("abort", { conv: Number(convId) }).catch((e) => toast(e.message, "danger"));
+	await api("abort", { conv: Number(convId) }).catch((e) => toast(e.message, true));
 });
 $("archiveBtn").onclick = () => {
 	const c = convs.find((x) => String(x.id) === String(convId));
 	if (c === undefined) return;
 	if (c.archived) {
-		api("archive", { id: Number(convId), archived: false }).then(() => loadConvs(true)).catch((e) => toast(e.message, "danger"));
+		api("archive", { id: Number(convId), archived: false }).then(() => loadConvs(true)).catch((e) => toast(e.message, true));
 	} else {
-		sheetConfirm("归档该会话线？", () => api("archive", { id: Number(convId), archived: true }).then(() => loadConvs(true)).catch((e) => toast(e.message, "danger")));
+		sheetConfirm("归档该会话线？", () => api("archive", { id: Number(convId), archived: true }).then(() => loadConvs(true)).catch((e) => toast(e.message, true)));
 	}
 };
 $("renameBtn").onclick = () => sheetPrompt("重命名会话线", $("convTitle").textContent, async (name) => {
-	await api("rename", { id: Number(convId), name }).catch((e) => toast(e.message, "danger"));
+	await api("rename", { id: Number(convId), name }).catch((e) => toast(e.message, true));
 	loadConvs(true);
 });
 $("newConv").onclick = () => sheetPrompt("新建会话线", "", async (name) => {
-	const r = await api("conversations", { name }).catch((e) => (toast(e.message, "danger"), null));
+	const r = await api("conversations", { name }).catch((e) => (toast(e.message, true), null));
 	if (r) { await loadConvs(); switchConv(r.id); }
 });
 
@@ -370,25 +401,26 @@ $("newConv").onclick = () => sheetPrompt("新建会话线", "", async (name) => 
 async function loadApprovals() {
 	try {
 		const list = await api("approvals");
-		$("approvals").classList.toggle("d-none", list.length === 0);
+		$("approvals").hidden = list.length === 0;
 		const box = $("apprList");
 		box.innerHTML = "";
 		for (const a of list) {
 			const el = document.createElement("div");
-			el.className = "border-start border-warning border-3 ps-2";
-			el.innerHTML = `<div class="font-monospace small text-body-secondary text-truncate"></div>
-				<div class="btn-group btn-group-sm mt-1" role="group">
-				<button class="btn btn-outline-warning" data-a="approve10">批准 10 分钟</button>
-				<button class="btn btn-outline-warning" data-a="approve30">30 分钟</button>
-				<button class="btn btn-outline-danger" data-a="deny">拒绝</button></div>`;
-			el.querySelector(".font-monospace").textContent = `${a.match} — ${a.command.slice(0, 60)}`;
+			el.className = "appr";
+			el.innerHTML = `<div class="cmd"></div>
+				<div class="ops">
+					<button class="btn" data-variant="outline" data-size="xs" data-a="approve10">批准 10 分钟</button>
+					<button class="btn" data-variant="outline" data-size="xs" data-a="approve30">30 分钟</button>
+					<button class="btn" data-variant="outline" data-size="xs" data-a="deny" style="color:var(--destructive)">拒绝</button>
+				</div>`;
+			el.querySelector(".cmd").textContent = `${a.match} — ${a.command.slice(0, 60)}`;
 			for (const b of el.querySelectorAll("button")) {
 				b.onclick = async () => {
 					const action = b.dataset.a === "deny" ? "deny" : "approve";
 					const minutes = b.dataset.a === "approve30" ? 30 : 10;
 					const r = await api("approve", { key: a.key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
-					if (!r.ok) toast(r.error ?? "操作失败", "danger");
-					else toast(action === "approve" ? "已批准" : "已拒绝", action === "approve" ? "success" : "secondary");
+					if (!r.ok) toast(r.error ?? "操作失败", true);
+					else toast(action === "approve" ? "已批准" : "已拒绝");
 					loadApprovals();
 				};
 			}
@@ -404,33 +436,33 @@ $("usersBtn").onclick = async () => {
 	const users = await api("users").catch(() => []);
 	$("sheetTitle").textContent = "用户管理";
 	$("sheetBody").innerHTML = `
-		<div class="input-group input-group-sm mb-3">
-			<input type="text" class="form-control" id="uId" placeholder="open_id（ou_ 开头）">
-			<button class="btn btn-outline-secondary" id="uAdd">添加成员</button>
-			<button class="btn btn-outline-secondary" id="uAddAdmin">管理员</button>
+		<div style="display:flex;gap:.4rem;margin-bottom:.8rem">
+			<input class="input" type="text" id="uId" placeholder="open_id（ou_ 开头）" style="flex:1">
+			<button class="btn" data-variant="outline" data-size="sm" id="uAdd">添加成员</button>
+			<button class="btn" data-variant="outline" data-size="sm" id="uAddAdmin">管理员</button>
 		</div>
-		<div class="vstack gap-1" id="uList"></div>
-		<div class="d-flex justify-content-end mt-3"><button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">关闭</button></div>`;
+		<div id="uList"></div>
+		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
 	const list = $("uList");
-	if (users.length === 0) list.innerHTML = `<small class="text-body-secondary">（暂无用户）</small>`;
+	if (users.length === 0) list.innerHTML = `<small style="color:var(--muted-foreground)">（暂无用户）</small>`;
 	for (const u of users) {
 		const row = document.createElement("div");
-		row.className = "d-flex align-items-center gap-2 border-top pt-1";
-		row.innerHTML = `<span class="font-monospace small text-truncate"></span>
-			<span class="badge ${u.role === "admin" ? "text-bg-warning" : "text-bg-secondary"}">${u.role === "admin" ? "管理员" : "成员"}</span>
-			<button class="btn btn-sm btn-outline-danger ms-auto">移除</button>`;
-		row.querySelector("span").textContent = u.id;
+		row.className = "urow";
+		row.innerHTML = `<span class="mid"></span>
+			<span class="badge" data-variant="${u.role === "admin" ? "default" : "secondary"}">${u.role === "admin" ? "管理员" : "成员"}</span>
+			<button class="btn" data-variant="ghost" data-size="icon-xs" title="移除">✕</button>`;
+		row.querySelector(".mid").textContent = u.id;
 		row.querySelector("button").onclick = async () => {
 			await api("users", { id: u.id, action: "remove" });
 			$("usersBtn").onclick();
 		};
 		list.appendChild(row);
 	}
-	modal.show();
+	$("sheet").showModal();
 	const add = async (role) => {
 		const id = $("uId").value.trim();
-		if (!id.startsWith("ou_")) { toast("需要 ou_ 开头的 open_id", "danger"); return; }
-		await api("users", { id, role }).catch((e) => toast(e.message, "danger"));
+		if (!id.startsWith("ou_")) { toast("需要 ou_ 开头的 open_id", true); return; }
+		await api("users", { id, role }).catch((e) => toast(e.message, true));
 		$("usersBtn").onclick();
 	};
 	$("uAdd").onclick = () => add("member");
