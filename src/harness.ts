@@ -9,6 +9,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createRegistry, defineExtension, Harness, section } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
+import { makeWebExtension } from "./ext/web.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
 const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
@@ -73,6 +74,9 @@ export async function openDwell(models = providerModels()): Promise<Harness> {
 	registry.install(CodingTools);
 	registry.install(DwellExtension);
 	registry.install(makeApprovalExtension());
+	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
+	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
+	if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
 
 	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），使 lark-cli 等服务凭证程序对模型不可见；
 	// 不影响 dwell 自身的消息收发（直接 spawn，不经工具 shell）。本机开发不设。
