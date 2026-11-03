@@ -2,8 +2,7 @@
 import { readFileSync } from "node:fs";
 import { makeWebExtension } from "../src/ext/web.ts";
 
-const env = readFileSync(".env", "utf8");
-const key = /^ZAI_CODING_CN_API_KEY=(.+)$/m.exec(env)?.[1]?.trim();
+const key = process.env.ZAI_CODING_CN_API_KEY ?? /^ZAI_CODING_CN_API_KEY=(.+)$/m.exec(readFileSync(".env", "utf8"))?.[1]?.trim();
 if (key === undefined) throw new Error("未找到 ZAI_CODING_CN_API_KEY");
 
 const ext = makeWebExtension(key);
