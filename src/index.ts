@@ -438,16 +438,16 @@ async function sendToConversationChat(conversationId: number, markdown: string):
 	return { chatId, messageId: sent.messageId };
 }
 
-const operatorName = async (): Promise<string> => (await directory.userName(panelUser)) ?? "管理员";
+/** panel 操作在飞书侧与模型上下文中一律以「管理员」指代，不备注具体名字 */
+const OPERATOR_LABEL = "管理员";
 
 const feishuBridge: FeishuBridge = {
 	operator: () => panelUser,
-	operatorName,
+	operatorName: async () => OPERATOR_LABEL,
 	async relay(conversation, text) {
 		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
 		const id = conversation.id as number;
-		const name = await operatorName();
-		const sent = await sendToConversationChat(id, `**${name}**（panel）：\n${text}`);
+		const sent = await sendToConversationChat(id, `**${OPERATOR_LABEL}**（panel）：\n${text}`);
 		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);
@@ -456,7 +456,7 @@ const feishuBridge: FeishuBridge = {
 		const submission = await conversation.submit({
 			type: "input",
 			content: text,
-			entry: { kind: "chat.message", data: { sender: panelUser, senderName: name, via: "panel" } },
+			entry: { kind: "chat.message", data: { sender: panelUser, senderName: OPERATOR_LABEL, via: "panel" } },
 			requestId: `panel-${sent.messageId}`,
 			whenBusy: "steer",
 		}, BACKGROUND_CONTEXT);

@@ -581,7 +581,7 @@ async function flushNames() {
 "use strict";
 /* ── 会话状态 ── */
 let convs = [], convId = null, es = null, showArchived = localStorage.getItem("dwell-show-archived") === "1", sending = false, running = false, runSince = 0;
-let sendMode = "feishu", me = { id: "", name: null };
+let sendMode = "feishu";
 let convSig = "", apprSig = "", pendingByConv = new Map();
 // transcript 渲染游标：工具调用行按 callId 索引，结果到达时回填
 let T = null;
@@ -776,7 +776,7 @@ function appendEntry(entry) {
 		dayMark(ts);
 		T.group = null;
 		const sender = entry.data?.sender;
-		const fallback = entry.kind === "chat.message" ? "用户" : (me.name ?? "panel");
+		const fallback = entry.kind === "chat.message" ? "用户" : "管理员";
 		const who = entry.data?.senderName || senderLabel(sender, fallback);
 		const note = entry.kind === "panel.note";
 		const el = msgEl(note ? "user inote" : "user", who, ts, sender);
@@ -973,7 +973,7 @@ function refreshComposer() {
 	const note = feishu && sendMode === "note";
 	$("composer").classList.toggle("note", note);
 	const where = currentConv()?.type === "direct" ? "对方" : "群成员";
-	$("input").placeholder = !feishu ? "输入消息" : note ? "内部指令：只写入模型上下文，飞书里看不到" : `发到飞书：${where}会看到「${me.name ?? "你"}（panel）」和 bot 的回复`;
+	$("input").placeholder = !feishu ? "输入消息" : note ? "内部指令：只写入模型上下文，飞书里看不到" : `发到飞书：${where}会看到「管理员（panel）」和 bot 的回复`;
 	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
 	$("hint").classList.toggle("busy", running);
 	$("hint").innerHTML = !running ? keys : note ? "<span>运行中：内部指令在当前步骤结束后生效</span>" : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
@@ -1163,7 +1163,6 @@ const reflowFloat = () => { $("tobottom").style.bottom = (document.querySelector
 new ResizeObserver(reflowFloat).observe(document.querySelector(".dock"));
 
 setInterval(() => { loadApprovals(); loadConvs(true).catch(() => {}); }, 5000);
-api("me").then((m) => { me = m; if (m.id && m.name) names.set(m.id, m.name); refreshComposer(); }).catch(() => {});
 loadConvs().then(loadApprovals).catch((e) => { setStatus(false); toast("加载会话失败 " + e.message, true); });
 </script>
 </body>

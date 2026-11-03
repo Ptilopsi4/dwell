@@ -343,14 +343,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		}
 		if (inFeishu) {
 			// 内部指令：只进模型上下文，不触发 run、不发飞书；运行中在下一个边界生效
-			const name = await feishu.operatorName();
 			await conversation.submit({
 				type: "write",
 				requestId: `panel-note-${Date.now()}`,
 				entry: {
 					kind: "panel.note",
-					data: { sender: feishu.operator(), senderName: name },
-					model: [{ role: "user", content: `（管理员 ${name} 通过后台给你的内部说明，聊天成员看不到这条，回复时不要提及它的来源）\n${content}`, timestamp: Date.now() }],
+					data: { sender: feishu.operator(), senderName: "管理员" },
+					model: [{ role: "user", content: `（管理员通过 panel 后台给的内部说明，仅写入你的上下文，飞书聊天成员看不到。按内容处理，无需说明来源。）\n${content}`, timestamp: Date.now() }],
 				},
 			}, BACKGROUND_CONTEXT);
 			json(res, 200, { ok: true, via: "note" });
