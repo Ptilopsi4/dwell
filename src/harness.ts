@@ -19,6 +19,7 @@ export function scrubSecretEnv(): void {
 }
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { normalizeContext } from "@earendil-works/pi-ai";
 
 export const DATA_DIR = process.env.DWELL_DATA ?? "./data";
 /** 状态文件目录（users/sessions/message-map）：独立于 data/（agent 可写域），避免模型覆写自升权限/劫持路由。 */
@@ -88,4 +89,36 @@ export async function openDwell(models = providerModels()): Promise<Harness> {
 	const harness = await Harness.open(storage, { models, registry, env }, context);
 	harness.resume();
 	return harness;
+}
+
+/** 图片理解 subagent：glm-5.3 无视觉，图片交 flash 单发单答，描述文本进主上下文（不进 checkpoint）。 */
+export const VISION_MODEL_ID = process.env.DWELL_VISION_MODEL ?? "glm-5.3-flash";
+
+export type ImageDescriber = (base64: string, mimeType: string) => Promise<string>;
+
+/** 有 ZAI key 且 catalog 有该模型时返回描述函数；否则 null（图片降级为落盘+提示）。 */
+export function makeImageDescriber(): ImageDescriber | null {
+	const key = process.env.ZAI_CODING_CN_API_KEY;
+	if (key === undefined || key === "") return null;
+	const models = providerModels();
+	const model = models.getModel("zai-coding-cn", VISION_MODEL_ID);
+	if (model === undefined) return null;
+	return async (base64, mimeType) => {
+		const context = normalizeContext({
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "详细描述这张图片：主体与场景、关键细节；如有文字全部转录；如有图表/数据给出关键数字。用中文，直接给描述，不要客套。" },
+						{ type: "image", data: base64, mimeType },
+					],
+					timestamp: Date.now(),
+				},
+			],
+		});
+		const answer = await models.completeSimple(model, context, { maxTokens: 1024 });
+		if (answer.errorMessage !== undefined) throw new Error(answer.errorMessage);
+		const text = answer.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+		return text.trim() !== "" ? text : "(模型未返回描述)";
+	};
 }

@@ -20,6 +20,14 @@
 
 `dwell.web.search`（全网搜索）与 `dwell.web.fetch`（读网页正文）：智谱 GLM Coding Plan Remote MCP，计入套餐额度。只要设置了 `ZAI_CODING_CN_API_KEY` 就会注册（与 `DWELL_PROVIDER` 解耦，主模型切 deepseek 时仍可用）；只读免审批，回答自带来源 URL。
 
+## Web 工具
+
+`dwell.web.search`（全网搜索）与 `dwell.web.fetch`（读网页正文）：智谱 GLM Coding Plan Remote MCP，计入套餐额度。只要设置了 `ZAI_CODING_CN_API_KEY` 就会注册（与 `DWELL_PROVIDER` 解耦，主模型切 deepseek 时仍可用）；只读免审批，回答自带来源 URL。
+
+## 多模态输入
+
+飞书发图：glm-5.3 无视觉，图片由 `DWELL_VISION_MODEL`（默认 glm-5.3-flash，走套餐）单发单答生成描述，描述文本进主上下文，原图留档 `uploads/`。发文件：直接落盘 `uploads/` 并告知模型路径（read 可读）。音视频暂不支持。无 ZAI key 时图片仅留档。
+
 ## 飞书命令
 
 `/new` 新对话 / `/status` 任务状态 / `/cancel` 中止 / `/approve [分钟]` 批准危险命令 / `/deny` 拒绝

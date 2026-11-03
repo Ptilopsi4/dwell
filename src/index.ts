@@ -2,7 +2,8 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
-import { MODEL, openDwell, scrubSecretEnv } from "./harness.ts";
+import { MODEL, makeImageDescriber, openDwell, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
+import { describeResources } from "./media.ts";
 import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
@@ -20,6 +21,8 @@ const users = new Users();
 const directory = new Directory(process.env.LARK_APP_ID, process.env.LARK_APP_SECRET);
 /** panel 操作者（pt）：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
 let panelUser = "";
+/** 图片理解 subagent（启动时装配；无 ZAI key 时为 null，图片降级为落盘+提示） */
+const imageDescriber: ImageDescriber | null = makeImageDescriber();
 
 async function main(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
@@ -105,14 +108,15 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 			const repliesAnchored = msg.replyToMessageId !== undefined && sessions.follow(msg.replyToMessageId) !== undefined;
 			if (!inThread && !repliesAnchored) return;
 		}
-		if (msg.rawContentType !== "text" || msg.content.trim() === "") {
-			if (msg.rawContentType !== "text" && users.isAllowed(msg.senderId)) {
-				await channel.send(msg.chatId, { text: "目前只处理文本消息。" }, { replyTo: msg.messageId });
-			}
-			return;
-		}
 		if (!users.isAllowed(msg.senderId)) {
 			await channel.send(msg.chatId, { text: "未授权使用，请联系管理员开通。" }, { replyTo: msg.messageId });
+			return;
+		}
+		const text = msg.content.trim();
+		if ((msg.resources?.length ?? 0) === 0 && text === "") {
+			if (msg.rawContentType !== "text") {
+				await channel.send(msg.chatId, { text: "目前支持文本、图片和文件消息。" }, { replyTo: msg.messageId });
+			}
 			return;
 		}
 
@@ -134,17 +138,26 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		runSender.set(conversation.id as number, msg.senderId);
 		runVia.set(conversation.id as number, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
-		const text = msg.content.trim();
-		if (text.startsWith("/")) {
-			await runCommand(text, conversation, msg, target);
+		let content = msg.content.trim();
+		if (content.startsWith("/")) {
+			await runCommand(content, conversation, msg, target);
 			return;
+		}
+		// 多模态预处理：图片→flash 描述，文件→落盘，描述/路径附进上下文（主模型无视觉）
+		if ((msg.resources?.length ?? 0) > 0) {
+			const agent = await conversation.agent(BACKGROUND_CONTEXT);
+			const attachment = await describeResources(msg, agent.cwd ?? process.cwd(), {
+				download: (fileKey, type) => channel.downloadResource(fileKey, type),
+				describer: imageDescriber,
+			});
+			content = content === "" ? attachment : `${content}\n\n${attachment}`;
 		}
 
 		const context = BACKGROUND_CONTEXT;
 		const submission = await conversation.submit(
 			{
 				type: "input",
-				content: text,
+				content,
 				// transcript 记录 sender（审计/分账基础；model 仍只看 content）
 				entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType } },
 				requestId: msg.messageId,
