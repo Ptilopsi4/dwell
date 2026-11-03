@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeLarkExtension } from "../src/ext/lark.ts";
 
-type Item = { message_id: string; msg_type?: string; create_time?: string; chat_id?: string; deleted?: boolean; body?: { content?: string }; sender?: { id?: string }; senderName?: string };
+type Item = { message_id: string; msg_type?: string; create_time?: string; chat_id?: string; deleted?: boolean; body?: { content?: string }; sender?: { id?: string; sender_type?: string }; senderName?: string };
 
 function fakeDeps(items: Item[], anchor?: Item) {
 	const calls: string[] = [];
@@ -95,6 +95,18 @@ test("API 错误返回 isError", async () => {
 	const r = await toolOf(deps as never).execute({}, api, context);
 	assert.equal((r as { isError?: boolean }).isError, true);
 	assert.match(out(r as never), /230002/);
+});
+
+test("卡片消息：app 发的卡（含降级文案）直接标注，用户卡提取文本", async () => {
+	const { deps } = fakeDeps([
+		{ message_id: "om_c1", msg_type: "interactive", create_time: "1000", body: { content: JSON.stringify({ elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]] }) }, sender: { id: "app_1", sender_type: "app" } },
+		{ message_id: "om_c2", msg_type: "interactive", create_time: "2000", body: { content: JSON.stringify({ elements: [[{ tag: "div", text: { tag: "lark_md", content: "标题：值班日报" } }]] }) }, sender: { id: "ou_9" }, senderName: "王五" },
+	]);
+	const r = await toolOf(deps).execute({ count: 2 }, api, context);
+	const text = out(r as never);
+	assert.match(text, /\[dwell 的回复卡片，正文见会话上下文\]/); // app 卡不提取（降级文案不污染）
+	assert.doesNotMatch(text, /请升级至最新版本/);
+	assert.match(text, /值班日报/); // 用户卡提取 lark_md
 });
 
 test("空结果提示", async () => {

@@ -35,6 +35,24 @@ type ListParams = {
 
 type ListResult = { code?: number; msg?: string; data?: { has_more?: boolean; items?: MessageItem[] } };
 
+/** 卡片消息提取：elements 里 text/lark_md 段拼尽（cardkit 流式卡只带降级结构，提取不到时诚实占位）。 */
+function interactiveText(parsed: unknown): string {
+	const texts: string[] = [];
+	const walk = (node: unknown): void => {
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (typeof node !== "object" || node === null) return;
+		for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+			if ((key === "text" || key === "content") && typeof value === "string" && value.trim() !== "") texts.push(value);
+			else walk(value);
+		}
+	};
+	walk(parsed);
+	return texts.join(" ");
+}
+
 /** 单条内容提取：文本直出，富文本拼段，媒体/卡片给占位；单条截 200 字。 */
 function messageText(item: MessageItem): string {
 	let parsed: unknown;
@@ -45,11 +63,16 @@ function messageText(item: MessageItem): string {
 	}
 	let text = "";
 	if (item.msg_type === "text") text = typeof parsed === "object" && parsed !== null ? String((parsed as { text?: string }).text ?? "") : String(parsed ?? "");
-	else if (item.msg_type === "post") {
-		// content_v2 结构各异，粗提取所有 text 段
-		text = JSON.stringify(parsed).match(/"text":"[^"]*"/g)?.map((s) => s.slice(8, -1)).join(" ") ?? "";
+	else if (item.msg_type === "post") text = JSON.stringify(parsed).match(/"text":"[^"]*"/g)?.map((s) => s.slice(8, -1)).join(" ") ?? "";
+	else if (item.msg_type === "interactive") {
+		// bot 自己的卡（流式回复/审批）不走提取：cardkit 降级文案会污染内容，且正文就在会话上下文里
+		if (item.sender?.sender_type === "app") text = "[dwell 的回复卡片，正文见会话上下文]";
+		else {
+			text = interactiveText(parsed);
+			if (text === "") text = "[卡片消息，内容不可读]";
+		}
 	} else {
-		const kinds: Record<string, string> = { image: "[图片]", file: "[文件]", audio: "[语音]", media: "[视频]", sticker: "[表情]", interactive: "[卡片]", share_chat: "[群名片]", share_user: "[名片]", system: "[系统消息]" };
+		const kinds: Record<string, string> = { image: "[图片]", file: "[文件]", audio: "[语音]", media: "[视频]", sticker: "[表情]", share_chat: "[群名片]", share_user: "[名片]", system: "[系统消息]" };
 		text = kinds[item.msg_type ?? ""] ?? `[${item.msg_type ?? "未知类型"}]`;
 	}
 	text = text.replace(/\s+/g, " ").trim();
