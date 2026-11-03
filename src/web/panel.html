@@ -1,181 +1,119 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-bs-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dwell panel</title>
+<link href="/vendor/bootstrap.min.css" rel="stylesheet">
 <style>
-:root {
-	--bg: #16181D; --panel: #1C1F26; --fg: #C9CFD8; --dim: #848C99;
-	--line: #2A2E37; --sel: #23262E; --amber: #E2A33B; --amber-dim: rgba(226,163,59,.14);
-	--red: #D06A5E; --red-dim: rgba(208,106,94,.12);
-	--serif: "Songti SC", "Noto Serif CJK SC", "STSong", SimSun, serif;
-	--mono: "Cascadia Code", ui-monospace, Consolas, monospace;
-	--sans: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
-}
-:root[data-theme="light"] {
-	--bg: #ECEBE7; --panel: #F3F2EE; --fg: #26262B; --dim: #6B6870;
-	--line: #D8D6CF; --sel: #E2E0DA; --amber: #8A5F12; --amber-dim: rgba(181,127,31,.14);
-	--red: #B04A3F; --red-dim: rgba(176,74,63,.10);
-}
-* { box-sizing: border-box; }
-html { scrollbar-color: var(--line) transparent; }
-::-webkit-scrollbar { width: 10px; }
-::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
-html, body { height: 100%; margin: 0; }
-body {
-	background: var(--bg); color: var(--fg);
-	font: 14px/1.7 var(--sans);
-	display: flex;
-}
+html, body { height: 100%; }
+body { display: flex; overflow: hidden; }
 #side {
-	width: 248px; flex: none; display: flex; flex-direction: column;
-	border-right: 1px solid var(--line); min-height: 0; background: var(--panel);
+	width: 264px; flex: none; display: flex; flex-direction: column;
+	border-right: var(--bs-border-width) solid var(--bs-border-color);
+	background: var(--bs-tertiary-bg); min-height: 0;
 }
 #side .brand {
-	padding: 14px 16px 12px; border-bottom: 1px solid var(--line);
-	display: flex; align-items: baseline; gap: 8px;
+	padding: .8rem 1rem .6rem; display: flex; align-items: center; gap: .5rem;
+	border-bottom: var(--bs-border-width) solid var(--bs-border-color);
 }
-#side .brand .name { font: 600 15px var(--mono); letter-spacing: 1px; }
-#side .brand .cursor {
-	width: 8px; height: 15px; background: var(--amber);
-	animation: blink 1.3s steps(1) infinite; align-self: center;
-}
-@keyframes blink { 50% { opacity: 0; } }
-#status { font: 12px var(--mono); color: var(--dim); margin-left: auto; }
-#status.on { color: var(--fg); }
-#convlist { flex: 1; overflow-y: auto; padding: 4px 0; min-height: 0; }
-.conv { padding: 8px 16px; cursor: pointer; border-left: 2px solid transparent; }
-.conv:hover { background: var(--bg); }
-.conv.active { border-left-color: var(--amber); }
-.conv .name {
-	font-family: var(--serif); font-size: 14px;
-	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.conv.active .name { color: var(--fg); }
-.conv .sub { font: 11px var(--mono); color: var(--dim); margin-top: 1px; }
-.conv .badge { font-size: 10px; color: var(--dim); border: 1px solid var(--line); padding: 0 4px; border-radius: 3px; margin-left: 4px; }
-.conv .run { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex: none; display: none; }
-.conv.archived { opacity: .4; }
-.sidebtn {
-	padding: 9px 16px; border-top: 1px solid var(--line); cursor: pointer; color: var(--dim);
-	font: 12.5px var(--mono); background: none; border-left: none; border-right: none; border-bottom: none; text-align: left;
-	border-radius: 0;
-}
-.sidebtn:hover { color: var(--fg); background: var(--bg); }
-#approvals { border-top: 1px solid var(--line); max-height: 34%; overflow-y: auto; display: none; }
-#approvals.on { display: block; }
-#approvals .cap { padding: 10px 16px 4px; font: 600 12px var(--mono); color: var(--amber); }
-.appr { padding: 6px 16px 10px 14px; border-left: 3px solid var(--amber); margin: 6px 0 6px 16px; }
-.appr .cmd { font: 11.5px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.appr .match { color: var(--fg); background: var(--amber-dim); padding: 0 3px; }
-.appr .ops { margin-top: 6px; display: flex; gap: 6px; }
-.appr button { font: 12px var(--mono); padding: 2px 10px; border-radius: 3px; }
-.appr button[data-a="deny"] { color: var(--red); border-color: var(--red); }
+#side .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bs-success); }
+#side .brand .dot.off { background: var(--bs-danger); }
+#side .brand small { color: var(--bs-secondary-color); }
+#convlist { flex: 1; overflow-y: auto; padding: .5rem .5rem; min-height: 0; }
+#convlist .list-group-item { cursor: pointer; border-radius: .375rem; margin-bottom: 2px; padding: .5rem .75rem; }
+#convlist .list-group-item .sub { font-size: .72rem; color: var(--bs-secondary-color); }
+#convlist .list-group-item.archived { opacity: .45; }
+.sidefoot { padding: .5rem; border-top: var(--bs-border-width) solid var(--bs-border-color); display: flex; flex-direction: column; gap: .25rem; }
+#approvals { max-height: 32%; overflow-y: auto; padding: .5rem; border-top: var(--bs-border-width) solid var(--bs-border-color); }
 #mainArea { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #topbar {
-	display: flex; align-items: center; gap: 10px;
-	padding: 8px 22px; border-bottom: 1px solid var(--line); flex: none; min-height: 48px;
+	display: flex; align-items: center; gap: .5rem;
+	padding: .5rem 1rem; border-bottom: var(--bs-border-width) solid var(--bs-border-color);
 }
-#topbar .title { font-family: var(--serif); font-weight: 600; font-size: 16px; }
+#topbar .title { font-weight: 600; }
 #topbar .spacer { flex: 1; }
-#topbar button { font: 12.5px var(--mono); padding: 3px 10px; }
-select, button {
-	background: var(--panel); color: var(--fg); border: 1px solid var(--line);
-	border-radius: 4px; padding: 4px 10px; font: inherit; cursor: pointer;
-}
-button:disabled { opacity: .4; cursor: default; }
-main { flex: 1; overflow-y: auto; padding: 20px 24px 32px; }
-main:has(.empty) { display: flex; }
-main .empty { margin: auto; color: var(--dim); font-family: var(--serif); }
-.msg { display: grid; grid-template-columns: 76px 1fr; gap: 16px; padding: 8px 0; }
-.msg + .msg { border-top: 1px solid var(--line); }
-.msg .who {
-	font: 600 11.5px/1.5 var(--mono); text-align: right; user-select: none;
-	color: var(--dim);
-}
-.msg .when { display: block; font: 10px/1.5 var(--mono); font-weight: 400; color: var(--dim); opacity: .75; }
-.msg.user .who { color: var(--amber); }
-.msg.dwell .who { color: var(--fg); }
-.msg .body { white-space: pre-wrap; word-break: break-word; min-width: 0; font-family: var(--serif); font-size: 14.5px; }
-.msg.tool .body { font: 12.5px/1.65 var(--mono); color: var(--fg); opacity: .8; }
-.msg.tool.err .body { color: var(--red); }
-.msg .meta { font: 11px var(--mono); color: var(--dim); margin-top: 2px; grid-column: 2; }
-.msg.user .body { border-left: 2px solid var(--amber); padding-left: 12px; }
+main { flex: 1; overflow-y: auto; padding: 1rem 1.25rem 1.5rem; }
+main .empty { color: var(--bs-secondary-color); text-align: center; padding: 3rem 0; }
+.msg { display: grid; grid-template-columns: 72px 1fr; gap: .75rem; padding: .45rem 0; }
+.msg + .msg { border-top: 1px solid var(--bs-border-color-translucent); }
+.msg .who { font: 600 11.5px/1.4 ui-monospace, Consolas, monospace; text-align: right; color: var(--bs-secondary-color); user-select: none; }
+.msg .when { display: block; font: 10px/1.5 ui-monospace, Consolas, monospace; font-weight: 400; opacity: .7; }
+.msg.user .who { color: var(--bs-warning-text-emphasis); }
+.msg.dwell .who { color: var(--bs-link-color); }
+.msg .body { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+.msg.user .body { border-left: 2px solid var(--bs-warning); padding-left: .6rem; }
 .msg.dwell .body { max-width: 84ch; }
-.msg.tool .who { color: var(--dim); }
-.msg.tool-call .body { color: var(--dim); }
-.msg.tool.result .who { color: var(--dim); }
-.msg.tool-call + .msg.tool { border-top: 0; }
-#live {
-	display: none; padding: 8px 24px; border-top: 1px solid var(--line);
-	color: var(--dim); font: 12.5px var(--mono); flex: none;
+.msg.tool .body { font: 12.5px/1.6 ui-monospace, Consolas, monospace; color: var(--bs-secondary-color); }
+.msg.tool.result .body { color: var(--bs-body-color); opacity: .82; }
+.msg.tool.err .body { color: var(--bs-danger); }
+.msg .meta { font-size: .72rem; color: var(--bs-secondary-color); grid-column: 2; }
+.codeblk {
+	font: 12.5px/1.6 ui-monospace, Consolas, monospace; display: block;
+	padding: .5rem .75rem; background: var(--bs-secondary-bg); border-radius: .375rem;
+	white-space: pre-wrap; margin: .25rem 0;
 }
-#live.on { display: block; color: var(--amber); }
-#live .spin { display: inline-block; width: 9px; height: 9px; border: 2px solid var(--amber);
-	border-top-color: transparent; border-radius: 50%; margin-right: 8px;
-	animation: r 0.9s linear infinite; vertical-align: -1px; }
-@keyframes r { to { transform: rotate(360deg); } }
-#errline { display: none; padding: 0 24px 8px; color: var(--red); font: 12px var(--mono); flex: none; }
-footer { display: flex; gap: 10px; padding: 12px 24px; border-top: 1px solid var(--line); flex: none; }
-#input {
-	flex: 1; background: var(--panel); color: var(--fg);
-	border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px;
-	font: 14px/1.6 var(--serif); resize: none; min-height: 42px; max-height: 160px;
+.code-inline {
+	font: 12.5px ui-monospace, Consolas, monospace; background: var(--bs-secondary-bg);
+	padding: .1rem .3rem; border-radius: .25rem;
 }
-#input:focus { outline: 1px solid var(--amber); }
-#send { font: 13px var(--mono); padding: 0 20px; }
-#overlay {
-	display: none; position: fixed; inset: 0; background: rgba(10,11,14,.55); z-index: 10;
-	align-items: center; justify-content: center;
-}
-#overlay.on { display: flex; }
-#sheet {
-	background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-	width: min(480px, 92vw); max-height: 80vh; overflow-y: auto; padding: 20px 22px;
-}
-#sheet h3 { margin: 0 0 12px; font: 600 14px var(--serif); }
-#sheet .row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
-#sheet input[type=text] {
-	flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-	border-radius: 4px; padding: 6px 10px; font: 13.5px var(--sans);
-}
-#sheet .ulist .u { display: flex; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font: 13px var(--mono); align-items: center; }
-#sheet .ulist .u .role { color: var(--dim); font-size: 12px; }
-#sheet .ulist .u button { margin-left: auto; font-size: 12px; }
+#live { display: none; padding: .4rem 1.25rem; border-top: var(--bs-border-width) solid var(--bs-border-color); color: var(--bs-secondary-color); font: 12.5px ui-monospace, Consolas, monospace; flex: none; }
+#live.on { display: block; color: var(--bs-warning-text-emphasis); }
+.spinner-border-sm { width: .8rem; height: .8rem; border-width: .13em; margin-right: .5rem; vertical-align: -.1rem; }
+footer { padding: .7rem 1rem; border-top: var(--bs-border-width) solid var(--bs-border-color); display: flex; gap: .5rem; flex: none; }
+#input { flex: 1; resize: none; min-height: 42px; max-height: 160px; }
 @media (max-width: 720px) { #side { display: none; } }
-@media (prefers-reduced-motion: reduce) {
-	#side .brand .cursor, #live .spin { animation: none; }
-}
 </style>
 </head>
 <body>
 <aside id="side">
-	<div class="brand"><span class="cursor"></span><span class="name">dwell</span><span id="status">…</span></div>
+	<div class="brand">
+		<span class="dot off" id="statusDot"></span>
+		<span class="fw-semibold">dwell</span>
+		<small id="status">连接中</small>
+	</div>
 	<div id="convlist"></div>
-	<div id="approvals"><div class="cap">需要你的审批</div><div id="apprList"></div></div>
-	<button class="sidebtn" id="newConv">＋ 新会话线</button>
-	<button class="sidebtn" id="usersBtn">用户管理</button>
-	<button class="sidebtn" id="theme">◐ 浅色</button>
+	<div id="approvals" class="d-none">
+		<div class="fw-semibold small text-warning-emphasis mb-1">需要你的审批</div>
+		<div id="apprList" class="vstack gap-2"></div>
+	</div>
+	<div class="sidefoot">
+		<button class="btn btn-sm btn-outline-secondary text-start" id="newConv">＋ 新会话线</button>
+		<button class="btn btn-sm btn-outline-secondary text-start" id="usersBtn">用户管理</button>
+		<button class="btn btn-sm btn-outline-secondary text-start" id="theme">浅色</button>
+	</div>
 </aside>
 <div id="mainArea">
 	<div id="topbar">
 		<span class="title" id="convTitle">—</span>
+		<span class="badge text-bg-secondary" id="convType"></span>
 		<span class="spacer"></span>
-		<button id="renameBtn" title="重命名">重命名</button>
-		<button id="resetBtn" title="清空上下文开始新对话">清空上下文</button>
-		<button id="abortBtn" title="中止当前任务">中止</button>
-		<button id="archiveBtn">归档</button>
+		<div class="btn-group btn-group-sm" role="group">
+			<button class="btn btn-outline-secondary" id="renameBtn">重命名</button>
+			<button class="btn btn-outline-secondary" id="resetBtn">清空</button>
+			<button class="btn btn-outline-danger" id="abortBtn" disabled>中止</button>
+			<button class="btn btn-outline-secondary" id="archiveBtn">归档</button>
+		</div>
 	</div>
 	<main id="main"><div class="empty">选择左侧会话线</div></main>
-	<div id="live"><span class="spin"></span><span id="liveText">运行中</span></div>
-	<div id="errline"></div>
+	<div id="live"><span class="spinner-border spinner-border-sm"></span><span id="liveText">运行中</span></div>
 	<footer>
-		<textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
-		<button id="send">发送</button>
+		<textarea class="form-control" id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
+		<button class="btn btn-primary" id="send">发送</button>
 	</footer>
 </div>
-<div id="overlay"><div id="sheet"></div></div>
+
+<div class="modal fade" id="sheetModal" tabindex="-1">
+	<div class="modal-dialog modal-dialog-centered modal-sm">
+		<div class="modal-content">
+			<div class="modal-header py-2"><h6 class="modal-title" id="sheetTitle"></h6></div>
+			<div class="modal-body" id="sheetBody"></div>
+		</div>
+	</div>
+</div>
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
+
+<script src="/vendor/bootstrap.bundle.min.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -191,12 +129,50 @@ let convs = [], convId = null, es = null, rendered = new Set(), sending = false,
 
 /* 主题 */
 const applyTheme = (t) => {
-	document.documentElement.dataset.theme = t;
-	$("theme").textContent = t === "dark" ? "light 亮" : "dark 暗";
+	document.documentElement.dataset.bsTheme = t;
+	$("theme").textContent = t === "dark" ? "浅色" : "深色";
 	localStorage.setItem("dwell-theme", t);
 };
-applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
-$("theme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? "dark");
+$("theme").onclick = () => applyTheme(document.documentElement.dataset.bsTheme === "dark" ? "light" : "dark");
+
+function toast(msg, kind) {
+	const el = document.createElement("div");
+	el.className = `toast align-items-center text-bg-${kind ?? "secondary"} border-0`;
+	el.innerHTML = `<div class="d-flex"><div class="toast-body"></div>
+		<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
+	el.querySelector(".toast-body").textContent = msg;
+	$("toasts").appendChild(el);
+	new bootstrap.Toast(el, { delay: 2600 }).show();
+	el.addEventListener("hidden.bs.toast", () => el.remove());
+}
+
+/* 模态弹层 */
+const modal = new bootstrap.Modal("#sheetModal");
+const sheetPrompt = (title, initial, onOk) => {
+	$("sheetTitle").textContent = title;
+	$("sheetBody").innerHTML = `<input type="text" class="form-control form-control-sm" id="sheetIn">
+		<div class="d-flex gap-2 mt-3 justify-content-end">
+		<button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">取消</button>
+		<button class="btn btn-sm btn-primary" id="sheetOk">确定</button></div>`;
+	const input = $("sheetBody").querySelector("#sheetIn");
+	input.value = initial ?? "";
+	modal.show();
+	input.focus(); input.select();
+	$("sheetBody").querySelector("#sheetOk").onclick = () => {
+		const v = input.value.trim();
+		if (v !== "") { modal.hide(); onOk(v); }
+	};
+	input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) $("sheetBody").querySelector("#sheetOk").click(); });
+};
+const sheetConfirm = (title, onOk) => {
+	$("sheetTitle").textContent = title;
+	$("sheetBody").innerHTML = `<div class="d-flex gap-2 mt-2 justify-content-end">
+		<button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">取消</button>
+		<button class="btn btn-sm btn-danger" id="sheetOk">确定</button></div>`;
+	modal.show();
+	$("sheetBody").querySelector("#sheetOk").onclick = () => { modal.hide(); onOk(); };
+};
 
 /* 会话列表 */
 async function loadConvs(keep) {
@@ -206,18 +182,20 @@ async function loadConvs(keep) {
 	const visible = convs.filter((c) => showArchived || !c.archived);
 	for (const c of visible) {
 		const el = document.createElement("div");
-		el.className = "conv" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
+		el.className = "list-group-item list-group-item-action" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
 		const label = c.name !== c.key ? c.name : c.key.replace(/^oc_/, "").slice(0, 20) + "…";
 		const typeZh = { direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type;
-		el.innerHTML = `<span class="run" style="display:none"></span><div class="t"><div class="name"></div><div class="sub">${typeZh} #${c.id}${c.archived ? " 已归档" : ""}</div></div>`;
-		el.querySelector(".name").textContent = label;
+		el.innerHTML = `<div class="d-flex justify-content-between align-items-center">
+			<span class="text-truncate"></span><small class="sub"></small></div>`;
+		el.querySelector("span").textContent = label;
+		el.querySelector("small").textContent = `${typeZh} #${c.id}${c.archived ? " 已归档" : ""}`;
 		el.title = c.key;
 		el.onclick = () => switchConv(c.id);
 		box.appendChild(el);
 	}
 	const arch = document.createElement("button");
-	arch.className = "sidebtn";
-	arch.textContent = showArchived ? "▸ 隐藏归档" : "▸ 显示归档";
+	arch.className = "btn btn-sm btn-link text-secondary-emphasis text-decoration-none px-2";
+	arch.textContent = showArchived ? "隐藏归档" : "显示归档";
 	arch.onclick = () => { showArchived = !showArchived; loadConvs(true); };
 	box.appendChild(arch);
 	if (!keep && visible.length > 0) {
@@ -234,15 +212,20 @@ function switchConv(id) {
 	$("main").innerHTML = "";
 	const c = convs.find((x) => String(x.id) === String(id));
 	$("convTitle").textContent = c ? (c.name !== c.key ? c.name : `#${c.id}`) : `#${id}`;
+	$("convType").textContent = c ? ({ direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type) : "";
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 	loadConvs(true);
 	es = new EventSource(`/api/events?conv=${id}&token=${encodeURIComponent(token)}`);
 	es.addEventListener("sync", onSync);
-	es.onerror = () => { $("status").textContent = "重连中"; $("status").classList.remove("on"); };
+	es.onerror = () => setStatus(false);
+}
+function setStatus(on) {
+	$("status").textContent = on ? "已连接" : "重连中";
+	$("statusDot").classList.toggle("off", !on);
 }
 
 function onSync(e) {
-	$("status").textContent = "已连接"; $("status").classList.add("on");
+	setStatus(true);
 	render(JSON.parse(e.data));
 }
 
@@ -260,9 +243,9 @@ function render(data) {
 	const running = live.run !== undefined;
 	$("live").classList.toggle("on", running);
 	$("abortBtn").disabled = !running;
-	if (live.run !== undefined) {
+	if (running) {
 		const tools = (live.tools ?? []).map((t) => `${t.name}:${t.status}`);
-		$("liveText").textContent = tools.length > 0 ? `运行中 · ${tools.join(" ")}` : "运行中";
+		$("liveText").textContent = tools.length > 0 ? `运行中 ${tools.join(" ")}` : "运行中";
 	}
 	if (nearBottom) main.scrollTop = main.scrollHeight;
 }
@@ -290,24 +273,20 @@ function renderEntry(entry) {
 	const model = entry.model?.[0];
 	if (entry.kind === "pi.user") {
 		const name = entry.data?.senderName || entry.data?.sender || "";
-		return msg("user", name ? String(name).slice(0, 8) : "user", contentText(model?.content), null, entry.model?.[0]?.timestamp);
+		return msg("user", name ? String(name).slice(0, 8) : "用户", contentText(model?.content), null, model?.timestamp);
 	}
 	if (entry.kind === "pi.assistant") {
 		const parts = model?.content ?? [];
 		const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("");
 		if (text) {
-			const el = msg("dwell", "dwell", "", null, entry.model?.[0]?.timestamp);
+			const el = msg("dwell", "dwell", "", null, model?.timestamp);
 			const body = el.querySelector(".body");
-			body.style.whiteSpace = "pre-line";
 			body.innerHTML = mdRender(text);
 			return el;
 		}
 		const calls = parts.filter((c) => c.type === "toolCall");
 		if (calls.length > 0) {
-			const el = document.createElement("div");
-			el.className = "msg tool tool-call";
-			el.innerHTML = `<span class="who">tool</span><div class="body"></div>`;
-			el.querySelector(".body").textContent = calls.map((c) => `${c.name} · ${summaryArgs(c.arguments)}`).join("\n");
+			const el = msg("tool call", "tool", calls.map((c) => `${c.name} ${summaryArgs(c.arguments)}`).join("\n"), null, model?.timestamp);
 			return el;
 		}
 		return null;
@@ -317,10 +296,10 @@ function renderEntry(entry) {
 		const raw = contentText(model?.content);
 		let body = raw.length > 400 ? raw.slice(0, 400).replace(/\n[^\n]*$/, "") + "\n…（已截断，共 " + raw.length + " 字符）" : raw;
 		if (body === "") body = err ? "（错误，无输出）" : "";
-		return msg(err ? "tool err" : "tool result", "↳", body, entry.model?.[0]?.toolName ?? "", entry.model?.[0]?.timestamp);
+		return msg(err ? "tool err" : "tool result", "↳", body, model?.toolName ?? "", model?.timestamp);
 	}
 	if (entry.kind === "panel.message" || entry.kind === "chat.message") {
-		return msg("user", "user", contentText(model?.content), null);
+		return msg("user", "用户", contentText(model?.content), null, model?.timestamp);
 	}
 	return null;
 }
@@ -336,9 +315,9 @@ function mdRender(text) {
 	const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 	return esc
 		.replace(/```([\s\S]*?)```/g, function (_, c) {
-			return '<span style="font-family:var(--mono);font-size:12.5px;white-space:pre-wrap;display:block;padding:6px 10px;background:var(--sel);border-radius:4px">' + c.replace(/^\n/, "") + "</span>";
+			return `<span class="codeblk">${c.replace(/^\n/, "")}</span>`;
 		})
-		.replace(/`([^`\n]+)`/g, '<span style="font-family:var(--mono);font-size:12.5px;background:var(--sel);padding:1px 4px;border-radius:3px">$1</span>')
+		.replace(/`([^`\n]+)`/g, '<span class="code-inline">$1</span>')
 		.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
 }
 
@@ -350,7 +329,7 @@ async function send() {
 	try {
 		await api("send", { conv: Number(convId), content: text });
 		$("input").value = ""; $("input").style.height = "";
-	} catch (err) { flashErr("发送失败: " + err.message); }
+	} catch (err) { toast("发送失败 " + err.message, "danger"); }
 	sending = false; $("send").disabled = false; $("input").focus();
 }
 $("send").onclick = send;
@@ -360,47 +339,30 @@ $("input").addEventListener("keydown", (e) => {
 $("input").addEventListener("input", function () {
 	this.style.height = ""; this.style.height = Math.min(this.scrollHeight, 160) + "px";
 });
-function flashErr(text) {
-	$("errline").textContent = text;
-	$("errline").style.display = "block";
-	setTimeout(() => { $("errline").style.display = "none"; }, 3000);
-}
 
 /* 顶栏操作 */
-const confirmAct = async (label, path, body) => {
-	if (!confirm(label)) return;
-	try { await api(path, body ?? { conv: Number(convId) }); flashErr(""); loadConvs(true); }
-	catch (err) { flashErr(err.message); }
-};
-$("resetBtn").onclick = () => confirmAct("清空当前会话上下文？", "reset");
-$("abortBtn").onclick = () => confirmAct("中止当前任务？", "abort");
-const curConv = () => convs.find((x) => String(x.id) === String(convId));
+$("resetBtn").onclick = () => sheetConfirm("清空当前会话上下文？", async () => {
+	await api("reset", { conv: Number(convId) }).catch((e) => toast(e.message, "danger"));
+	toast("已开启新对话");
+});
+$("abortBtn").onclick = () => sheetConfirm("中止当前任务？", async () => {
+	await api("abort", { conv: Number(convId) }).catch((e) => toast(e.message, "danger"));
+});
 $("archiveBtn").onclick = () => {
-	const c = curConv();
+	const c = convs.find((x) => String(x.id) === String(convId));
 	if (c === undefined) return;
 	if (c.archived) {
-		api("archive", { id: Number(convId), archived: false }).then(() => loadConvs(true)).catch((e) => flashErr(e.message));
+		api("archive", { id: Number(convId), archived: false }).then(() => loadConvs(true)).catch((e) => toast(e.message, "danger"));
 	} else {
-		confirmAct("归档该会话线？（顶栏可随时取消归档）", "archive", { id: Number(convId), archived: true });
+		sheetConfirm("归档该会话线？", () => api("archive", { id: Number(convId), archived: true }).then(() => loadConvs(true)).catch((e) => toast(e.message, "danger")));
 	}
 };
-const sheetInput = (title, initial, onOk) => {
-	const sheet = $("sheet");
-	sheet.innerHTML = `<h3>${title}</h3><div class="row"><input type="text" id="sheetIn" value="${initial ?? ""}"><button id="sheetOk">确定</button></div><div class="row"><button id="sheetNo">取消</button></div>`;
-	$("overlay").classList.add("on");
-	const input = sheet.querySelector("#sheetIn");
-	input.focus(); input.select();
-	const close = () => $("overlay").classList.remove("on");
-	sheet.querySelector("#sheetNo").onclick = close;
-	sheet.querySelector("#sheetOk").onclick = () => { const v = input.value.trim(); if (v !== "") { close(); onOk(v); } };
-	input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) sheet.querySelector("#sheetOk").click(); });
-};
-$("renameBtn").onclick = () => sheetInput("重命名会话线", $("convTitle").textContent, async (name) => {
-	await api("rename", { id: Number(convId), name }).catch((e) => flashErr(e.message));
+$("renameBtn").onclick = () => sheetPrompt("重命名会话线", $("convTitle").textContent, async (name) => {
+	await api("rename", { id: Number(convId), name }).catch((e) => toast(e.message, "danger"));
 	loadConvs(true);
 });
-$("newConv").onclick = () => sheetInput("新建会话线", "", async (name) => {
-	const r = await api("conversations", { name }).catch((e) => (flashErr(e.message), null));
+$("newConv").onclick = () => sheetPrompt("新建会话线", "", async (name) => {
+	const r = await api("conversations", { name }).catch((e) => (toast(e.message, "danger"), null));
 	if (r) { await loadConvs(); switchConv(r.id); }
 });
 
@@ -408,27 +370,31 @@ $("newConv").onclick = () => sheetInput("新建会话线", "", async (name) => {
 async function loadApprovals() {
 	try {
 		const list = await api("approvals");
-		$("approvals").classList.toggle("on", list.length > 0);
+		$("approvals").classList.toggle("d-none", list.length === 0);
 		const box = $("apprList");
 		box.innerHTML = "";
 		for (const a of list) {
 			const el = document.createElement("div");
-			el.className = "appr";
-			el.innerHTML = `<div class="cmd"></div><div class="ops">
-				<button data-a="approve10">批准10分</button><button data-a="approve30">批准30分</button><button data-a="deny">拒绝</button></div>`;
-			el.querySelector(".cmd").textContent = `${a.match} · ${a.command.slice(0, 60)}`;
+			el.className = "border-start border-warning border-3 ps-2";
+			el.innerHTML = `<div class="font-monospace small text-body-secondary text-truncate"></div>
+				<div class="btn-group btn-group-sm mt-1" role="group">
+				<button class="btn btn-outline-warning" data-a="approve10">批准 10 分钟</button>
+				<button class="btn btn-outline-warning" data-a="approve30">30 分钟</button>
+				<button class="btn btn-outline-danger" data-a="deny">拒绝</button></div>`;
+			el.querySelector(".font-monospace").textContent = `${a.match} — ${a.command.slice(0, 60)}`;
 			for (const b of el.querySelectorAll("button")) {
 				b.onclick = async () => {
 					const action = b.dataset.a === "deny" ? "deny" : "approve";
 					const minutes = b.dataset.a === "approve30" ? 30 : 10;
 					const r = await api("approve", { key: a.key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
-					if (!r.ok) flashErr(r.error ?? "操作失败");
+					if (!r.ok) toast(r.error ?? "操作失败", "danger");
+					else toast(action === "approve" ? "已批准" : "已拒绝", action === "approve" ? "success" : "secondary");
 					loadApprovals();
 				};
 			}
 			box.appendChild(el);
 		}
-	} catch { /* 忽略轮询失败 */ }
+	} catch { /* 轮询失败忽略 */ }
 }
 setInterval(loadApprovals, 5000);
 loadApprovals();
@@ -436,28 +402,40 @@ loadApprovals();
 /* 用户管理 */
 $("usersBtn").onclick = async () => {
 	const users = await api("users").catch(() => []);
-	const sheet = $("sheet");
-	sheet.innerHTML = `<h3>用户管理</h3>
-		<div class="row"><input type="text" id="uId" placeholder="open_id（ou_ 开头）">
-		<button id="uAdd">添加成员</button><button id="uAddAdmin">添加管理员</button></div>
-		<div class="ulist">${users.map((u) => `<div class="u"><span></span><span class="role">${u.role}</span><button data-id="${u.id}">移除</button></div>`).join("") || '<div class="u"><span class="role">（空）</span></div>'}</div>
-		<div class="row"><button id="uClose">关闭</button></div>`;
-	sheet.querySelectorAll(".u span:first-child").forEach((s, i) => { s.textContent = users[i].id; });
-	$("overlay").classList.add("on");
-	$("uClose").onclick = () => $("overlay").classList.remove("on");
+	$("sheetTitle").textContent = "用户管理";
+	$("sheetBody").innerHTML = `
+		<div class="input-group input-group-sm mb-3">
+			<input type="text" class="form-control" id="uId" placeholder="open_id（ou_ 开头）">
+			<button class="btn btn-outline-secondary" id="uAdd">添加成员</button>
+			<button class="btn btn-outline-secondary" id="uAddAdmin">管理员</button>
+		</div>
+		<div class="vstack gap-1" id="uList"></div>
+		<div class="d-flex justify-content-end mt-3"><button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">关闭</button></div>`;
+	const list = $("uList");
+	if (users.length === 0) list.innerHTML = `<small class="text-body-secondary">（暂无用户）</small>`;
+	for (const u of users) {
+		const row = document.createElement("div");
+		row.className = "d-flex align-items-center gap-2 border-top pt-1";
+		row.innerHTML = `<span class="font-monospace small text-truncate"></span>
+			<span class="badge ${u.role === "admin" ? "text-bg-warning" : "text-bg-secondary"}">${u.role === "admin" ? "管理员" : "成员"}</span>
+			<button class="btn btn-sm btn-outline-danger ms-auto">移除</button>`;
+		row.querySelector("span").textContent = u.id;
+		row.querySelector("button").onclick = async () => {
+			await api("users", { id: u.id, action: "remove" });
+			$("usersBtn").onclick();
+		};
+		list.appendChild(row);
+	}
+	modal.show();
 	const add = async (role) => {
 		const id = $("uId").value.trim();
-		if (!id.startsWith("ou_")) { flashErr("需要 ou_ 开头的 open_id"); return; }
-		await api("users", { id, role }).catch((e) => flashErr(e.message));
+		if (!id.startsWith("ou_")) { toast("需要 ou_ 开头的 open_id", "danger"); return; }
+		await api("users", { id, role }).catch((e) => toast(e.message, "danger"));
 		$("usersBtn").onclick();
 	};
 	$("uAdd").onclick = () => add("member");
 	$("uAddAdmin").onclick = () => add("admin");
-	sheet.querySelectorAll(".ulist button[data-id]").forEach((b) => {
-		b.onclick = async () => { await api("users", { id: b.dataset.id, action: "remove" }); $("usersBtn").onclick(); };
-	});
 };
-$("overlay").onclick = (e) => { if (e.target.id === "overlay") $("overlay").classList.remove("on"); };
 
 loadConvs();
 </script>

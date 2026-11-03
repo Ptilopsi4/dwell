@@ -30,6 +30,11 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown> |
 
 export function startPanel({ harness, sessions, users, port, token }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
+	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
+	const MIME: Record<string, string> = {
+		css: "text/css; charset=utf-8",
+		js: "text/javascript; charset=utf-8",
+	};
 
 	const authed = (req: IncomingMessage, url: URL): boolean => {
 		const t = url.searchParams.get("token") ?? req.headers["x-panel-token"];
@@ -47,6 +52,17 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+		// vendor 静态资源（UI 库）免 token：内容无敏感性，页面本体仍受保护
+		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
+			const rel = url.pathname.slice("/vendor/".length);
+			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }
+			try {
+				const asset = await readFile(join(vendorDir, rel));
+				res.writeHead(200, { "content-type": MIME[rel.split(".").pop() ?? ""] ?? "application/octet-stream", "cache-control": "public, max-age=86400" });
+				res.end(asset);
+			} catch { json(res, 404, { error: "asset not found" }); }
+			return;
+		}
 		if (!authed(req, url)) {
 			json(res, 401, { error: "unauthorized" });
 			return;
