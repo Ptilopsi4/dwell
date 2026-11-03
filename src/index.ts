@@ -7,7 +7,7 @@ import { describeResources } from "./media.ts";
 import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
-import { connectChannel, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
+import { connectChannel, downloadMessageResource, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
@@ -147,7 +147,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		if ((msg.resources?.length ?? 0) > 0) {
 			const agent = await conversation.agent(BACKGROUND_CONTEXT);
 			const attachment = await describeResources(msg, agent.cwd ?? process.cwd(), {
-				download: (fileKey, type) => channel.downloadResource(fileKey, type),
+				download: (fileKey, type) => downloadMessageResource(channel, msg.messageId, fileKey, type),
 				describer: imageDescriber,
 			});
 			content = content === "" ? attachment : `${content}\n\n${attachment}`;

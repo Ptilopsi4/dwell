@@ -34,7 +34,8 @@ export async function describeResources(
 		let buffer: Buffer;
 		try {
 			buffer = await deps.download(resource.fileKey, resource.type === "sticker" || resource.type === "image" ? "image" : "file");
-		} catch {
+		} catch (err) {
+			console.error(`[dwell] 资源下载失败（${resource.type} ${resource.fileKey}）:`, err instanceof Error ? err.message : err);
 			parts.push(`[资源${index}] ${label}：下载失败。`);
 			continue;
 		}
