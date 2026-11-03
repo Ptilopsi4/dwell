@@ -11,11 +11,13 @@ import { MODEL } from "../harness.ts";
 import { approvals, approvalDecision, pendingApprovals } from "../ext/approval.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
+import type { Directory } from "../feishu/directory.ts";
 
 interface PanelOptions {
 	harness: Harness;
 	sessions: Sessions;
 	users: Users;
+	directory: Directory;
 	port: number;
 	token: string;
 }
@@ -49,12 +51,18 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown> |
 type LiveDoc = {
 	run?: unknown;
 	generation?: { message?: { content?: { type: string; text?: string }[] }; retry?: { error: string } };
-	tools?: { name: string; status: string }[];
+	tools?: { callId: string; name: string; status: string }[];
 };
+type UsageDoc = { models?: Record<string, { totalTokens?: number; cost?: { total?: number } }> };
+type AgentDoc = { model?: { provider: string; modelId: string } };
+
+/** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
+const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
+	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
 
-export function startPanel({ harness, sessions, users, port, token }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, port, token }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -63,6 +71,17 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 	};
 
 	const tokenDigest = digest(token);
+
+	/** 会话显示名：手动重命名优先；飞书会话按 key 结构组合群名/用户名；查不到返回 null，由前端回退。 */
+	async function titleOf(c: { key: string; owner: string; name: string; type: string }): Promise<string | null> {
+		if (c.name !== c.key || c.type === "panel") return c.name;
+		const [chatId = "", rest] = c.key.split("#");
+		if (c.type === "direct") return (await directory.userName(c.owner)) ?? null;
+		const [chat, user] = await Promise.all([directory.chatName(chatId), c.type === "group" ? directory.userName(c.owner) : Promise.resolve(undefined)]);
+		if (chat === undefined && user === undefined) return null;
+		const tail = c.type === "thread" ? `话题 ${String(rest ?? "").slice(2, 10)}` : (user ?? c.owner.slice(0, 10));
+		return `${chat ?? "群聊"} · ${tail}`;
+	}
 	const COOKIE = "dwell_panel";
 	const cookieToken = (req: IncomingMessage): string | undefined => {
 		const m = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]*)`).exec(req.headers.cookie ?? "");
@@ -128,7 +147,8 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
 				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0 }];
 			}
-			json(res, 200, list);
+			const titled = await within(Promise.all(list.map(async (c) => ({ ...c, title: await titleOf(c) }))), 2500);
+			json(res, 200, titled ?? list);
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/approvals") {
@@ -138,7 +158,14 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/users") {
-			json(res, 200, users.list());
+			const list = users.list();
+			const names = (await within(directory.userNames(list.map((u) => u.id)), 2500)) ?? {};
+			json(res, 200, list.map((u) => ({ ...u, name: names[u.id] ?? null })));
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/names") {
+			const ids = (url.searchParams.get("ids") ?? "").split(",").filter((id) => /^ou_\w+$/.test(id)).slice(0, 50);
+			json(res, 200, (await within(directory.userNames(ids), 2500)) ?? {});
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/conversations") {
@@ -244,12 +271,19 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			const entries = append ? v.entries.slice(sent.length) : v.entries;
 			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
 			const slim = live?.run === undefined ? null : {
-				tools: (live.tools ?? []).map((t) => ({ name: t.name, status: t.status })),
+				tools: (live.tools ?? []).map((t) => ({ callId: t.callId, name: t.name, status: t.status })),
 				text: (live.generation?.message?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join(""),
 				retry: live.generation?.retry?.error,
 			};
 			sent = ids;
-			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim })}\n\n`);
+			const usage = Object.values((v.docs?.["pi.usage"] as UsageDoc | undefined)?.models ?? {});
+			const model = (v.docs?.["pi.agent"] as AgentDoc | undefined)?.model;
+			const meta = {
+				model: model === undefined ? null : `${model.provider}/${model.modelId}`,
+				tokens: usage.reduce((n, u) => n + (u.totalTokens ?? 0), 0),
+				cost: usage.reduce((n, u) => n + (u.cost?.total ?? 0), 0),
+			};
+			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`);
 		};
 		frame();
 		cleanups.push(view.subscribe(frame));

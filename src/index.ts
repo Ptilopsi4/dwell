@@ -7,6 +7,7 @@ import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
+import { Directory } from "./feishu/directory.ts";
 import { startPanel } from "./web/server.ts";
 import { approvals, pendingApprovals, runSender, setApprovalCallback, windowKey } from "./ext/approval.ts";
 
@@ -39,7 +40,8 @@ async function main(): Promise<void> {
 	// Web panel（内网穿透后 IP 直连，token 准入）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0 && (process.env.DWELL_PANEL_TOKEN ?? "") !== "") {
-		startPanel({ harness, sessions, users, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
+		const directory = new Directory(process.env.LARK_APP_ID, process.env.LARK_APP_SECRET);
+		startPanel({ harness, sessions, users, directory, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			return;
