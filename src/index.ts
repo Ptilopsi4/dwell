@@ -319,8 +319,27 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "/status 仅管理员可用。");
 				return;
 			}
-			const graph = await harness.taskGraph?.(context);
-			await replyTo(target, graph ? `运行中任务：\n${JSON.stringify(graph, null, 1).slice(0, 1500)}` : "当前无任务运行。");
+			const graphState = await harness.taskGraph?.(context);
+			let tasks: StatusTask[] = [];
+			try {
+					tasks = Object.values((graphState?.value as { tasks?: Record<string, StatusTask> } | undefined)?.tasks ?? {});
+				} finally {
+					graphState?.dispose();
+			}
+			if (tasks.length === 0) {
+				await replyTo(target, "当前无任务运行。");
+				break;
+			}
+			const typeZh: Record<string, string> = { direct: "私聊线", group: "群聊线", thread: "话题线", panel: "panel 线" };
+			const lines = await Promise.all(tasks.map(async (t) => {
+				const conv = sessions.listConversations().find((c) => c.id === (t.conversationId as number));
+				const convLabel = sessions.nameOf(t.conversationId as number)
+					?? `${conv !== undefined ? typeZh[conv.type] ?? "会话" : "会话"} #${t.conversationId}`;
+				const owner = sessions.ownerOf(t.conversationId);
+				const ownerName = owner !== undefined && owner !== "panel" ? await directory.userName(owner) : undefined;
+				return `**${statusZh(t)}** \`${t.kind}\` · ${convLabel}${ownerName !== undefined ? ` · ${ownerName}` : ""}${t.abortRequested ? " · ⏹ 已请求中止" : ""}${t.blocked !== undefined ? ` · 阻塞：${t.blocked}` : ""}${t.background ? " · 后台" : ""}`;
+			}));
+			await channel.send(target.chatId, { card: statusCard(lines) }, { replyTo: target.messageId });
 			break;
 		}
 		case "/cancel":
@@ -400,6 +419,38 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 		default:
 			await replyTo(target, `未知命令 ${cmd}，回复 /help 查看可用命令。`);
 	}
+}
+
+/** taskGraph 节点中 /status 用到的字段（结构性类型，避免依赖内部导出）。 */
+type StatusTask = {
+	kind: string;
+	conversationId: ConversationId;
+	background: boolean;
+	abortRequested: boolean;
+	state: { status: string; phase?: string; until?: number; on?: readonly unknown[]; outcome?: string };
+	blocked?: string;
+};
+
+/** 任务状态 → 中文摘要。 */
+function statusZh(t: StatusTask): string {
+	switch (t.state.status) {
+		case "pending": return "排队中";
+		case "running": return `运行中 · ${t.state.phase ?? ""}`;
+		case "waiting": return `等待依赖 ×${t.state.on?.length ?? 0}`;
+		case "sleeping": return `休眠至 ${new Date(t.state.until ?? 0).toLocaleTimeString("zh-CN", { hour12: false })}`;
+		case "completing": return `收尾 · ${t.state.outcome ?? ""}`;
+		default: return t.state.status;
+	}
+}
+
+/** /status 卡片：每个运行中任务一行（状态 · 类型 · 任务线 · 触发人）。 */
+function statusCard(lines: string[]): Record<string, unknown> {
+	return {
+		schema: "2.0",
+		config: { width_mode: "fill" },
+		header: { title: { tag: "plain_text", content: `运行中任务 ×${lines.length}` }, template: "turquoise" },
+		body: { elements: [{ tag: "markdown", content: lines.join("\n") }] },
+	};
 }
 
 /** /help 说明卡片：命令 + 对话规则，一次讲清。 */
