@@ -237,8 +237,6 @@ details.tc[open] summary { background: var(--hover); }
 #composer .hint { display: flex; gap: .9rem; font-size: 11px; color: var(--faint); }
 #composer .hint.busy { color: var(--primary); }
 .m .hd .tag { font-size: 10.5px; font-weight: 500; padding: 0 6px; line-height: 17px; border-radius: 4px; background: var(--secondary); color: var(--muted-foreground); }
-.m.inote .bd { color: var(--muted-foreground); border-left: 2px dashed color-mix(in srgb, var(--warn) 55%, var(--border)); padding-left: .7rem; }
-.m.inote .hd .tag { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 
 #scrim { display: none; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .45); }
 #drawerBtn { display: none; }
@@ -760,23 +758,20 @@ function appendEntry(entry) {
 		T.lastKind = "note";
 		return;
 	}
-	if (entry.kind === "chat.message" || entry.kind === "panel.message" || entry.kind === "panel.note") {
+	if (entry.kind === "chat.message" || entry.kind === "panel.message") {
 		dayMark(ts);
 		T.group = null;
 		const sender = entry.data?.sender;
 		const fallback = entry.kind === "chat.message" ? "用户" : "管理员";
 		const who = entry.data?.senderName || senderLabel(sender, fallback);
-		const note = entry.kind === "panel.note";
-		const el = msgEl(note ? "user inote" : "user", who, ts, sender);
-		if (entry.data?.via === "panel" || note) {
+		const el = msgEl("user", who, ts, sender);
+		if (entry.data?.via === "panel") {
 			const tag = document.createElement("span");
 			tag.className = "tag";
-			tag.textContent = note ? "内部说明（历史）" : entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
+			tag.textContent = entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
 			el.querySelector(".hd time").before(tag);
 		}
-		const text = contentText(model?.content);
-		// 内部指令的模型文本首行是给模型的来源说明，界面只显示正文
-		el.querySelector(".bd").textContent = text;
+		el.querySelector(".bd").textContent = contentText(model?.content);
 		log.appendChild(el);
 		T.lastKind = "user";
 		return;
