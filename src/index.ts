@@ -8,8 +8,8 @@ import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
 import { Directory } from "./feishu/directory.ts";
-import { startPanel } from "./web/server.ts";
-import { approvals, pendingApprovals, runSender, setApprovalCallback, windowKey } from "./ext/approval.ts";
+import { startPanel, type FeishuBridge } from "./web/server.ts";
+import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
 
@@ -17,6 +17,9 @@ let harness: Harness;
 let sessions: Sessions;
 let channel: LarkChannel;
 const users = new Users();
+const directory = new Directory(process.env.LARK_APP_ID, process.env.LARK_APP_SECRET);
+/** panel 操作者（pt）：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
+let panelUser = "";
 
 async function main(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
@@ -32,16 +35,19 @@ async function main(): Promise<void> {
 	}
 
 	setApprovalCallback((conversationId, sender, command, match) => {
+		// panel 发起的 run 只在 panel 审批，不打扰飞书群
+		if (pendingApprovals.get(windowKey(conversationId, sender))?.via === "panel") return;
 		const chatId = sessions.chatOf?.(conversationId);
 		if (chatId === undefined) return;
 		void sendApprovalCard(chatId, conversationId, sender, command, match);
 	});
 
+	panelUser = process.env.DWELL_PANEL_USER || users.list().find((u) => u.role === "admin")?.id || "panel";
+
 	// Web panel（内网穿透后 IP 直连，token 准入）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0 && (process.env.DWELL_PANEL_TOKEN ?? "") !== "") {
-		const directory = new Directory(process.env.LARK_APP_ID, process.env.LARK_APP_SECRET);
-		startPanel({ harness, sessions, users, directory, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
+		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			return;
@@ -96,6 +102,8 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		if (routed === null) return;
 		const { conversation, degraded } = routed;
 		sessions.touchActivity(conversation.id);
+		// 归档只是 panel 的整理动作；飞书侧有新消息说明这条线又活了
+		if (sessions.isArchived(conversation.id)) await sessions.setArchived(conversation.id, false);
 		await sessions.anchor(msg.messageId, conversation.id);
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };
@@ -105,6 +113,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		// run 归属：审批与 /cancel 按触发者判定
 		runSender.set(conversation.id as number, msg.senderId);
+		runVia.set(conversation.id as number, "feishu");
 
 		const text = msg.content.trim();
 		if (text.startsWith("/")) {
@@ -363,14 +372,15 @@ function approvalCard(
 	sender: string,
 	command: string,
 	match: string,
-	state: { kind: "request" } | { kind: "approved"; minutes: number } | { kind: "denied" },
+	state: { kind: "request" } | { kind: "approved"; minutes: number; by?: string } | { kind: "denied"; by?: string },
 ): Record<string, unknown> {
 	const value = (action: string, minutes = 0) => ({ action, minutes, conversationId, sender });
 	const done = state.kind !== "request";
+	const by = state.kind !== "request" && state.by ? ` · ${state.by}` : "";
 	const header = state.kind === "denied"
-		? { title: { tag: "plain_text", content: "已拒绝" }, template: "red" }
+		? { title: { tag: "plain_text", content: `已拒绝${by}` }, template: "red" }
 		: state.kind === "approved"
-			? { title: { tag: "plain_text", content: `已批准 · ${state.minutes} 分钟` }, template: "green" }
+			? { title: { tag: "plain_text", content: `已批准 · ${state.minutes} 分钟${by}` }, template: "green" }
 			: { title: { tag: "plain_text", content: "需要你的批准" }, template: "grey" };
 	const chosen = state.kind === "approved" ? state.minutes : 0;
 	const buttons = [
@@ -403,11 +413,69 @@ function approvalCard(
 
 async function sendApprovalCard(chatId: string, conversationId: number, sender: string, command: string, match: string): Promise<void> {
 	try {
-		await channel.send(chatId, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
+		const sent = await channel.send(chatId, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
+		// 记下卡片位置：panel 做出决定时同步卡片状态，并把续跑结果回复到卡片下
+		const pending = pendingApprovals.get(windowKey(conversationId, sender));
+		if (pending !== undefined) {
+			pending.cardMessageId = sent.messageId;
+			pending.cardChatId = chatId;
+		}
+		await sessions.anchor(sent.messageId, conversationId as ConversationId);
 	} catch (err) {
 		console.error("[dwell] 审批卡片发送失败:", err);
 	}
 }
+
+const connected = (): boolean => (channel as LarkChannel | undefined) !== undefined;
+
+/** 发到会话所在 chat；群聊线/话题线回复该线最近的消息，让群成员看出属于哪条任务（话题内发到话题里）。 */
+async function sendToConversationChat(conversationId: number, markdown: string): Promise<{ chatId: string; messageId: string } | undefined> {
+	const chatId = sessions.chatOf(conversationId);
+	if (chatId === undefined || !connected()) return undefined;
+	const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
+	const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
+	const sent = await channel.send(chatId, { markdown }, anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" });
+	return { chatId, messageId: sent.messageId };
+}
+
+const operatorName = async (): Promise<string> => (await directory.userName(panelUser)) ?? "管理员";
+
+const feishuBridge: FeishuBridge = {
+	operator: () => panelUser,
+	operatorName,
+	async relay(conversation, text) {
+		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
+		const id = conversation.id as number;
+		const name = await operatorName();
+		const sent = await sendToConversationChat(id, `**${name}**（panel）：\n${text}`);
+		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
+		await sessions.anchor(sent.messageId, conversation.id);
+		sessions.touchActivity(conversation.id);
+		runSender.set(id, panelUser);
+		runVia.set(id, "feishu");
+		const submission = await conversation.submit({
+			type: "input",
+			content: text,
+			entry: { kind: "chat.message", data: { sender: panelUser, senderName: name, via: "panel" } },
+			requestId: `panel-${sent.messageId}`,
+			whenBusy: "steer",
+		}, BACKGROUND_CONTEXT);
+		void submitAndReply(conversation, submission, sent);
+	},
+	async notice(conversationId, text) {
+		await sendToConversationChat(conversationId, text).catch((err: unknown) => console.error("[dwell] 飞书通知发送失败:", err));
+	},
+	async afterDecision(conversation, pending, action, minutes, submission) {
+		if (pending.cardMessageId === undefined || pending.cardChatId === undefined || !connected()) {
+			void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
+			return;
+		}
+		const id = conversation.id as number;
+		const state = action === "approve" ? { kind: "approved" as const, minutes, by: "panel" } : { kind: "denied" as const, by: "panel" };
+		await channel.updateCard(pending.cardMessageId, approvalCard(id, pending.trigger, pending.command, pending.match, state)).catch(() => {});
+		void submitAndReply(conversation, submission, { chatId: pending.cardChatId, messageId: pending.cardMessageId });
+	},
+};
 
 /** 卡片按钮回调：触发者/conversation owner/admin 可审，其余忽略。 */
 async function handleCardAction(evt: CardActionEvent): Promise<void> {

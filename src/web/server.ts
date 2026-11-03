@@ -6,9 +6,9 @@ import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
 import { MODEL } from "../harness.ts";
-import { approvals, approvalDecision, pendingApprovals } from "../ext/approval.ts";
+import { approvalDecision, pendingApprovals, runSender, runVia, type PendingApproval } from "../ext/approval.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
@@ -18,8 +18,22 @@ interface PanelOptions {
 	sessions: Sessions;
 	users: Users;
 	directory: Directory;
+	feishu: FeishuBridge;
 	port: number;
 	token: string;
+}
+
+/** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
+export interface FeishuBridge {
+	/** panel 操作者 open_id */
+	operator(): string;
+	operatorName(): Promise<string>;
+	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复 */
+	relay(conversation: Conversation, text: string): Promise<void>;
+	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
+	notice(conversationId: number, text: string): Promise<void>;
+	/** panel 做出审批决定后：同步飞书卡片，续跑结果回复到卡片下 */
+	afterDecision(conversation: Conversation, pending: PendingApproval, action: "approve" | "deny", minutes: number, submission: Submission): Promise<void>;
 }
 
 class HttpError extends Error {
@@ -62,7 +76,7 @@ const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
 
-export function startPanel({ harness, sessions, users, directory, port, token }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, port, token }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -145,10 +159,14 @@ export function startPanel({ harness, sessions, users, directory, port, token }:
 			if (list.length === 0) {
 				// 本地/空库兑底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0 }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null }];
 			}
 			const titled = await within(Promise.all(list.map(async (c) => ({ ...c, title: await titleOf(c) }))), 2500);
 			json(res, 200, titled ?? list);
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/me") {
+			json(res, 200, { id: feishu.operator(), name: await within(feishu.operatorName(), 2500) ?? null });
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/approvals") {
@@ -194,6 +212,7 @@ export function startPanel({ harness, sessions, users, directory, port, token }:
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			await conv.reset(undefined, BACKGROUND_CONTEXT);
+			void feishu.notice(conv.id as number, `${await feishu.operatorName()} 在 panel 清空了这条任务线的上下文，之后的消息从新对话开始。`);
 			json(res, 200, { ok: true });
 			return;
 		}
@@ -201,6 +220,7 @@ export function startPanel({ harness, sessions, users, directory, port, token }:
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			await conv.abort(BACKGROUND_CONTEXT);
+			void feishu.notice(conv.id as number, `${await feishu.operatorName()} 在 panel 中止了当前任务。`);
 			json(res, 200, { ok: true });
 			return;
 		}
@@ -210,8 +230,12 @@ export function startPanel({ harness, sessions, users, directory, port, token }:
 			const convId = Number(key.split(":")[0]);
 			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
-			const result = await approvalDecision(conv, key, body?.action === "deny" ? "deny" : "approve", Number(body?.minutes ?? 10));
-			json(res, 200, result);
+			const action = body?.action === "deny" ? "deny" : "approve";
+			const minutes = Number(body?.minutes ?? 10);
+			const result = await approvalDecision(conv, key, action, minutes);
+			if (!result.ok) { json(res, 200, result); return; }
+			await feishu.afterDecision(conv, result.pending, action, minutes, result.submission);
+			json(res, 200, { ok: true });
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/users") {
@@ -310,12 +334,36 @@ export function startPanel({ harness, sessions, users, directory, port, token }:
 			return;
 		}
 		sessions.touchActivity(conversation.id);
+		const id = conversation.id as number;
+		const inFeishu = sessions.chatOf(id) !== undefined;
+		if (inFeishu && body?.mode !== "note") {
+			await feishu.relay(conversation, content);
+			json(res, 200, { ok: true, via: "feishu" });
+			return;
+		}
+		if (inFeishu) {
+			// 内部指令：只进模型上下文，不触发 run、不发飞书；运行中在下一个边界生效
+			const name = await feishu.operatorName();
+			await conversation.submit({
+				type: "write",
+				requestId: `panel-note-${Date.now()}`,
+				entry: {
+					kind: "panel.note",
+					data: { sender: feishu.operator(), senderName: name },
+					model: [{ role: "user", content: `（管理员 ${name} 通过后台给你的内部说明，聊天成员看不到这条，回复时不要提及它的来源）\n${content}`, timestamp: Date.now() }],
+				},
+			}, BACKGROUND_CONTEXT);
+			json(res, 200, { ok: true, via: "note" });
+			return;
+		}
+		runSender.set(id, feishu.operator());
+		runVia.set(id, "panel");
 		const submission = await conversation.submit(
-			{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: {} } },
+			{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
-		json(res, 200, { ok: true });
+		json(res, 200, { ok: true, via: "panel" });
 	}
 
 	server.listen(port, "0.0.0.0", () => {

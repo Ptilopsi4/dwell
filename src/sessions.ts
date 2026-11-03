@@ -81,6 +81,13 @@ export class Sessions {
 		return this.messageMap.get(replyToMessageId);
 	}
 
+	/** 该任务线最近一条锚点消息（panel 往群里发消息时回复它，标明归属）。 */
+	lastAnchor(conversationId: ConversationId): string | undefined {
+		let last: string | undefined;
+		for (const [messageId, id] of this.messageMap) if (id === conversationId) last = messageId;
+		return last;
+	}
+
 	ownerOf(conversationId: ConversationId): string | undefined {
 		return this.owners.get(conversationId);
 	}
@@ -103,7 +110,7 @@ export class Sessions {
 	}
 
 	/** panel 用：全部会话线概览。 */
-	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string; lastTs: number }[] {
+	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string; lastTs: number; chatId: string | null }[] {
 		return [...this.convKeys.entries()].map(([key, id]) => ({
 			id: id as number,
 			key,
@@ -112,7 +119,12 @@ export class Sessions {
 			archived: this.archived.has(id),
 			type: key.startsWith("panel") || key === "root" ? "panel" : key.includes("#t:") ? "thread" : key.includes("#") ? "group" : "direct",
 			lastTs: this.lastTs.get(id) ?? 0,
+			chatId: key.startsWith("oc_") ? (key.split("#")[0] ?? null) : null,
 		}));
+	}
+
+	isArchived(conversationId: number): boolean {
+		return this.archived.has(conversationId as ConversationId);
 	}
 
 	async rename(conversationId: number, name: string): Promise<void> {

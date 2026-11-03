@@ -234,8 +234,19 @@ details.tc[open] summary { background: var(--hover); }
 #send { width: 32px; height: 32px; padding: 0; border-radius: 8px; display: inline-grid; place-items: center; background: var(--primary); color: var(--primary-foreground); border: 0; cursor: pointer; transition: opacity .12s, background .12s; }
 #send:disabled { background: var(--secondary); color: var(--faint); cursor: default; }
 #send.busy { width: auto; padding: 0 .7rem; gap: 5px; display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 500; }
-#composer .hint { display: flex; gap: .9rem; font-size: 11px; color: var(--faint); padding-top: .25rem; }
+#composer .hint { display: flex; gap: .9rem; font-size: 11px; color: var(--faint); }
 #composer .hint.busy { color: var(--primary); }
+#composer .foot { display: flex; align-items: center; gap: .8rem; padding-top: .35rem; min-height: 22px; }
+.modes { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--secondary); }
+.modes[hidden] { display: none; }
+.modes button { font: 500 11.5px/1 inherit; padding: 4px 9px; border: 0; border-radius: 5px; background: none; color: var(--muted-foreground); cursor: pointer; }
+.modes button:hover { color: var(--foreground); }
+.modes button.on { background: var(--raised); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+#composer.note { border-style: dashed; background: color-mix(in srgb, var(--warn) 4%, var(--raised)); }
+#composer.note .modes button.on { color: var(--warn); }
+.m .hd .tag { font-size: 10.5px; font-weight: 500; padding: 0 6px; line-height: 17px; border-radius: 4px; background: var(--secondary); color: var(--muted-foreground); }
+.m.inote .bd { color: var(--muted-foreground); border-left: 2px dashed color-mix(in srgb, var(--warn) 55%, var(--border)); padding-left: .7rem; }
+.m.inote .hd .tag { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 
 #scrim { display: none; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .45); }
 #drawerBtn { display: none; }
@@ -332,7 +343,10 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<textarea id="input" rows="1" placeholder="输入消息" disabled></textarea>
 				<button id="send" disabled title="发送（Enter）"><span data-ic="send" data-cls="sm"></span><span id="sendLabel" hidden>插入</span></button>
 			</div>
-			<div class="hint" id="hint"><span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span></div>
+			<div class="foot">
+				<div class="modes" id="modes" hidden><button data-mode="feishu" class="on" title="以你的名义发到飞书，bot 在飞书里回复">发到飞书</button><button data-mode="note" title="只写入模型上下文，飞书里看不到">内部指令</button></div>
+				<div class="hint" id="hint"><span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span></div>
+			</div>
 		</div>
 	</div>
 </div>
@@ -567,6 +581,7 @@ async function flushNames() {
 "use strict";
 /* ── 会话状态 ── */
 let convs = [], convId = null, es = null, showArchived = localStorage.getItem("dwell-show-archived") === "1", sending = false, running = false, runSince = 0;
+let sendMode = "feishu", me = { id: "", name: null };
 let convSig = "", apprSig = "", pendingByConv = new Map();
 // transcript 渲染游标：工具调用行按 callId 索引，结果到达时回填
 let T = null;
@@ -660,6 +675,7 @@ function markActive() {
 	$("convType").textContent = c ? (TYPE_ZH[c.type] ?? c.type) : "";
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 	$("archBanner").classList.toggle("on", Boolean(c?.archived));
+	refreshComposer();
 }
 $("q").addEventListener("input", () => loadConvs(true).catch(() => {}));
 
@@ -756,13 +772,23 @@ function appendEntry(entry) {
 		T.lastKind = "note";
 		return;
 	}
-	if (entry.kind === "chat.message" || entry.kind === "panel.message") {
+	if (entry.kind === "chat.message" || entry.kind === "panel.message" || entry.kind === "panel.note") {
 		dayMark(ts);
 		T.group = null;
 		const sender = entry.data?.sender;
-		const who = entry.kind === "panel.message" ? "panel" : entry.data?.senderName || senderLabel(sender, "用户");
-		const el = msgEl("user", who, ts, entry.kind === "panel.message" ? undefined : sender);
-		el.querySelector(".bd").textContent = contentText(model?.content);
+		const fallback = entry.kind === "chat.message" ? "用户" : (me.name ?? "panel");
+		const who = entry.data?.senderName || senderLabel(sender, fallback);
+		const note = entry.kind === "panel.note";
+		const el = msgEl(note ? "user inote" : "user", who, ts, sender);
+		if (entry.data?.via === "panel" || note) {
+			const tag = document.createElement("span");
+			tag.className = "tag";
+			tag.textContent = note ? "内部指令 · 飞书侧不可见" : entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
+			el.querySelector(".hd time").before(tag);
+		}
+		const text = contentText(model?.content);
+		// 内部指令的模型文本首行是给模型的来源说明，界面只显示正文
+		el.querySelector(".bd").textContent = note ? text.replace(/^（[^\n]*）\n/, "") : text;
 		log.appendChild(el);
 		T.lastKind = "user";
 		return;
@@ -908,8 +934,7 @@ function setRunning(live) {
 	$("sendLabel").hidden = !running;
 	$("send").classList.toggle("busy", running);
 	$("send").title = running ? "插入当前任务（Enter）" : "发送（Enter）";
-	$("hint").classList.toggle("busy", running);
-	$("hint").innerHTML = running ? "<span>运行中：发送的消息会插入当前任务</span>" : '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
+	refreshComposer();
 	if (!running) return;
 	const tools = (live.tools ?? []).filter((t) => t.status !== "done");
 	let txt = tools.length > 0 ? `执行 ${tools.map((t) => t.name).join("、")}` : live.text ? "生成回复" : "思考中";
@@ -931,12 +956,29 @@ async function send() {
 	if (!text || sending || convId === null) return;
 	sending = true; $("send").disabled = true;
 	try {
-		await api("send", { conv: Number(convId), content: text });
+		const r = await api("send", { conv: Number(convId), content: text, ...(inFeishu() ? { mode: sendMode } : {}) });
 		$("input").value = ""; autosize();
 		$("main").scrollTop = $("main").scrollHeight;
+		if (r.via === "note") toast("已写入内部指令，飞书侧不可见");
 	} catch (err) { toast("发送失败，内容已保留：" + err.message, true); }
 	sending = false; $("send").disabled = false; $("input").focus();
 }
+/* 发送方式：飞书会话可选「发到飞书」（群里可见，bot 在群里回复）或「内部指令」（只进模型上下文） */
+const currentConv = () => convs.find((c) => String(c.id) === String(convId));
+const inFeishu = () => Boolean(currentConv()?.chatId);
+function refreshComposer() {
+	const feishu = inFeishu();
+	$("modes").hidden = !feishu;
+	for (const b of $("modes").querySelectorAll("button")) b.classList.toggle("on", b.dataset.mode === sendMode);
+	const note = feishu && sendMode === "note";
+	$("composer").classList.toggle("note", note);
+	const where = currentConv()?.type === "direct" ? "对方" : "群成员";
+	$("input").placeholder = !feishu ? "输入消息" : note ? "内部指令：只写入模型上下文，飞书里看不到" : `发到飞书：${where}会看到「${me.name ?? "你"}（panel）」和 bot 的回复`;
+	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
+	$("hint").classList.toggle("busy", running);
+	$("hint").innerHTML = !running ? keys : note ? "<span>运行中：内部指令在当前步骤结束后生效</span>" : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
+}
+for (const b of $("modes").querySelectorAll("button")) b.onclick = () => { sendMode = b.dataset.mode; refreshComposer(); $("input").focus(); };
 const autosize = () => { const el = $("input"); el.style.height = ""; el.style.height = Math.min(el.scrollHeight, 220) + "px"; };
 $("send").onclick = send;
 $("input").addEventListener("keydown", (e) => {
@@ -1121,6 +1163,7 @@ const reflowFloat = () => { $("tobottom").style.bottom = (document.querySelector
 new ResizeObserver(reflowFloat).observe(document.querySelector(".dock"));
 
 setInterval(() => { loadApprovals(); loadConvs(true).catch(() => {}); }, 5000);
+api("me").then((m) => { me = m; if (m.id && m.name) names.set(m.id, m.name); refreshComposer(); }).catch(() => {});
 loadConvs().then(loadApprovals).catch((e) => { setStatus(false); toast("加载会话失败 " + e.message, true); });
 </script>
 </body>
