@@ -107,9 +107,16 @@ async function listMessages(deps: LarkDeps, params: ListParams): Promise<Message
 		list: (payload: { params: ListParams }) => Promise<ListResult>;
 		get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
 	};
-	const result = await message.list({ params });
-	if (result.code !== undefined && result.code !== 0) throw new Error(`飞书 API ${result.code}: ${result.msg ?? ""}`);
-	return result.data?.items ?? [];
+	try {
+		const result = await message.list({ params });
+		if (result.code !== undefined && result.code !== 0) throw new Error(`飞书 API ${result.code}: ${result.msg ?? ""}`);
+		return result.data?.items ?? [];
+	} catch (err) {
+		// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
+		const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
+		if (data?.code !== undefined) throw new Error(`飞书 API ${data.code}: ${data.msg ?? ""}`);
+		throw err;
+	}
 }
 
 /** dwell.lark.read：读当前会话/指定消息上下文/指定会话的飞书历史。 */
