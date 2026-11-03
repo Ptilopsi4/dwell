@@ -91,6 +91,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		const routed = await route(msg);
 		if (routed === null) return;
 		const { conversation, degraded } = routed;
+		sessions.touchActivity(conversation.id);
 		await sessions.anchor(msg.messageId, conversation.id);
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };

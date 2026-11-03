@@ -20,6 +20,7 @@ export class Sessions {
 	private owners = new Map<ConversationId, string>(); // conversation → owner open_id
 	private names = new Map<ConversationId, string>(); // conversation → 显示名（panel 重命名）
 	private archived = new Set<ConversationId>(); // 归档（panel 隐藏，不删数据）
+	private lastTs = new Map<ConversationId, number>(); // conversation → 最后活动时间戳（panel 排序）
 	private messageMap = new Map<string, ConversationId>(); // messageId → conversation（任务线锚点）
 	private file = stateFile("sessions.json");
 	private mapFile = stateFile("message-map.json");
@@ -31,12 +32,13 @@ export class Sessions {
 
 	async load(): Promise<void> {
 		try {
-			const saved = JSON.parse(await readFile(this.file, "utf8")) as Record<string, { id: number; owner: string; name?: string; archived?: boolean }>;
+			const saved = JSON.parse(await readFile(this.file, "utf8")) as Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number }>;
 			for (const [key, v] of Object.entries(saved)) {
 				this.convKeys.set(key, v.id as ConversationId);
 				this.owners.set(v.id as ConversationId, v.owner);
 				if (v.name !== undefined) this.names.set(v.id as ConversationId, v.name);
 				if (v.archived === true) this.archived.add(v.id as ConversationId);
+				if (v.lastTs !== undefined) this.lastTs.set(v.id as ConversationId, v.lastTs);
 			}
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] sessions.json 损坏，任务线映射将重建:", err);
@@ -50,11 +52,12 @@ export class Sessions {
 	}
 
 	private async save(): Promise<void> {
-		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean }> = {};
+		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number }> = {};
 		for (const [key, id] of this.convKeys) {
 			const name = this.names.get(id);
 			const archived = this.archived.has(id);
-			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}) };
+			const ts = this.lastTs.get(id);
+			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}) };
 		}
 		await writeStateJson(this.file, out);
 	}
@@ -93,8 +96,14 @@ export class Sessions {
 		return undefined;
 	}
 
+	/** 消息进入时调用：记录会话最后活动（panel 列表排序/显示）。 */
+	touchActivity(conversationId: ConversationId): void {
+		this.lastTs.set(conversationId, Date.now());
+		void this.save();
+	}
+
 	/** panel 用：全部会话线概览。 */
-	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string }[] {
+	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string; lastTs: number }[] {
 		return [...this.convKeys.entries()].map(([key, id]) => ({
 			id: id as number,
 			key,
@@ -102,6 +111,7 @@ export class Sessions {
 			name: this.names.get(id) ?? key,
 			archived: this.archived.has(id),
 			type: key.startsWith("panel") || key === "root" ? "panel" : key.includes("#t:") ? "thread" : key.includes("#") ? "group" : "direct",
+			lastTs: this.lastTs.get(id) ?? 0,
 		}));
 	}
 

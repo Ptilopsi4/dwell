@@ -77,9 +77,6 @@ main .empty { color: var(--muted-foreground); text-align: center; padding: 3rem 
 	font: 12.5px ui-monospace, Consolas, monospace; background: var(--muted);
 	padding: .1rem .3rem; border-radius: var(--radius-sm); border: 1px solid var(--border);
 }
-#live { display: none; padding: .45rem 1.25rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font: 12.5px ui-monospace, Consolas, monospace; flex: none; }
-#live.on { display: block; color: var(--primary); }
-#live .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--primary); border-top-color: transparent; border-radius: 50%; margin-right: .5rem; animation: r .9s linear infinite; vertical-align: -1px; }
 @keyframes r { to { transform: rotate(360deg); } }
 footer { padding: .7rem 1rem; border-top: 1px solid var(--border); display: flex; gap: .5rem; flex: none; align-items: flex-end; }
 #input { flex: 1; resize: none; min-height: 42px; max-height: 160px; }
@@ -97,8 +94,45 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 .dlg-row { display: flex; gap: .5rem; justify-content: flex-end; margin-top: .9rem; }
 .urow { display: flex; align-items: center; gap: .5rem; padding: .45rem 0; border-top: 1px solid var(--border); font: 12.5px ui-monospace, Consolas, monospace; }
 .urow .mid { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* UX 打磨 */
+.conv .tail { font-size: 10.5px; color: var(--muted-foreground); opacity: .8; white-space: nowrap; }
+.conv .row1 { display: flex; align-items: baseline; gap: 6px; }
+#convlist .conv { display: block; }
+#topbar .menu-wrap { position: relative; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; min-width: 168px;
+  background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 4px; box-shadow: 0 6px 24px rgb(0 0 0 / .28);
+}
+.menu button { display: flex; width: 100%; align-items: center; gap: 8px; border-radius: var(--radius-sm);
+  padding: 7px 10px; background: none; border: none; color: inherit; font: 13px inherit; cursor: pointer; text-align: left; }
+.menu button:hover { background: var(--accent); }
+.menu button.danger { color: var(--destructive); }
+#runbar { display: none; align-items: center; gap: 8px; padding: 6px 1.25rem; border-top: 1px solid var(--border);
+  color: var(--muted-foreground); font: 12px ui-monospace, Consolas, monospace; flex: none; }
+#runbar.on { display: flex; }
+#runbar .spin { width: 10px; height: 10px; border: 2px solid var(--primary); border-top-color: transparent; border-radius: 50%; animation: r .9s linear infinite; }
+#runbar button { margin-left: auto; }
+#inlappr { display: none; padding: 10px 1.25rem; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--primary) 7%, transparent); flex: none; }
+#inlappr.on { display: block; }
+#inlappr .cap { font: 600 12.5px ui-monospace, Consolas, monospace; color: var(--primary); }
+#inlappr .cmd { font: 11.5px ui-monospace, Consolas, monospace; color: var(--muted-foreground); margin: 3px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#inlappr .ops { display: flex; gap: 6px; }
+#tobottom {
+  position: absolute; right: 24px; bottom: 120px; z-index: 30; display: none;
+  background: var(--popover); border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 14px; font-size: 12.5px; cursor: pointer; color: var(--popover-foreground);
+  box-shadow: 0 4px 14px rgb(0 0 0 / .22);
+}
+#tobottom.on { display: block; }
+#mainArea { position: relative; }
+.msg { position: relative; }
+.msg .copy { visibility: hidden; position: absolute; top: 4px; right: 0; border: none; background: none; color: var(--muted-foreground); cursor: pointer; font-size: 11px; padding: 0 2px; }
+.msg:hover .copy, .msg:focus-within .copy { visibility: visible; }
+.confirm-inline { color: var(--destructive) !important; font-weight: 600; }
+
 @media (max-width: 720px) { #side { display: none; } }
-@media (prefers-reduced-motion: reduce) { #live .spin { animation: none; } }
 </style>
 </head>
 <body>
@@ -113,10 +147,10 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 		<div class="cap">需要你的审批</div>
 		<div id="apprList"></div>
 	</div>
-	<div class="sidefoot">
-		<button class="btn" data-variant="outline" data-size="sm" id="newConv">＋ 新会话线</button>
-		<button class="btn" data-variant="outline" data-size="sm" id="usersBtn">用户管理</button>
-		<button class="btn" data-variant="outline" data-size="sm" id="theme">浅色</button>
+	<div class="sidefoot" style="flex-direction:row">
+		<button class="btn" data-variant="outline" data-size="sm" id="newConv" style="flex:1">＋ 新会话</button>
+		<button class="btn" data-variant="ghost" data-size="icon-sm" id="usersBtn" title="用户管理">👤</button>
+		<button class="btn" data-variant="ghost" data-size="icon-sm" id="theme" title="切换主题">◐</button>
 	</div>
 </aside>
 <div id="mainArea">
@@ -124,13 +158,27 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 		<span class="title" id="convTitle">—</span>
 		<span class="badge" data-variant="secondary" id="convType"></span>
 		<span class="spacer"></span>
-		<button class="btn" data-variant="ghost" data-size="sm" id="renameBtn">重命名</button>
-		<button class="btn" data-variant="ghost" data-size="sm" id="resetBtn">清空</button>
 		<button class="btn" data-variant="ghost" data-size="sm" id="abortBtn" disabled>中止</button>
-		<button class="btn" data-variant="ghost" data-size="sm" id="archiveBtn">归档</button>
+		<div class="menu-wrap">
+			<button class="btn" data-variant="ghost" data-size="icon-sm" id="menuBtn" title="会话操作">⋯</button>
+			<div class="menu" id="menu" hidden>
+				<button id="renameBtn">重命名</button>
+				<button id="archiveBtn">归档</button>
+				<button id="resetBtn" class="danger">清空上下文</button>
+			</div>
+		</div>
 	</div>
-	<main id="main"><div class="empty">选择左侧会话线</div></main>
-	<div id="live"><span class="spin"></span><span id="liveText">运行中</span></div>
+	<main id="main"><div class="empty">选择左侧会话线<br><small>或点击「＋ 新会话」开始</small></div></main>
+	<div id="live" hidden><span class="spin"></span><span id="liveText">运行中</span></div>
+<button id="tobottom" title="回到底部">↓ 底部</button>
+<div id="runbar"><span class="spin"></span><span id="runText">运行中</span><button class="btn" data-variant="outline" data-size="xs" id="stopRun">停止</button></div>
+<div id="inlappr"><div class="cap">需要你的审批</div><div class="cmd"></div>
+	<div class="ops">
+		<button class="btn" data-variant="outline" data-size="xs" data-a="approve10">批准 10 分钟</button>
+		<button class="btn" data-variant="outline" data-size="xs" data-a="approve30">30 分钟</button>
+		<button class="btn" data-variant="outline" data-size="xs" data-a="deny" style="color:var(--destructive)">拒绝</button>
+	</div>
+</div>
 	<footer>
 		<textarea class="textarea" id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="1"></textarea>
 		<button class="btn" data-size="sm" id="send">发送</button>
@@ -161,12 +209,21 @@ let convs = [], convId = null, es = null, rendered = new Set(), sending = false,
 /* 主题：.dark class（Basecoat token 随之切换） */
 const applyTheme = (t) => {
 	document.documentElement.classList.toggle("dark", t === "dark");
-	$("theme").textContent = t === "dark" ? "浅色" : "深色";
+	$("theme").textContent = t === "dark" ? "◐" : "◑";
+	$("theme").title = t === "dark" ? "切换浅色" : "切换深色";
 	localStorage.setItem("dwell-theme", t);
 };
 applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? "dark");
 $("theme").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
 
+function relTime(ts) {
+	if (!ts) return "";
+	const d = Date.now() - ts;
+	if (d < 60e3) return "刚刚";
+	if (d < 3600e3) return Math.floor(d / 60e3) + "分前";
+	if (d < 86400e3) return Math.floor(d / 3600e3) + "时前";
+	return Math.floor(d / 86400e3) + "天前";
+}
 function toast(msg, err) {
 	const el = document.createElement("div");
 	el.className = "toast-item" + (err ? " err" : "");
@@ -211,13 +268,15 @@ async function loadConvs(keep) {
 	const box = $("convlist");
 	box.innerHTML = "";
 	const visible = convs.filter((c) => showArchived || !c.archived);
+	visible.sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
 	for (const c of visible) {
 		const el = document.createElement("div");
 		el.className = "conv" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
 		const label = c.name !== c.key ? c.name : c.key.replace(/^oc_/, "").slice(0, 20) + "…";
 		const typeZh = { direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type;
-		el.innerHTML = `<div class="name"></div><div class="sub"></div>`;
+		el.innerHTML = `<div class="row1"><span class="name" style="flex:1;min-width:0"></span><span class="tail"></span></div><div class="sub"></div>`;
 		el.querySelector(".name").textContent = label;
+		el.querySelector(".tail").textContent = relTime(c.lastTs);
 		el.querySelector(".sub").textContent = `${typeZh} #${c.id}${c.archived ? " 已归档" : ""}`;
 		el.title = c.key;
 		el.onclick = () => switchConv(c.id);
@@ -274,11 +333,13 @@ function render(data) {
 	}
 	const live = data.live ?? {};
 	const running = live.run !== undefined;
-	$("live").classList.toggle("on", running);
+	$("live").hidden = !running;
+	$("runbar").classList.toggle("on", running);
 	$("abortBtn").disabled = !running;
 	if (running) {
 		const tools = (live.tools ?? []).map((t) => `${t.name}:${t.status}`);
-		$("liveText").textContent = tools.length > 0 ? `运行中 ${tools.join(" ")}` : "运行中";
+		const txt = tools.length > 0 ? `运行中 ${tools.join(" ")}` : "运行中";
+		$("liveText").textContent = txt; $("runText").textContent = txt;
 	}
 	if (nearBottom) main.scrollTop = main.scrollHeight;
 }
@@ -313,7 +374,12 @@ function renderEntry(entry) {
 		const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("");
 		if (text) {
 			const el = msg("dwell", "dwell", "", null, model?.timestamp);
-			el.querySelector(".body").innerHTML = mdRender(text);
+			const body = el.querySelector(".body");
+			body.innerHTML = mdRender(text);
+			const cp = document.createElement("button");
+			cp.className = "copy"; cp.textContent = "复制";
+			cp.onclick = () => { navigator.clipboard.writeText(text).then(() => { cp.textContent = "已复制"; setTimeout(() => (cp.textContent = "复制"), 1500); }); };
+			el.appendChild(cp);
 			return el;
 		}
 		const calls = parts.filter((c) => c.type === "toolCall");
@@ -372,12 +438,14 @@ $("input").addEventListener("input", function () {
 });
 
 /* 顶栏操作 */
-$("resetBtn").onclick = () => sheetConfirm("清空当前会话上下文？", async () => {
-	await api("reset", { conv: Number(convId) }).catch((e) => toast(e.message, true));
+$("resetBtn").onclick = (e) => armConfirm(e.currentTarget, "清空上下文", async () => {
+	await api("reset", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 	toast("已开启新对话");
+	loadConvs(true);
 });
-$("abortBtn").onclick = () => sheetConfirm("中止当前任务？", async () => {
-	await api("abort", { conv: Number(convId) }).catch((e) => toast(e.message, true));
+$("stopRun").onclick = () => api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
+$("abortBtn").onclick = (e) => armConfirm(e.currentTarget, "中止", async () => {
+	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 });
 $("archiveBtn").onclick = () => {
 	const c = convs.find((x) => String(x.id) === String(convId));
@@ -401,6 +469,22 @@ $("newConv").onclick = () => sheetPrompt("新建会话线", "", async (name) => 
 async function loadApprovals() {
 	try {
 		const list = await api("approvals");
+		// 内联审批条：仅当前会话的待审（任务上下文处）
+		const mine = list.find((a) => Number(String(a.key).split(":")[0]) === Number(convId));
+		const inl = $("inlappr");
+		inl.classList.toggle("on", mine !== undefined);
+		if (mine !== undefined) {
+			inl.querySelector(".cmd").textContent = `${mine.match} — ${mine.command.slice(0, 72)}`;
+			for (const b of inl.querySelectorAll("button")) {
+				b.onclick = async () => {
+					const action = b.dataset.a === "deny" ? "deny" : "approve";
+					const minutes = b.dataset.a === "approve30" ? 30 : 10;
+					const r = await api("approve", { key: mine.key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
+					if (!r.ok) toast(r.error ?? "操作失败", true); else toast(action === "approve" ? "已批准" : "已拒绝");
+					loadApprovals();
+				};
+			}
+		}
 		$("approvals").hidden = list.length === 0;
 		const box = $("apprList");
 		box.innerHTML = "";
@@ -428,7 +512,7 @@ async function loadApprovals() {
 		}
 	} catch { /* 轮询失败忽略 */ }
 }
-setInterval(loadApprovals, 5000);
+setInterval(() => { loadApprovals(); loadConvs(true); }, 5000);
 loadApprovals();
 
 /* 用户管理 */
@@ -468,6 +552,29 @@ $("usersBtn").onclick = async () => {
 	$("uAdd").onclick = () => add("member");
 	$("uAddAdmin").onclick = () => add("admin");
 };
+
+$("menuBtn").onclick = (e) => { e.stopPropagation(); $("menu").hidden = !$("menu").hidden; };
+document.addEventListener("click", () => { $("menu").hidden = true; });
+$("menu").addEventListener("click", (e) => e.stopPropagation());
+
+/* 回到底部浮标 + 运行条 */
+const main = $("main");
+main.addEventListener("scroll", () => {
+	$("tobottom").classList.toggle("on", main.scrollHeight - main.scrollTop - main.clientHeight > 200);
+});
+$("tobottom").onclick = () => main.scrollTo({ top: main.scrollHeight, behavior: "smooth" });
+const reflowFloat = () => {
+	$("tobottom").style.bottom = ($("runbar").offsetHeight + $("inlappr").offsetHeight + 66) + "px";
+};
+new MutationObserver(reflowFloat).observe($("mainArea"), { subtree: true, attributes: true, attributeFilter: ["class", "hidden"] });
+reflowFloat();
+
+/* inline confirm：二次点击确认（替代弹层） */
+function armConfirm(btn, label, fn) {
+	if (btn.dataset.armed === "1") { btn.dataset.armed = ""; btn.classList.remove("confirm-inline"); btn.textContent = label; fn(); return; }
+	btn.dataset.armed = "1"; btn.classList.add("confirm-inline"); btn.textContent = "确认" + label + "?";
+	setTimeout(() => { if (btn.dataset.armed === "1") { btn.dataset.armed = ""; btn.classList.remove("confirm-inline"); btn.textContent = label; } }, 2500);
+}
 
 loadConvs();
 </script>

@@ -81,7 +81,7 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			if (list.length === 0) {
 				// 本地/空库兑底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel" }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0 }];
 			}
 			json(res, 200, list);
 			return;
@@ -223,6 +223,7 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 						return;
 					}
 					const context = BACKGROUND_CONTEXT;
+					sessions.touchActivity(conversation.id);
 					const submission = await conversation.submit(
 						{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: {} } },
 						context,
