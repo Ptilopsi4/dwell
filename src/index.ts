@@ -40,13 +40,13 @@ async function main(): Promise<void> {
 		if (pending?.via === "panel") {
 			void (async () => {
 				try {
-				const sent = await channel.send(panelUser, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
-				pending.cardMessageId = sent.messageId;
-				await sessions.anchor(sent.messageId, conversationId as ConversationId);
-			} catch (err) {
-				console.error("[dwell] panel 审批卡片私发失败:", err);
-			}
-		})();
+					const sent = await channel.send(panelUser, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
+					pending.cardMessageId = sent.messageId;
+					await sessions.anchor(sent.messageId, conversationId as ConversationId);
+				} catch (err) {
+					console.error("[dwell] panel 审批卡片私发失败:", err);
+				}
+			})();
 			return;
 		}
 		const chatId = sessions.chatOf?.(conversationId);
@@ -106,11 +106,11 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 			if (!inThread && !repliesAnchored) return;
 		}
 		if (msg.rawContentType !== "text" || msg.content.trim() === "") {
-		if (msg.rawContentType !== "text" && users.isAllowed(msg.senderId)) {
-			await channel.send(msg.chatId, { text: "目前只处理文本消息。" }, { replyTo: msg.messageId });
+			if (msg.rawContentType !== "text" && users.isAllowed(msg.senderId)) {
+				await channel.send(msg.chatId, { text: "目前只处理文本消息。" }, { replyTo: msg.messageId });
+			}
+			return;
 		}
-		return;
-	}
 		if (!users.isAllowed(msg.senderId)) {
 			await channel.send(msg.chatId, { text: "未授权使用，请联系管理员开通。" }, { replyTo: msg.messageId });
 			return;

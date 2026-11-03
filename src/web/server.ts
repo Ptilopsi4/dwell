@@ -376,13 +376,17 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			let text = "";
 			if (settled.status === "done" && settled.type === "input") {
 				const view = await conversation.viewState(BACKGROUND_CONTEXT);
-				const entries = (view.value as unknown as { entries: { kind: string; model?: { content?: unknown }[] }[] }).entries;
-				for (let i = entries.length - 1; i >= 0; i--) {
-					const e = entries[i];
-				if (e.kind !== "pi.assistant") continue;
-					const m = e.model?.[0] as { content?: { type: string; text?: string }[] | string } | undefined;
-					text = typeof m?.content === "string" ? m.content : (m?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
-					if (text !== "") break;
+				try {
+					const entries = (view.value as unknown as { entries: { kind: string; model?: { content?: unknown }[] }[] }).entries;
+					for (let i = entries.length - 1; i >= 0; i--) {
+						const e = entries[i];
+						if (e.kind !== "pi.assistant") continue;
+						const m = e.model?.[0] as { content?: { type: string; text?: string }[] | string } | undefined;
+						text = typeof m?.content === "string" ? m.content : (m?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
+						if (text !== "") break;
+					}
+				} finally {
+					view.dispose();
 				}
 			} else {
 				status = "失败";

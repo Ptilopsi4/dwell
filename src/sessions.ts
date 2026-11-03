@@ -54,12 +54,13 @@ export class Sessions {
 	}
 
 	private async save(): Promise<void> {
-		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number }> = {};
+		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean }> = {};
 		for (const [key, id] of this.convKeys) {
 			const name = this.names.get(id);
 			const archived = this.archived.has(id);
 			const ts = this.lastTs.get(id);
-			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}) };
+			const notify = this.notify.has(id);
+			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}), ...(notify ? { notify } : {}) };
 		}
 		await writeStateJson(this.file, out);
 	}

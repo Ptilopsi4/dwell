@@ -16,7 +16,7 @@ export function connectChannel(handlers: {
 		appSecret,
 		loggerLevel: LoggerLevel.warn,
 		// 群聊 mention 门禁由 dwell 自管（话题内/回复锚点消息不需要 @）：SDK 层放开
-	policy: { requireMention: false, dmMode: "open" },
+		policy: { requireMention: false, dmMode: "open" },
 	});
 	channel.on("message", handlers.onMessage);
 	channel.on("cardAction", handlers.onCardAction);
