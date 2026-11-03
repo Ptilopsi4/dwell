@@ -6,7 +6,7 @@ import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createRegistry, defineExtension, Harness, section } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, Harness, section, type Extension } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
@@ -66,7 +66,7 @@ function providerModels() {
 	return models;
 }
 
-export async function openDwell(models = providerModels()): Promise<Harness> {
+export async function openDwell(models = providerModels(), extraExtensions: Extension[] = []): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
@@ -75,6 +75,7 @@ export async function openDwell(models = providerModels()): Promise<Harness> {
 	registry.install(CodingTools);
 	registry.install(DwellExtension);
 	registry.install(makeApprovalExtension());
+	for (const extension of extraExtensions) registry.install(extension);
 	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
 	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
 	if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));

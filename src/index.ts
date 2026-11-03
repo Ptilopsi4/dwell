@@ -11,6 +11,7 @@ import { connectChannel, downloadMessageResource, type CardActionEvent, type Lar
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
+import { makeLarkExtension } from "./ext/lark.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
 
@@ -27,7 +28,14 @@ const imageDescriber: ImageDescriber | null = makeImageDescriber();
 async function main(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	await initStateDir();
-	harness = await openDwell();
+	harness = await openDwell(undefined, [
+		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
+		makeLarkExtension({
+			getClient: () => channel?.rawClient,
+			getDirectory: () => directory,
+			chatOf: (id) => sessions.chatOf(id),
+		}),
+	]);
 	sessions = new Sessions(harness);
 	await sessions.load();
 	const realigned = await sessions.alignModel();
