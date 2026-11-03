@@ -308,6 +308,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 			<div class="menu" id="menu" hidden>
 				<button id="renameBtn">重命名</button>
 				<button id="archiveBtn">归档</button>
+				<button id="notifyBtn" hidden>飞书通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
@@ -599,7 +600,7 @@ async function loadConvs(keep) {
 	// 归档区默认折叠；搜索中或当前会话已归档时自动展开，保证命中项/选中项可见
 	const openArch = showArchived || q !== "" || archived.some((c) => String(c.id) === String(convId));
 	const visible = openArch ? [...active, ...archived] : active;
-	const sig = JSON.stringify([openArch, q, active.map((c) => [c.id, convTitle(c), c.type]), archived.map((c) => [c.id, convTitle(c), c.type])]);
+	const sig = JSON.stringify([openArch, q, active.map((c) => [c.id, c.shortTitle ?? convTitle(c), c.chatId ?? null]), archived.map((c) => [c.id, convTitle(c)])]);
 	if (sig !== convSig) {
 		convSig = sig;
 		const scroll = box.scrollTop;
@@ -610,12 +611,35 @@ async function loadConvs(keep) {
 			el.dataset.id = String(c.id);
 			el.innerHTML = `${ic(c.type in ICONS ? c.type : "panel", "sm")}<span class="nm"></span><span class="pend" hidden></span><span class="tm"></span>`;
 			el.title = `${TYPE_ZH[c.type] ?? c.type} · #${c.id}${c.archived ? " · 已归档" : ""}\n${c.key}`;
-			el.querySelector(".nm").textContent = convTitle(c);
+			el.querySelector(".nm").textContent = c.shortTitle ?? convTitle(c);
 			el.onclick = () => { drawer(false); if (String(c.id) !== String(convId)) switchConv(c.id); };
 			return el;
 		};
-		for (const c of active) box.appendChild(item(c));
-		if (active.length === 0 && !(q !== "" && archived.length > 0)) box.insertAdjacentHTML("beforeend", `<div class="side-empty">${q ? "没有匹配的会话" : "没有进行中的会话"}</div>`);
+		const sec = (label) => {
+			const h = document.createElement("div");
+			h.className = "side-sec";
+			h.textContent = label;
+			box.appendChild(h);
+		};
+		if (q === "") {
+			// 分组：我的任务 / 私聊 / 每个群（群内含成员线与话题线，按最近活动排序）
+			const mine = active.filter((c) => c.type === "panel");
+			const directs = active.filter((c) => c.type === "direct");
+			const chats = new Map();
+			for (const c of active) {
+				if (c.type !== "group" && c.type !== "thread") continue;
+				const g = chats.get(c.chatId) ?? { name: c.chatName || `群 ${String(c.chatId).replace(/^oc_/, "").slice(0, 10)}`, items: [] };
+				g.items.push(c);
+				chats.set(c.chatId, g);
+			}
+			if (mine.length > 0) { sec("我的任务"); for (const c of mine) box.appendChild(item(c)); }
+			if (directs.length > 0) { sec("私聊"); for (const c of directs) box.appendChild(item(c)); }
+			for (const g of chats.values()) { sec(g.name); for (const c of g.items) box.appendChild(item(c)); }
+			if (active.length === 0 && !(q !== "" && archived.length > 0)) box.insertAdjacentHTML("beforeend", `<div class="side-empty">没有进行中的会话</div>`);
+		} else {
+			for (const c of active) box.appendChild(item(c));
+			if (active.length === 0) box.insertAdjacentHTML("beforeend", `<div class="side-empty">没有匹配的会话</div>`);
+		}
 		if (archived.length > 0) {
 			const head = document.createElement("button");
 			head.className = "side-sec arch-head" + (openArch ? " open" : "");
@@ -660,6 +684,8 @@ function markActive() {
 	$("convType").hidden = !c;
 	$("convType").textContent = c ? (TYPE_ZH[c.type] ?? c.type) : "";
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
+	$("notifyBtn").hidden = c?.type !== "panel";
+	$("notifyBtn").textContent = c?.notify ? "飞书通知：开" : "飞书通知：关";
 	$("archBanner").classList.toggle("on", Boolean(c?.archived));
 	refreshComposer();
 }
@@ -746,6 +772,16 @@ function appendEntry(entry) {
 	const log = $("log");
 	const model = entry.model?.[0];
 	const ts = model?.timestamp;
+	if (entry.kind === "context.reset") {
+		// 展示型分隔回：上下文已清空（panel/飞书 /new 或 panel 重置触发）
+		const d = document.createElement("div");
+		d.className = "day";
+		d.textContent = "上下文已清空 · 新对话";
+		$("log").appendChild(d);
+		T.lastDay = null;
+		T.lastKind = "day";
+		return;
+	}
 	if (entry.kind === "pi.user") {
 		// 没有人类发送者的输入（审批决定等系统转达），以旁注形式显示
 		dayMark(ts);
@@ -977,6 +1013,17 @@ $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 async function setArchived(archived) {
 	try { await api("archive", { id: Number(convId), archived }); await loadConvs(true); } catch (e) { toast(e.message, true); }
 }
+$("notifyBtn").onclick = async () => {
+	closeMenu();
+	const c = currentConv();
+	if (!c) return;
+	try {
+		const r = await api("notify", { id: Number(convId), on: !c.notify });
+		c.notify = r.on;
+		toast(r.on ? "任务结束后飞书私发通知你，回复通知即可继续这个任务" : "已关闭飞书通知");
+	} catch (e) { toast(e.message, true); }
+	markActive();
+};
 $("archiveBtn").onclick = () => {
 	closeMenu();
 	const c = convs.find((x) => String(x.id) === String(convId));

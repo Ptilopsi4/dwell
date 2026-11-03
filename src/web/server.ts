@@ -32,7 +32,8 @@ export interface FeishuBridge {
 	relay(conversation: Conversation, text: string): Promise<void>;
 	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
 	notice(conversationId: number, text: string): Promise<void>;
-	/** panel 做出审批决定后：同步飞书卡片，续跑结果回复到卡片下 */
+	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
+	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
 	afterDecision(conversation: Conversation, pending: PendingApproval, action: "approve" | "deny", minutes: number, submission: Submission): Promise<void>;
 }
 
@@ -159,9 +160,18 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			if (list.length === 0) {
 				// 本地/空库兑底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null, notify: false }];
 			}
-			const titled = await within(Promise.all(list.map(async (c) => ({ ...c, title: await titleOf(c) }))), 2500);
+			const titled = await within(
+				Promise.all(list.map(async (c) => {
+					const title = await titleOf(c);
+					const chatName = c.chatId !== null ? await directory.chatName(c.chatId) : undefined;
+					// 群/话题线的组内短名（侧栏按群分组后不再需要群名前缀）
+					const short = title?.split(" · ").pop();
+					return { ...c, title, chatName: chatName ?? null, shortTitle: c.type === "group" || c.type === "thread" ? (short ?? title ?? c.name) : (title ?? c.name) };
+				})),
+				2500,
+			);
 			json(res, 200, titled ?? list);
 			return;
 		}
@@ -212,7 +222,9 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			await conv.reset(undefined, BACKGROUND_CONTEXT);
-			void feishu.notice(conv.id as number, `${await feishu.operatorName()} 在 panel 清空了这条任务线的上下文，之后的消息从新对话开始。`);
+			// 新上下文里落一条展示型分隔回（模型不可见），panel 侧可见「已清空」而非无声空白
+			await conv.submit({ type: "write", entry: { kind: "context.reset", data: { by: "panel" } } }, BACKGROUND_CONTEXT);
+			void feishu.notice(conv.id as number, "管理员在 panel 清空了这条任务线的上下文，之后的消息从新对话开始。");
 			json(res, 200, { ok: true });
 			return;
 		}
@@ -248,6 +260,14 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 				await users.remove(id);
 			} else await users.add(id, body?.role === "admin" ? "admin" : "member");
 			json(res, 200, { ok: true });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/notify") {
+			const body = await readBody(req);
+			const id = Number(body?.id);
+			if (!Number.isFinite(id)) throw new HttpError(400, "bad request");
+			sessions.setNotify(id, body?.on === true);
+			json(res, 200, { ok: true, on: body?.on === true });
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/events") {
@@ -348,7 +368,35 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
+		// 飞书通知开关开启时：run 结束后私发操作者结果摘要（回复通知即续接任务）
+		if (sessions.notifyEnabled(id)) void notifyPanelResult(conversation, submission, feishu);
 		json(res, 200, { ok: true, via: "panel" });
+	}
+
+	/** panel 任务结束后私发操作者结果摘要：完成取最后一条 assistant 文本，失败取原因。 */
+	async function notifyPanelResult(conversation: Conversation, submission: Awaited<ReturnType<Conversation["submit"]>>, feishu: FeishuBridge): Promise<void> {
+		try {
+			const settled = await submission.wait(BACKGROUND_CONTEXT);
+			let status = "完成";
+			let text = "";
+			if (settled.status === "done" && settled.type === "input") {
+				const view = await conversation.viewState(BACKGROUND_CONTEXT);
+				const entries = (view.value as unknown as { entries: { kind: string; model?: { content?: unknown }[] }[] }).entries;
+				for (let i = entries.length - 1; i >= 0; i--) {
+					const e = entries[i];
+				if (e.kind !== "pi.assistant") continue;
+					const m = e.model?.[0] as { content?: { type: string; text?: string }[] | string } | undefined;
+					text = typeof m?.content === "string" ? m.content : (m?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
+					if (text !== "") break;
+				}
+			} else {
+				status = "失败";
+				text = settled.status === "unanswered" ? settled.reason : settled.status;
+			}
+			await feishu.notifyPanel(conversation.id as number, status, text === "" ? "（无文本输出）" : text);
+		} catch (err) {
+			console.error("[dwell] panel 任务通知失败:", err);
+		}
 	}
 
 	server.listen(port, "0.0.0.0", () => {

@@ -35,8 +35,20 @@ async function main(): Promise<void> {
 	}
 
 	setApprovalCallback((conversationId, sender, command, match) => {
-		// panel 发起的 run 只在 panel 审批，不打扰飞书群
-		if (pendingApprovals.get(windowKey(conversationId, sender))?.via === "panel") return;
+		const pending = pendingApprovals.get(windowKey(conversationId, sender));
+		// panel 发起的 run：审批卡私发给操作者（不发放起群），回复通知即可续接任务
+		if (pending?.via === "panel") {
+			void (async () => {
+				try {
+				const sent = await channel.send(panelUser, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
+				pending.cardMessageId = sent.messageId;
+				await sessions.anchor(sent.messageId, conversationId as ConversationId);
+			} catch (err) {
+				console.error("[dwell] panel 审批卡片私发失败:", err);
+			}
+		})();
+			return;
+		}
 		const chatId = sessions.chatOf?.(conversationId);
 		if (chatId === undefined) return;
 		void sendApprovalCard(chatId, conversationId, sender, command, match);
@@ -285,6 +297,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				return;
 			}
 			await conversation.reset(undefined, context);
+			// 新上下文里落一条展示型分隔回（模型不可见），panel 侧可见「已清空」而非无声空白
+			await conversation.submit({ type: "write", entry: { kind: "context.reset", data: { by: "feishu" } } }, context);
 			await replyTo(target, "已开启新对话。");
 			break;
 		case "/status": {
@@ -466,6 +480,18 @@ const feishuBridge: FeishuBridge = {
 	},
 	async notice(conversationId, text) {
 		await sendToConversationChat(conversationId, text).catch((err: unknown) => console.error("[dwell] 飞书通知发送失败:", err));
+	},
+	async notifyPanel(conversationId, status, text) {
+		if (!connected()) return;
+		const name = sessions.nameOf(conversationId) ?? `任务 #${conversationId}`;
+		const link = process.env.DWELL_PANEL_URL ? `\n[打开 panel](${process.env.DWELL_PANEL_URL}?conv=${conversationId})` : "";
+		try {
+			// 私发给操作者；消息锚到任务线，回复这条通知即在该任务线上继续
+			const sent = await channel.send(panelUser, { markdown: `**任务${status}** · ${name}\n\n${text.slice(0, 200)}${text.length > 200 ? "…" : ""}${link}` });
+			await sessions.anchor(sent.messageId, conversationId as ConversationId);
+		} catch (err) {
+			console.error("[dwell] panel 任务通知发送失败:", err);
+		}
 	},
 	async afterDecision(conversation, pending, action, minutes, submission) {
 		if (pending.cardMessageId === undefined || pending.cardChatId === undefined || !connected()) {
