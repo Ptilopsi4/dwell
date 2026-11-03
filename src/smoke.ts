@@ -1,20 +1,20 @@
-// 冒烟测试：提问一句，打印答案。有 ZAI_CODING_CN_API_KEY 走真实链路；没有则用 faux 模型验证 durable 装配（storage/工具/checkpoint）。
+// 冒烟测试：提问一句，打印答案。当前 provider 的凭证 env 已设置则走真实链路；没有则用 faux 模型验证 durable 装配（storage/工具/checkpoint）。
 // 用法：node src/smoke.ts "你的问题"
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { AssistantEntry } from "@earendil-works/pi-durable";
-import { MODEL, openDwell } from "./harness.ts";
+import { MODEL, MODEL_KEY_ENV, openDwell } from "./harness.ts";
 
 const prompt = process.argv[2] ?? "用一句话介绍你自己，然后列出你当前工作目录里的文件。";
 
 let harness;
 let model = MODEL;
-if (process.env.ZAI_CODING_CN_API_KEY) {
+if (process.env[MODEL_KEY_ENV]) {
 	harness = await openDwell();
 } else {
-	console.error("（ZAI_CODING_CN_API_KEY 未设置，用 faux 模型验证 durable 链路）");
+	console.error(`（${MODEL_KEY_ENV} 未设置，用 faux 模型验证 durable 链路）`);
 	const faux = fauxProvider();
 	faux.setResponses([fauxAssistantMessage([fauxText("[faux] dwell 链路正常：装配、SQLite storage、提交与等待均工作。")])]);
 	const models = createModels();

@@ -1,7 +1,8 @@
-// dwell harness 装配：SQLite storage + zai-coding-cn (GLM) + CodingTools + dwell 系统提示。
+// dwell harness 装配：SQLite storage + 模型 provider（zai-coding-cn 或 deepseek）+ CodingTools + dwell 系统提示。
 // 全部配置来自环境变量，见 README。
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
+import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -10,7 +11,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
-const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
+const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
 
 export function scrubSecretEnv(): void {
 	for (const name of SECRET_ENV) delete process.env[name];
@@ -21,7 +22,17 @@ import { join, resolve } from "node:path";
 export const DATA_DIR = process.env.DWELL_DATA ?? "./data";
 /** 状态文件目录（users/sessions/message-map）：独立于 data/（agent 可写域），避免模型覆写自升权限/劫持路由。 */
 export const STATE_DIR = process.env.DWELL_STATE ?? "./state";
-export const MODEL = { provider: "zai-coding-cn", modelId: process.env.DWELL_MODEL ?? "glm-5.3" };
+/** DWELL_PROVIDER 选择模型来源；每个 provider 的凭证 env 与默认模型。 */
+const PROVIDERS = {
+	"zai-coding-cn": { keyEnv: "ZAI_CODING_CN_API_KEY", defaultModel: "glm-5.3", make: zaiCodingCnProvider },
+	deepseek: { keyEnv: "DEEPSEEK_API_KEY", defaultModel: "deepseek-v4-pro", make: deepseekProvider },
+} as const;
+type ProviderId = keyof typeof PROVIDERS;
+const providerId = (process.env.DWELL_PROVIDER ?? "zai-coding-cn") as ProviderId;
+if (!(providerId in PROVIDERS)) throw new Error(`DWELL_PROVIDER=${providerId} 不支持（可选：${Object.keys(PROVIDERS).join(" / ")}）`);
+export const MODEL: { readonly provider: string; readonly modelId: string } = { provider: providerId, modelId: process.env.DWELL_MODEL ?? PROVIDERS[providerId].defaultModel };
+/** 当前 provider 的凭证 env 名（smoke 判断是否走真实链路）。 */
+export const MODEL_KEY_ENV = PROVIDERS[providerId].keyEnv;
 
 const PREAMBLE = `你是 dwell，一个常驻服务器的通用助手。通过飞书对话与人交流。
 - 用中文回答，技术术语保留英文
@@ -35,24 +46,25 @@ const DwellExtension = defineExtension({
 	sections: [section("preamble", () => PREAMBLE, { tag: false })],
 });
 
-function zaiModels() {
-	const key = process.env.ZAI_CODING_CN_API_KEY;
-	if (key === undefined) throw new Error("ZAI_CODING_CN_API_KEY 未设置（dwell 需要智谱 Coding Plan 凭证）");
+function providerModels() {
+	const { keyEnv, make } = PROVIDERS[providerId];
+	const key = process.env[keyEnv];
+	if (key === undefined || key === "") throw new Error(`${keyEnv} 未设置（DWELL_PROVIDER=${providerId} 需要该凭证）`);
 	// key 预置进 credential store（优先于 env 解析），随后 process.env 可清理
 	const credential = { type: "api_key" as const, key };
 	const models = createModels({
 		credentials: {
-			read: async (providerId: string) => (providerId === "zai-coding-cn" ? credential : undefined),
+			read: async (id: string) => (id === providerId ? credential : undefined),
 			list: async () => [],
 			modify: async (_id: string, fn: (current: typeof credential | undefined) => Promise<typeof credential | undefined>) => await fn(credential),
 			delete: async () => {},
 		},
 	});
-	models.setProvider(zaiCodingCnProvider());
+	models.setProvider(make());
 	return models;
 }
 
-export async function openDwell(models = zaiModels()): Promise<Harness> {
+export async function openDwell(models = providerModels()): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));

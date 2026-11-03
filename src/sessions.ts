@@ -128,6 +128,24 @@ export class Sessions {
 		await this.save();
 	}
 
+	/**
+	 * 已有会话的 agent 模型在创建时持久化；切换 DWELL_PROVIDER/DWELL_MODEL 后启动时统一对齐到当前 MODEL，
+	 * 否则旧会话仍会请求已不再注册的 provider。返回被改动的会话数。
+	 */
+	async alignModel(): Promise<number> {
+		const context = BACKGROUND_CONTEXT;
+		let changed = 0;
+		for (const id of new Set(this.convKeys.values())) {
+			const conversation = await this.harness.conversation(id, context);
+			if (conversation === undefined) continue;
+			const current = (await conversation.agent(context)).model;
+			if (current?.provider === MODEL.provider && current.modelId === MODEL.modelId) continue;
+			await conversation.configure({ model: MODEL }, context);
+			changed++;
+		}
+		return changed;
+	}
+
 	/** panel 新建独立会话线（cwd 独立，不与飞书会话共享）。 */
 	async createPanelConversation(name: string): Promise<Conversation> {
 		const context = BACKGROUND_CONTEXT;

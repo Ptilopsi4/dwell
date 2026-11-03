@@ -2,7 +2,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
-import { openDwell, scrubSecretEnv } from "./harness.ts";
+import { MODEL, openDwell, scrubSecretEnv } from "./harness.ts";
 import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
@@ -23,6 +23,8 @@ async function main(): Promise<void> {
 	harness = await openDwell();
 	sessions = new Sessions(harness);
 	await sessions.load();
+	const realigned = await sessions.alignModel();
+	console.log(`[dwell] 模型 ${MODEL.provider}/${MODEL.modelId}${realigned > 0 ? `（${realigned} 个会话已切换到该模型）` : ""}`);
 	await users.load();
 	if (!users.isAllowed("__none__") && [...new Set([process.env.DWELL_ALLOW, process.env.DWELL_ADMINS])].every((s) => !s?.trim())) {
 		if (!users.isAllowed("")) console.error("[dwell] 白名单为空，dwell 将拒绝所有消息（用 /allow 添加或配置 DWELL_ALLOW/DWELL_ADMINS）");

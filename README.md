@@ -9,9 +9,11 @@
 
 | 变量 | 说明 |
 |---|---|
-| `ZAI_CODING_CN_API_KEY` | 智谱 Coding Plan 凭证（必填） |
+| `DWELL_PROVIDER` | 模型来源：`zai-coding-cn`（默认）/ `deepseek`。切换后重启，已有会话自动改用新模型 |
+| `ZAI_CODING_CN_API_KEY` | 智谱 Coding Plan 凭证（`DWELL_PROVIDER=zai-coding-cn` 时必填） |
+| `DEEPSEEK_API_KEY` | DeepSeek 凭证（`DWELL_PROVIDER=deepseek` 时必填） |
 | `DWELL_ALLOW` | 飞书 open_id 白名单，逗号分隔（不设则拒绝所有消息） |
-| `DWELL_MODEL` | 模型 id，默认 `glm-5.3` |
+| `DWELL_MODEL` | 模型 id，默认 `glm-5.3`（zai-coding-cn）/ `deepseek-v4-pro`（deepseek，另有 `deepseek-flash`） |
 | `DWELL_DATA` | 数据目录（sqlite/sessions/会话工作目录），默认 `./data`，容器内 `/data` |
 
 ## 飞书命令
