@@ -298,6 +298,21 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 	const isOwner = msg.senderId === owner;
 
 	switch (cmd) {
+		case "/help":
+			await replyTo(target, [
+				"**命令**",
+				"/new — 开启新对话（清空本任务线上下文）",
+				"/status — 查看运行中任务（管理员）",
+				"/cancel — 中止当前任务（线主/管理员）",
+				"/approve [分钟] — 批准危险命令窗口，默认 10 分钟",
+				"/deny — 关闭批准窗口",
+				"/allow @某人 [admin] — 添加成员/管理员（管理员）",
+				"/disallow @某人 — 移除用户（管理员）",
+				"/whoami — 显示你的 ID",
+				"",
+				"对话规则：群里 @我 发消息（每人独立任务线，互不打扰）；回复某条消息可加入该任务线；话题群内直接发言即可。",
+			].join("\n"));
+			break;
 		case "/whoami":
 			await replyTo(target, `你的 ID：${msg.senderId}${users.isAdmin(msg.senderId) ? "（管理员）" : ""}`);
 			break;
@@ -386,7 +401,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			break;
 		}
 		default:
-			await replyTo(target, `未知命令 ${cmd}。可用：/whoami /new /status /cancel /approve [分钟] /deny /allow @某人 [admin] /disallow @某人`);
+			await replyTo(target, `未知命令 ${cmd}，回复 /help 查看可用命令。`);
 	}
 }
 
