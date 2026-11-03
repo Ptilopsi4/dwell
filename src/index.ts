@@ -99,6 +99,12 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 
 async function handleMessage(msg: NormalizedMessage): Promise<void> {
 	try {
+		// 群聊准入（SDK policy 已放开 mention 门，由这里细化）：话题内消息与回复已锚定消息视为显式指向，平消息仍需 @bot
+		if (msg.chatType === "group" && !msg.mentionedBot) {
+			const inThread = msg.threadId !== undefined;
+			const repliesAnchored = msg.replyToMessageId !== undefined && sessions.follow(msg.replyToMessageId) !== undefined;
+			if (!inThread && !repliesAnchored) return;
+		}
 		if (msg.rawContentType !== "text" || msg.content.trim() === "") {
 		if (msg.rawContentType !== "text" && users.isAllowed(msg.senderId)) {
 			await channel.send(msg.chatId, { text: "目前只处理文本消息。" }, { replyTo: msg.messageId });
@@ -124,8 +130,9 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
+		// panel 会话（无对应 chat）经飞书续接时保持 panel 入口语义：审批仍私发管理员，不发放起群
 		runSender.set(conversation.id as number, msg.senderId);
-		runVia.set(conversation.id as number, "feishu");
+		runVia.set(conversation.id as number, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
 		const text = msg.content.trim();
 		if (text.startsWith("/")) {
@@ -226,6 +233,9 @@ async function submitAndReply(
 					} else if (!final.startsWith(cursor) && final.length > 0) {
 						// cursor 是作废 partial（重试/换轮）：分隔后追加完整最终答案，不丢尾
 						await s.append(`\n\n${final}`);
+					} else if (final.length === 0 && cursor.length === 0) {
+						// 无任何文本产出（模型连续出错/被中止）：给群里一个明确终态，不留悬空卡
+						await s.append("（本次运行没有产出文本：模型出错或被中止，可重发）");
 					}
 				} finally {
 					await watch.stop();
@@ -466,6 +476,8 @@ const feishuBridge: FeishuBridge = {
 		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);
+		// 飞书侧有新动静的线不再留在归档组
+		if (sessions.isArchived(id)) await sessions.setArchived(id, false);
 		runSender.set(id, panelUser);
 		runVia.set(id, "feishu");
 		const submission = await conversation.submit({
@@ -478,7 +490,13 @@ const feishuBridge: FeishuBridge = {
 		void submitAndReply(conversation, submission, sent);
 	},
 	async notice(conversationId, text) {
-		await sendToConversationChat(conversationId, text).catch((err: unknown) => console.error("[dwell] 飞书通知发送失败:", err));
+		// 通知也锚定到任务线：回复通知即在原线上继续
+		try {
+			const sent = await sendToConversationChat(conversationId, text);
+			if (sent !== undefined) await sessions.anchor(sent.messageId, conversationId as ConversationId);
+		} catch (err: unknown) {
+			console.error("[dwell] 飞书通知发送失败:", err);
+		}
 	},
 	async notifyPanel(conversationId, status, text) {
 		if (!connected()) return;
