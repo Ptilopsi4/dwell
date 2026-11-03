@@ -221,8 +221,8 @@ async function loadConvs(keep) {
 	arch.onclick = () => { showArchived = !showArchived; loadConvs(true); };
 	box.appendChild(arch);
 	if (!keep && visible.length > 0) {
-		const saved = localStorage.getItem("dwell-conv");
-		const hit = visible.find((c) => String(c.id) === saved);
+		const wanted = params.get("conv") ?? localStorage.getItem("dwell-conv");
+		const hit = visible.find((c) => String(c.id) === wanted);
 		switchConv(hit ? hit.id : visible[visible.length - 1].id);
 	}
 }
