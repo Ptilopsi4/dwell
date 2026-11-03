@@ -1,6 +1,6 @@
 // 飞书连接：官方 SDK Channel 模块（单 WebSocket 收事件+卡片回调，自动重连，消息归一化）。
 // 凭证走环境变量，不依赖 ~/.lark-cli。
-import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
+import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
 
 export function connectChannel(handlers: {
 	onMessage: (msg: NormalizedMessage) => void;
@@ -24,7 +24,7 @@ export function connectChannel(handlers: {
 	return channel.connect().then(() => channel);
 }
 
-export type { CardActionEvent, LarkChannel, NormalizedMessage };
+export type { CardActionEvent, LarkChannel, MarkdownStreamController, NormalizedMessage };
 
 /** 下载用户消息内的资源（图/文件）。走 im/v1/messages/:id/resources/:key（消息资源接口）——
  *  Channel 自带的 downloadResource 走 im/v1/images/:image_key，仅适用于应用自己上传的图，

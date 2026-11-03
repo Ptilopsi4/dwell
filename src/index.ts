@@ -7,7 +7,7 @@ import { describeResources } from "./media.ts";
 import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
-import { connectChannel, downloadMessageResource, type CardActionEvent, type LarkChannel, type NormalizedMessage } from "./feishu/channel.ts";
+import { connectChannel, downloadMessageResource, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
@@ -138,37 +138,38 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		runSender.set(conversation.id as number, msg.senderId);
 		runVia.set(conversation.id as number, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
-		let content = msg.content.trim();
+		const content = msg.content.trim();
 		if (content.startsWith("/")) {
 			await runCommand(content, conversation, msg, target);
 			return;
 		}
-		// 多模态预处理：图片→flash 描述，文件→落盘，描述/路径附进上下文（主模型无视觉）
+		// 多模态：媒体消息走独立流式流程（先占位再接主模型流，避免预处理 10s 黑盒）
 		if ((msg.resources?.length ?? 0) > 0) {
 			const agent = await conversation.agent(BACKGROUND_CONTEXT);
-			const attachment = await describeResources(msg, agent.cwd ?? process.cwd(), {
-				download: (fileKey, type) => downloadMessageResource(channel, msg.messageId, fileKey, type),
-				describer: imageDescriber,
-			});
-			content = content === "" ? attachment : `${content}\n\n${attachment}`;
+			void mediaStreamAndReply(conversation, msg, agent.cwd ?? process.cwd(), target);
+			return;
 		}
 
-		const context = BACKGROUND_CONTEXT;
-		const submission = await conversation.submit(
-			{
-				type: "input",
-				content,
-				// transcript 记录 sender（审计/分账基础；model 仍只看 content）
-				entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType } },
-				requestId: msg.messageId,
-				whenBusy: "steer",
-			},
-			context,
-		);
+		const submission = await submitInput(conversation, content, msg);
 		void submitAndReply(conversation, submission, target);
 	} catch (err) {
 		console.error("[dwell] 消息处理出错:", err);
 	}
+}
+
+/** 统一的输入提交（媒体/文本两条路径共用：transcript 记 sender，requestId 幂等，steer）。 */
+function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage) {
+	return conversation.submit(
+		{
+			type: "input",
+			content,
+			// transcript 记录 sender（审计/分账基础；model 仍只看 content）
+			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType } },
+			requestId: msg.messageId,
+			whenBusy: "steer",
+		},
+		BACKGROUND_CONTEXT,
+	);
 }
 
 /** 流式回复：watch pi.live 的节流 partial，前缀检测 append 增量（轮切换/重试自动重置游标），settled 后补齐最终答案。 */
@@ -179,9 +180,68 @@ async function submitAndReply(
 ): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	try {
-		await channel.stream(target.chatId, {
-			markdown: async (s) => {
-				const watch = await conversation.watch(context);
+		await channel.stream(target.chatId, { markdown: (s) => streamReplyCore(conversation, submission, s, context) }, { replyTo: target.messageId });
+	} catch (err) {
+		// 流式通道失败时退回普通回复
+		console.error("[dwell] 流式回复失败，退回普通回复:", err);
+		try {
+			await submitAndReplyPlain(conversation, submission, target);
+		} catch (err2) {
+			console.error("[dwell] 回复彻底失败:", err2);
+		}
+	}
+}
+
+/** 媒体消息流式流程：同一张卡内先占位（图片分析/文件接收），预处理完成后清占位接主模型流。 */
+async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMessage, cwd: string, target: ReplyTarget): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	let submission: Awaited<ReturnType<Conversation["submit"]>> | undefined;
+	try {
+		await channel.stream(
+			target.chatId,
+			{
+				markdown: async (s) => {
+					const resources = msg.resources ?? [];
+					const images = resources.filter((r) => r.type === "image" || r.type === "sticker").length;
+					const files = resources.filter((r) => r.type === "file").length;
+					const bits = [images > 0 ? `📷 ${images} 张图片` : "", files > 0 ? `📎 ${files} 个文件` : ""].filter(Boolean).join(" + ");
+					await s.setContent(`${bits}，正在处理…`);
+					const attachment = await describeResources(msg, cwd, {
+						download: (fileKey, type) => downloadMessageResource(channel, msg.messageId, fileKey, type),
+						describer: imageDescriber,
+					});
+					const text = msg.content.trim();
+					submission = await submitInput(conversation, text === "" ? attachment : `${text}\n\n${attachment}`, msg);
+					await s.setContent(""); // 清占位，主模型流从空白起
+					await streamReplyCore(conversation, submission, s, context);
+				},
+			},
+			{ replyTo: target.messageId },
+		);
+	} catch (err) {
+		console.error("[dwell] 媒体流式回复失败:", err);
+		try {
+			if (submission !== undefined) {
+					await submitAndReplyPlain(conversation, submission, target);
+			} else {
+					await channel.send(target.chatId, { text: "图片/文件处理失败，请重试。" }, { replyTo: target.messageId });
+			}
+		} catch (err2) {
+			console.error("[dwell] 回复彻底失败:", err2);
+		}
+	}
+}
+
+/** 主模型流式回复主体：watch pi.live 增量 append，settled 后补齐最终答案。占位阶段的 setContent 由调用方负责。 */
+async function streamReplyCore(
+	conversation: Conversation,
+	submission: Awaited<ReturnType<Conversation["submit"]>>,
+	s: MarkdownStreamController,
+	context: typeof BACKGROUND_CONTEXT,
+): Promise<void> {
+	try {
+		{
+			const watch = await conversation.watch(context);
 				let cursor = "";
 				// 工具概述：callId → 摘要（从 transcript 的 assistant toolCall 取参数），done 后报告一次
 				const callSummary = new Map<string, string>();
@@ -250,19 +310,13 @@ async function submitAndReply(
 						// 无任何文本产出（模型连续出错/被中止）：给群里一个明确终态，不留悬空卡
 						await s.append("（本次运行没有产出文本：模型出错或被中止，可重发）");
 					}
-				} finally {
-					await watch.stop();
-				}
-			},
-		}, { replyTo: target.messageId });
-	} catch (err) {
-		// 流式通道失败时退回普通回复
-		console.error("[dwell] 流式回复失败，退回普通回复:", err);
-		try {
-			await submitAndReplyPlain(conversation, submission, target);
-		} catch (err2) {
-			console.error("[dwell] 回复彻底失败:", err2);
+			} finally {
+				await watch.stop();
+			}
 		}
+	} catch (err) {
+		// 流式帧处理失败：卡片已创建，最多丢部分流式效果
+		console.error("[dwell] 流式帧处理失败:", err);
 	}
 }
 
