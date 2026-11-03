@@ -101,7 +101,7 @@ export class Sessions {
 			owner: this.owners.get(id) ?? "",
 			name: this.names.get(id) ?? key,
 			archived: this.archived.has(id),
-			type: key.includes("#t:") ? "thread" : key.includes("#") ? "group" : key.startsWith("oc_") ? "direct" : "panel",
+			type: key.startsWith("panel") || key === "root" ? "panel" : key.includes("#t:") ? "thread" : key.includes("#") ? "group" : "direct",
 		}));
 	}
 
