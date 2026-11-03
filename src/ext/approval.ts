@@ -34,7 +34,7 @@ export function setApprovalCallback(fn: (conversationId: number, sender: string,
 const DANGEROUS: RegExp[] = [
 	/\brm\s+(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*)\b/i,
 	/\bssh\b|\bscp\b|\brsync\b.*(-e\s*ssh|@)/,
-	/curl[^|]*\s(-[a-z]*d\b|--data|--form\b|-F\b|-T\b|--upload)|curl[^|]*-X\s*POST/,
+	/curl[^|]*\s(-[a-z]*d\b|--data|--form\b|-F\b|-T\b|--upload|--json)|curl[^|]*-X\s*(POST|PUT|PATCH|DELETE)/,
 	/wget[^|]*--post/,
 	/npm\s+install\s+-g|apt(-get)?\s+install|pip3?\s+install/,
 	/\bdocker\b|\bsystemctl\b|\bcrontab\b/,

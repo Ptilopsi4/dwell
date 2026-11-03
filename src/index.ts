@@ -280,7 +280,8 @@ async function streamReplyCore(
 						for (const slot of live?.tools ?? []) {
 							if (slot.status === "done" && !reported.has(slot.callId) && callSummary.has(slot.callId)) {
 								reported.add(slot.callId);
-							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n`);
+								// 尾部空行不可省：markdown 引用块（>）会把紧邻的下一行吸入——正文首句会被包进工具概述
+							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n\n`);
 						}
 						}
 						// 模型文本流
