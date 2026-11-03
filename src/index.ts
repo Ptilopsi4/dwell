@@ -447,7 +447,9 @@ const feishuBridge: FeishuBridge = {
 	async relay(conversation, text) {
 		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
 		const id = conversation.id as number;
-		const sent = await sendToConversationChat(id, `**${OPERATOR_LABEL}**（panel）：\n${text}`);
+		// 飞书侧以「From admin:」前缀 + 整段斜体呈现，和成员自己的消息区分；逐段包斜体（markdown 强调不跨空行）
+		const ital = (t: string) => t.split(/\n{2,}/).map((p) => (p.trim() !== "" ? `*${p}*` : p)).join("\n\n");
+		const sent = await sendToConversationChat(id, ital(`From admin: ${text}`));
 		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);

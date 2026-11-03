@@ -973,7 +973,7 @@ function refreshComposer() {
 	const note = feishu && sendMode === "note";
 	$("composer").classList.toggle("note", note);
 	const where = currentConv()?.type === "direct" ? "对方" : "群成员";
-	$("input").placeholder = !feishu ? "输入消息" : note ? "内部指令：只写入模型上下文，飞书里看不到" : `发到飞书：${where}会看到「管理员（panel）」和 bot 的回复`;
+	$("input").placeholder = !feishu ? "输入消息" : note ? "内部指令：只写入模型上下文，飞书里看不到" : `发到飞书：${where}会看到斜体的「From admin: …」和 bot 的回复`;
 	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
 	$("hint").classList.toggle("busy", running);
 	$("hint").innerHTML = !running ? keys : note ? "<span>运行中：内部指令在当前步骤结束后生效</span>" : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
