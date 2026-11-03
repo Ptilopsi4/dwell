@@ -735,7 +735,7 @@ function render(data) {
 		$("metaChip").innerHTML = parts.join('<span class="sep"></span>');
 		$("metaChip").title = m.model ?? "";
 	}
-	if (log.childElementCount === 0) log.innerHTML = `<div class="empty"><div class="logo">d</div><b>开始对话</b>发送第一条消息；运行中发送的消息会插入当前任务</div>`;
+	if (log.childElementCount === 0) log.innerHTML = `<div class="empty"><div class="logo">d</div><b>开始对话</b>发送第一条消息</div>`;
 	if (nearBottom) main.scrollTop = main.scrollHeight;
 }
 function dayMark(ts) {
@@ -986,7 +986,7 @@ function refreshComposer() {
 	const c = currentConv();
 	const feishu = Boolean(c?.chatId);
 	const where = c?.type === "direct" ? "对方" : "群成员";
-	$("input").placeholder = !feishu ? "输入消息" : `发到飞书：${where}会看到斜体的「From admin: …」和 bot 的回复`;
+	$("input").placeholder = !feishu ? "输入消息" : `发到飞书：${where}会看到「From admin: …」，bot 在飞书回复`;
 	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
 	$("hint").classList.toggle("busy", running);
 	$("hint").innerHTML = !running ? keys : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
@@ -1005,7 +1005,7 @@ document.addEventListener("click", closeMenu);
 $("menu").addEventListener("click", (e) => e.stopPropagation());
 $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
-	try { await api("reset", { conv: Number(convId) }); toast("上下文已清空，开始新对话"); } catch (err) { toast(err.message, true); }
+	try { await api("reset", { conv: Number(convId) }); } catch (err) { toast(err.message, true); }
 }, "确认清空上下文?");
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));

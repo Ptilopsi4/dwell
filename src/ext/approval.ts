@@ -113,7 +113,11 @@ export function makeApprovalExtension() {
 					if (windowOpen(convId, sender)) return undefined;
 					pendingApprovals.set(windowKey(convId, sender), { command, match, trigger: sender, via: runVia.get(convId) ?? "feishu" });
 					onApprovalNeeded?.(convId, sender, command, match);
-					return { block: `该命令被审批策略拦截（${match}）。请明确告诉用户：等待审批卡片按钮或回复 /approve 批准（默认 10 分钟窗口）。批准后继续原任务；不要尝试其他方式绕过。` };
+					// 面板入口的审批只在面板处理（飞书成员 /approve 开的是自己的窗口，帮不上忙）
+					const viaPanel = runVia.get(convId) === "panel";
+					return { block: viaPanel
+						? `该命令被审批策略拦截（${match}）。已通知管理员在面板审批，请告知用户稍候。批准后继续原任务；不要尝试其他方式绕过。`
+						: `该命令被审批策略拦截（${match}）。请告知用户：点击审批卡片按钮，或回复 /approve 批准（默认 10 分钟窗口）。批准后继续原任务；不要尝试其他方式绕过。` };
 				},
 			}),
 		],

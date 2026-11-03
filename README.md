@@ -48,6 +48,6 @@ docker compose up -d --build
 ## Web panel
 
 - 访问：`http://<服务器IP>:7788/?token=<DWELL_PANEL_TOKEN>`（监听 0.0.0.0，配合内网穿透使用，勿暴露公网）。首次访问后 token 换成 HttpOnly cookie（30 天）并从地址栏移除，之后直接访问 `http://<服务器IP>:7788/` 即可
-- 功能：多会话线切换（记忆选择）、实时 transcript（SSE 增量推送，含生成中文本预览）、工具调用/结果行、运行状态、发消息（IME 安全）、审批、用户管理；窄屏下侧栏为抽屉
+- 功能：会话侧栏（我的任务/私聊/群分组/归档）、实时 transcript（SSE 增量，含生成中文本预览与工具调用折叠）、审批、用户管理；给飞书会话发消息会转发到原对话（From admin），panel 任务可开飞书通知（回复通知即续接）；窄屏侧栏为抽屉
 - 主题：未手动切换时跟随系统，◐/◑ 手动切换后记忆
 - 配置：`DWELL_PANEL_PORT` + `DWELL_PANEL_TOKEN`（缺一不启动）；本地开发 `DWELL_PANEL_ONLY=1` 只起 panel 不连飞书

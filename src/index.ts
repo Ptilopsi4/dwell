@@ -120,7 +120,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };
 		if (degraded) {
-			await replyTo(target, "原任务线已归档，这条作为新任务开始。");
+			await replyTo(target, "原任务线的记录已过期，这条在新的任务线上开始。");
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
@@ -457,7 +457,6 @@ const OPERATOR_LABEL = "管理员";
 
 const feishuBridge: FeishuBridge = {
 	operator: () => panelUser,
-	operatorName: async () => OPERATOR_LABEL,
 	async relay(conversation, text) {
 		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
 		const id = conversation.id as number;

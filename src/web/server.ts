@@ -27,7 +27,6 @@ interface PanelOptions {
 export interface FeishuBridge {
 	/** panel 操作者 open_id */
 	operator(): string;
-	operatorName(): Promise<string>;
 	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复 */
 	relay(conversation: Conversation, text: string): Promise<void>;
 	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
@@ -175,10 +174,6 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			json(res, 200, titled ?? list);
 			return;
 		}
-		if (req.method === "GET" && url.pathname === "/api/me") {
-			json(res, 200, { id: feishu.operator(), name: await within(feishu.operatorName(), 2500) ?? null });
-			return;
-		}
 		if (req.method === "GET" && url.pathname === "/api/approvals") {
 			// 待审队列（等人事项优先展示，借 dsh panel 哲学）
 			const list = [...pendingApprovals.entries()].map(([key, p]) => ({ key, ...p }));
@@ -232,7 +227,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			await conv.abort(BACKGROUND_CONTEXT);
-			void feishu.notice(conv.id as number, `${await feishu.operatorName()} 在 panel 中止了当前任务。`);
+			void feishu.notice(conv.id as number, "管理员在 panel 中止了当前任务。");
 			json(res, 200, { ok: true });
 			return;
 		}
