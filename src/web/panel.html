@@ -82,6 +82,11 @@ svg.i.sm { width: 14px; height: 14px; }
 .conv .pend { font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); line-height: 17px; white-space: nowrap; }
 .conv.arch { opacity: .55; }
 .side-link { display: block; width: 100%; text-align: left; padding: .3rem .6rem; margin-top: .25rem; font-size: 12px; color: var(--faint); background: none; border: 0; cursor: pointer; border-radius: 6px; }
+.arch-head { display: flex; align-items: center; gap: 5px; width: 100%; margin-top: .7rem; padding: .3rem .6rem; border: 0; border-radius: 6px; background: none; cursor: pointer; text-align: left; }
+.arch-head:hover { color: var(--muted-foreground); background: var(--hover); }
+.arch-head svg { transition: transform .12s; }
+.arch-head.open svg { transform: rotate(90deg); }
+.arch-head .cnt { margin-left: auto; font-weight: 500; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .side-link:hover { color: var(--foreground); background: var(--hover); }
 .side-empty { padding: 1.5rem .5rem; text-align: center; font-size: 12.5px; color: var(--muted-foreground); }
 #approvals { max-height: 38%; overflow-y: auto; padding: 0 .65rem .6rem; }
@@ -561,7 +566,7 @@ async function flushNames() {
 <script>
 "use strict";
 /* ── 会话状态 ── */
-let convs = [], convId = null, es = null, showArchived = false, sending = false, running = false, runSince = 0;
+let convs = [], convId = null, es = null, showArchived = localStorage.getItem("dwell-show-archived") === "1", sending = false, running = false, runSince = 0;
 let convSig = "", apprSig = "", pendingByConv = new Map();
 // transcript 渲染游标：工具调用行按 callId 索引，结果到达时回填
 let T = null;
@@ -586,42 +591,50 @@ async function loadConvs(keep) {
 	convs = await api("conversations");
 	const q = $("q").value.trim().toLowerCase();
 	const box = $("convlist");
-	const visible = convs
-		.filter((c) => showArchived || !c.archived)
-		.filter((c) => q === "" || convTitle(c).toLowerCase().includes(q) || c.key.toLowerCase().includes(q) || String(c.id) === q)
-		.sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
-	const sig = JSON.stringify([showArchived, q, visible.map((c) => [c.id, convTitle(c), c.archived, c.type])]);
+	const match = (c) => q === "" || convTitle(c).toLowerCase().includes(q) || c.key.toLowerCase().includes(q) || String(c.id) === q;
+	const byRecent = (a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0);
+	const active = convs.filter((c) => !c.archived && match(c)).sort(byRecent);
+	const archived = convs.filter((c) => c.archived && match(c)).sort(byRecent);
+	// 归档区默认折叠；搜索中或当前会话已归档时自动展开，保证命中项/选中项可见
+	const openArch = showArchived || q !== "" || archived.some((c) => String(c.id) === String(convId));
+	const visible = openArch ? [...active, ...archived] : active;
+	const sig = JSON.stringify([openArch, q, active.map((c) => [c.id, convTitle(c), c.type]), archived.map((c) => [c.id, convTitle(c), c.type])]);
 	if (sig !== convSig) {
 		convSig = sig;
 		const scroll = box.scrollTop;
 		box.replaceChildren();
-		for (const c of visible) {
+		const item = (c) => {
 			const el = document.createElement("button");
 			el.className = "conv" + (c.archived ? " arch" : "");
 			el.dataset.id = String(c.id);
-			el.title = c.key;
 			el.innerHTML = `${ic(c.type in ICONS ? c.type : "panel", "sm")}<span class="nm"></span><span class="pend" hidden></span><span class="tm"></span>`;
 			el.title = `${TYPE_ZH[c.type] ?? c.type} · #${c.id}${c.archived ? " · 已归档" : ""}\n${c.key}`;
 			el.querySelector(".nm").textContent = convTitle(c);
 			el.onclick = () => { drawer(false); if (String(c.id) !== String(convId)) switchConv(c.id); };
-			box.appendChild(el);
-		}
-		if (visible.length === 0) box.insertAdjacentHTML("beforeend", `<div class="side-empty">${q ? "没有匹配的会话" : "还没有会话"}</div>`);
-		const arch = convs.filter((c) => c.archived).length;
-		if (arch > 0) {
-			const t = document.createElement("button");
-			t.className = "side-link";
-			t.textContent = showArchived ? "隐藏已归档" : `显示已归档（${arch}）`;
-			t.onclick = () => { showArchived = !showArchived; loadConvs(true); };
-			box.appendChild(t);
+			return el;
+		};
+		for (const c of active) box.appendChild(item(c));
+		if (active.length === 0 && !(q !== "" && archived.length > 0)) box.insertAdjacentHTML("beforeend", `<div class="side-empty">${q ? "没有匹配的会话" : "没有进行中的会话"}</div>`);
+		if (archived.length > 0) {
+			const head = document.createElement("button");
+			head.className = "side-sec arch-head" + (openArch ? " open" : "");
+			head.innerHTML = `${ic("chev", "sm")}<span>已归档</span><span class="cnt">${archived.length}</span>`;
+			head.onclick = () => {
+				showArchived = !openArch;
+				localStorage.setItem("dwell-show-archived", showArchived ? "1" : "");
+				loadConvs(true);
+			};
+			box.appendChild(head);
+			if (openArch) for (const c of archived) box.appendChild(item(c));
 		}
 		box.scrollTop = scroll;
 	}
 	refreshConvMarks(visible);
-	if (!keep && visible.length > 0 && convId === null) {
+	if (!keep && convId === null && convs.length > 0) {
 		const wanted = params.get("conv") ?? localStorage.getItem("dwell-conv");
 		const hit = convs.find((c) => String(c.id) === wanted);
-		switchConv(hit ? hit.id : visible[0].id);
+		const first = active[0] ?? archived[0];
+		if (hit || first) switchConv((hit ?? first).id);
 	}
 }
 function refreshConvMarks(visible = convs) {
@@ -651,8 +664,11 @@ function markActive() {
 $("q").addEventListener("input", () => loadConvs(true).catch(() => {}));
 
 function switchConv(id) {
+	const leaving = convs.find((c) => String(c.id) === String(convId));
 	convId = id;
 	localStorage.setItem("dwell-conv", String(id));
+	// 离开/进入归档会话会改变归档区的自动展开状态，立即重算列表
+	if (leaving?.archived || convs.find((c) => String(c.id) === String(id))?.archived) loadConvs(true).catch(() => {});
 	if (es) es.close();
 	T = freshTranscript();
 	$("log").replaceChildren();
