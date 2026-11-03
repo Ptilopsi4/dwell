@@ -45,7 +45,7 @@ body {
 	font: 11.5px ui-monospace, Consolas, monospace; color: var(--muted-foreground);
 	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.appr .ops { margin-top: .35rem; display: flex; gap: .4rem; }
+.appr .ops { margin-top: .35rem; display: flex; flex-wrap: wrap; gap: .4rem; }
 #mainArea { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #topbar {
 	display: flex; align-items: center; gap: .5rem;
@@ -132,14 +132,26 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 .msg:hover .copy, .msg:focus-within .copy { visibility: visible; }
 .confirm-inline { color: var(--destructive) !important; font-weight: 600; }
 
-@media (max-width: 720px) { #side { display: none; } }
+@media (max-width: 720px) {
+  #side { position: fixed; inset: 0 auto 0 0; z-index: 60; transform: translateX(-100%); transition: transform .18s ease; box-shadow: 0 0 32px rgb(0 0 0 / .35); }
+  /* 类名避开 Basecoat 的 .drawer 组件 */
+  body.side-open #side { transform: none; }
+  body.side-open #scrim { display: block; }
+  #drawerBtn { display: inline-flex !important; }
+  main { padding: .75rem .8rem 1.2rem; }
+  .msg { grid-template-columns: 48px 1fr; gap: .5rem; }
+}
+#drawerBtn { display: none; }
+#scrim { display: none; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .4); }
+.msg.streaming .body { opacity: .8; }
+.msg.streaming .who::after { content: " …"; }
 </style>
 </head>
 <body>
 <aside id="side">
 	<div class="brand">
 		<span class="dot off" id="statusDot"></span>
-		<span class="fw-semibold">dwell</span>
+		<span style="font-weight:600">dwell</span>
 		<small id="status">连接中</small>
 	</div>
 	<div id="convlist"></div>
@@ -155,10 +167,10 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 </aside>
 <div id="mainArea">
 	<div id="topbar">
+		<button class="btn" data-variant="ghost" data-size="icon-sm" id="drawerBtn" title="会话列表">☰</button>
 		<span class="title" id="convTitle">—</span>
 		<span class="badge" data-variant="secondary" id="convType"></span>
 		<span class="spacer"></span>
-		<button class="btn" data-variant="ghost" data-size="sm" id="abortBtn" disabled>中止</button>
 		<div class="menu-wrap">
 			<button class="btn" data-variant="ghost" data-size="icon-sm" id="menuBtn" title="会话操作">⋯</button>
 			<div class="menu" id="menu" hidden>
@@ -169,7 +181,6 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 		</div>
 	</div>
 	<main id="main"><div class="empty">选择左侧会话线<br><small>或点击「＋ 新会话」开始</small></div></main>
-	<div id="live" hidden><span class="spin"></span><span id="liveText">运行中</span></div>
 <button id="tobottom" title="回到底部">↓ 底部</button>
 <div id="runbar"><span class="spin"></span><span id="runText">运行中</span><button class="btn" data-variant="outline" data-size="xs" id="stopRun">停止</button></div>
 <div id="inlappr"><div class="cap">需要你的审批</div><div class="cmd"></div>
@@ -185,6 +196,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 	</footer>
 </div>
 
+<div id="scrim"></div>
 <dialog class="dialog" id="sheet">
 	<form class="dlg-body" method="dialog">
 		<h6 id="sheetTitle"></h6>
@@ -197,24 +209,43 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); }
 "use strict";
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const token = params.get("token") ?? "";
-const HEAD = { "x-panel-token": token, "content-type": "application/json" };
+// token 首次由 URL 带入，服务端已换发 HttpOnly cookie；从地址栏移除，避免进历史/截图/分享链接
+if (params.has("token")) {
+	const clean = new URLSearchParams(params);
+	clean.delete("token");
+	history.replaceState(null, "", location.pathname + (clean.toString() !== "" ? `?${clean}` : ""));
+}
+const HEAD = { "content-type": "application/json" };
 const api = async (path, body) => {
-	const res = await fetch(`/api/${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`, body === undefined ? {} : { method: "POST", headers: HEAD, body: JSON.stringify(body) });
-	if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+	const res = await fetch(`/api/${path}`, body === undefined ? {} : { method: "POST", headers: HEAD, body: JSON.stringify(body) });
+	if (!res.ok) {
+		const text = await res.text();
+		let msg = text;
+		try { msg = JSON.parse(text).error ?? text; } catch { /* 非 JSON 原样显示 */ }
+		throw new Error(`${res.status} ${msg}`);
+	}
 	return res.json();
 };
+const TYPE_ZH = { direct: "私聊", group: "群", thread: "话题", panel: "panel" };
 let convs = [], convId = null, es = null, rendered = new Set(), sending = false, showArchived = false;
+let convSig = "", apprSig = "", streamEl = null;
 
-/* 主题：.dark class（Basecoat token 随之切换） */
-const applyTheme = (t) => {
+/* 主题：.dark class（Basecoat token 随之切换）；未手动选择时跟随系统 */
+const sysTheme = matchMedia("(prefers-color-scheme: light)");
+const applyTheme = (t, remember) => {
 	document.documentElement.classList.toggle("dark", t === "dark");
 	$("theme").textContent = t === "dark" ? "◐" : "◑";
 	$("theme").title = t === "dark" ? "切换浅色" : "切换深色";
-	localStorage.setItem("dwell-theme", t);
+	if (remember) localStorage.setItem("dwell-theme", t);
 };
-applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? "dark");
-$("theme").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
+applyTheme(params.get("theme") ?? localStorage.getItem("dwell-theme") ?? (sysTheme.matches ? "light" : "dark"), false);
+sysTheme.addEventListener("change", (e) => { if (localStorage.getItem("dwell-theme") === null) applyTheme(e.matches ? "light" : "dark", false); });
+$("theme").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark", true);
+
+/* 窄屏抽屉 */
+const drawer = (open) => document.body.classList.toggle("side-open", open);
+$("drawerBtn").onclick = () => drawer(true);
+$("scrim").onclick = () => drawer(false);
 
 function relTime(ts) {
 	if (!ts) return "";
@@ -262,52 +293,70 @@ const sheetConfirm = (title, onOk) => {
 	$("sheetOk").onclick = () => { $("sheet").close(); onOk(); };
 };
 
-/* 会话列表 */
+/* 会话列表：结构未变时只刷新相对时间，不重建 DOM（保滚动/悬停/焦点） */
+const convLabel = (c) => (c.name !== c.key ? c.name : c.key.replace(/^oc_/, "").slice(0, 20) + "…");
 async function loadConvs(keep) {
 	convs = await api("conversations");
 	const box = $("convlist");
-	box.innerHTML = "";
 	const visible = convs.filter((c) => showArchived || !c.archived);
 	visible.sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
-	for (const c of visible) {
-		const el = document.createElement("div");
-		el.className = "conv" + (String(c.id) === String(convId) ? " active" : "") + (c.archived ? " archived" : "");
-		const label = c.name !== c.key ? c.name : c.key.replace(/^oc_/, "").slice(0, 20) + "…";
-		const typeZh = { direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type;
-		el.innerHTML = `<div class="row1"><span class="name" style="flex:1;min-width:0"></span><span class="tail"></span></div><div class="sub"></div>`;
-		el.querySelector(".name").textContent = label;
-		el.querySelector(".tail").textContent = relTime(c.lastTs);
-		el.querySelector(".sub").textContent = `${typeZh} #${c.id}${c.archived ? " 已归档" : ""}`;
-		el.title = c.key;
-		el.onclick = () => switchConv(c.id);
-		box.appendChild(el);
+	const sig = JSON.stringify([showArchived, visible.map((c) => [c.id, c.name, c.archived, c.type])]);
+	if (sig !== convSig) {
+		convSig = sig;
+		const scroll = box.scrollTop;
+		box.replaceChildren();
+		for (const c of visible) {
+			const el = document.createElement("div");
+			el.className = "conv" + (c.archived ? " archived" : "");
+			el.dataset.id = String(c.id);
+			el.innerHTML = `<div class="row1"><span class="name" style="flex:1;min-width:0"></span><span class="tail"></span></div><div class="sub"></div>`;
+			el.querySelector(".name").textContent = convLabel(c);
+			el.querySelector(".sub").textContent = `${TYPE_ZH[c.type] ?? c.type} #${c.id}${c.archived ? " 已归档" : ""}`;
+			el.title = c.key;
+			el.onclick = () => { drawer(false); if (String(c.id) !== String(convId)) switchConv(c.id); };
+			box.appendChild(el);
+		}
+		const arch = document.createElement("button");
+		arch.className = "btn";
+		arch.dataset.variant = "ghost";
+		arch.dataset.size = "sm";
+		arch.style.justifyContent = "flex-start";
+		arch.textContent = showArchived ? "隐藏归档" : "显示归档";
+		arch.onclick = () => { showArchived = !showArchived; loadConvs(true); };
+		box.appendChild(arch);
+		box.scrollTop = scroll;
 	}
-	const arch = document.createElement("button");
-	arch.className = "btn";
-	arch.dataset.variant = "ghost";
-	arch.dataset.size = "sm";
-	arch.style.justifyContent = "flex-start";
-	arch.textContent = showArchived ? "隐藏归档" : "显示归档";
-	arch.onclick = () => { showArchived = !showArchived; loadConvs(true); };
-	box.appendChild(arch);
+	for (const c of visible) {
+		const el = box.querySelector(`.conv[data-id="${c.id}"]`);
+		if (el) el.querySelector(".tail").textContent = relTime(c.lastTs);
+	}
+	markActive();
 	if (!keep && visible.length > 0) {
 		const wanted = params.get("conv") ?? localStorage.getItem("dwell-conv");
 		const hit = visible.find((c) => String(c.id) === wanted);
-		switchConv(hit ? hit.id : visible[visible.length - 1].id);
+		switchConv(hit ? hit.id : visible[0].id);
 	}
+}
+function markActive() {
+	for (const el of $("convlist").querySelectorAll(".conv")) el.classList.toggle("active", el.dataset.id === String(convId));
+	if (convId === null) return;
+	const c = convs.find((x) => String(x.id) === String(convId));
+	$("convTitle").textContent = c ? (c.name !== c.key ? c.name : `#${c.id}`) : `#${convId}`;
+	$("convType").textContent = c ? (TYPE_ZH[c.type] ?? c.type) : "";
+	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 }
 function switchConv(id) {
 	convId = id;
 	localStorage.setItem("dwell-conv", String(id));
 	if (es) es.close();
 	rendered = new Set();
-	$("main").innerHTML = "";
-	const c = convs.find((x) => String(x.id) === String(id));
-	$("convTitle").textContent = c ? (c.name !== c.key ? c.name : `#${c.id}`) : `#${id}`;
-	$("convType").textContent = c ? ({ direct: "私聊", group: "群", thread: "话题", panel: "panel" }[c.type] ?? c.type) : "";
-	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
-	loadConvs(true);
-	es = new EventSource(`/api/events?conv=${id}&token=${encodeURIComponent(token)}`);
+	streamEl = null;
+	$("main").replaceChildren();
+	$("runbar").classList.remove("on");
+	markActive();
+	apprSig = "";
+	loadApprovals();
+	es = new EventSource(`/api/events?conv=${encodeURIComponent(id)}`);
 	es.addEventListener("sync", onSync);
 	es.onerror = () => setStatus(false);
 }
@@ -324,23 +373,43 @@ function onSync(e) {
 function render(data) {
 	const main = $("main");
 	const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 48;
+	if (data.mode !== "append") {
+		// 活动 entries 被替换（清空上下文 / compaction / 重连）：整体重绘
+		rendered = new Set();
+		main.replaceChildren();
+		streamEl = null;
+	}
 	const empty = main.querySelector(".empty"); if (empty) empty.remove();
 	for (const entry of data.entries ?? []) {
 		if (rendered.has(entry.id)) continue;
 		rendered.add(entry.id);
-		const node = renderEntry(entry);
+		let node = null;
+		try { node = renderEntry(entry); } catch (err) { console.error("renderEntry", entry.kind, entry.id, err); }
 		if (node) main.appendChild(node);
 	}
-	const live = data.live ?? {};
-	const running = live.run !== undefined;
-	$("live").hidden = !running;
+	const live = data.live;
+	const running = live !== null && live !== undefined;
 	$("runbar").classList.toggle("on", running);
-	$("abortBtn").disabled = !running;
 	if (running) {
 		const tools = (live.tools ?? []).map((t) => `${t.name}:${t.status}`);
-		const txt = tools.length > 0 ? `运行中 ${tools.join(" ")}` : "运行中";
-		$("liveText").textContent = txt; $("runText").textContent = txt;
+		let txt = tools.length > 0 ? `运行中 ${tools.join(" ")}` : "运行中";
+		if (live.retry) txt += ` · 重试：${live.retry}`;
+		$("runText").textContent = txt;
 	}
+	// 流式预览：生成中的文本挂在末尾，定稿 entry 到达后由其替代
+	if (running && live.text) {
+		if (streamEl === null) {
+			streamEl = document.createElement("div");
+			streamEl.className = "msg dwell streaming";
+			streamEl.innerHTML = `<span class="who">dwell</span><div class="body"></div>`;
+		}
+		streamEl.querySelector(".body").innerHTML = mdRender(live.text);
+		main.appendChild(streamEl);
+	} else if (streamEl !== null) {
+		streamEl.remove();
+		streamEl = null;
+	}
+	if (main.childElementCount === 0) main.innerHTML = `<div class="empty">暂无消息</div>`;
 	if (nearBottom) main.scrollTop = main.scrollHeight;
 }
 
@@ -372,24 +441,29 @@ function renderEntry(entry) {
 	if (entry.kind === "pi.assistant") {
 		const parts = model?.content ?? [];
 		const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("");
+		const calls = parts.filter((c) => c.type === "toolCall");
+		// 同一条回复可同时含正文与工具调用；出错/中止时 content 可能为空，原因在 errorMessage
+		const frag = document.createDocumentFragment();
 		if (text) {
 			const el = msg("dwell", "dwell", "", null, model?.timestamp);
-			const body = el.querySelector(".body");
-			body.innerHTML = mdRender(text);
+			el.querySelector(".body").innerHTML = mdRender(text);
 			const cp = document.createElement("button");
 			cp.className = "copy"; cp.textContent = "复制";
 			cp.onclick = () => { navigator.clipboard.writeText(text).then(() => { cp.textContent = "已复制"; setTimeout(() => (cp.textContent = "复制"), 1500); }); };
 			el.appendChild(cp);
-			return el;
+			frag.appendChild(el);
 		}
-		const calls = parts.filter((c) => c.type === "toolCall");
 		if (calls.length > 0) {
-			return msg("tool call", "tool", calls.map((c) => `${c.name} ${summaryArgs(c.arguments)}`).join("\n"), null, model?.timestamp);
+			frag.appendChild(msg("tool call", "tool", calls.map((c) => `${c.name} ${summaryArgs(c.arguments)}`).join("\n"), null, model?.timestamp));
 		}
-		return null;
+		if (model?.stopReason === "error" || model?.stopReason === "aborted") {
+			const why = model.stopReason === "aborted" ? "已中止" : `模型出错：${model.errorMessage ?? "未知错误"}`;
+			frag.appendChild(msg("tool err", "dwell", why, null, model?.timestamp));
+		}
+		return frag.childNodes.length > 0 ? frag : null;
 	}
 	if (entry.kind === "pi.tool-result") {
-		const err = (entry.data?.diagnostics ?? []).length > 0;
+		const err = model?.isError === true || (entry.data?.diagnostics ?? []).length > 0;
 		const raw = contentText(model?.content);
 		let body = raw.length > 400 ? raw.slice(0, 400).replace(/\n[^\n]*$/, "") + "\n…（已截断，共 " + raw.length + " 字符）" : raw;
 		if (body === "") body = err ? "（错误，无输出）" : "";
@@ -401,6 +475,8 @@ function renderEntry(entry) {
 	return null;
 }
 function contentText(content) {
+	// user 消息的 content 可以是纯字符串（panel/飞书提交）或 content block 数组
+	if (typeof content === "string") return content;
 	return (content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
 }
 function summaryArgs(a) {
@@ -439,12 +515,13 @@ $("input").addEventListener("input", function () {
 
 /* 顶栏操作 */
 $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, "清空上下文", async () => {
-	await api("reset", { conv: Number(convId) }).catch((err) => toast(err.message, true));
-	toast("已开启新对话");
-	loadConvs(true);
+	$("menu").hidden = true;
+	try {
+		await api("reset", { conv: Number(convId) });
+		toast("已开启新对话");
+	} catch (err) { toast(err.message, true); }
 });
-$("stopRun").onclick = () => api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
-$("abortBtn").onclick = (e) => armConfirm(e.currentTarget, "中止", async () => {
+$("stopRun").onclick = (e) => armConfirm(e.currentTarget, "停止", async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 });
 $("archiveBtn").onclick = () => {
@@ -457,67 +534,71 @@ $("archiveBtn").onclick = () => {
 	}
 };
 $("renameBtn").onclick = () => sheetPrompt("重命名会话线", $("convTitle").textContent, async (name) => {
-	await api("rename", { id: Number(convId), name }).catch((e) => toast(e.message, true));
-	loadConvs(true);
+	try {
+		await api("rename", { id: Number(convId), name });
+		await loadConvs(true);
+	} catch (e) { toast(e.message, true); }
 });
 $("newConv").onclick = () => sheetPrompt("新建会话线", "", async (name) => {
 	const r = await api("conversations", { name }).catch((e) => (toast(e.message, true), null));
-	if (r) { await loadConvs(); switchConv(r.id); }
+	if (r) { await loadConvs(true); switchConv(r.id); }
 });
 
-/* 审批队列 */
-async function loadApprovals() {
-	try {
-		const list = await api("approvals");
-		// 内联审批条：仅当前会话的待审（任务上下文处）
-		const mine = list.find((a) => Number(String(a.key).split(":")[0]) === Number(convId));
-		const inl = $("inlappr");
-		inl.classList.toggle("on", mine !== undefined);
-		if (mine !== undefined) {
-			inl.querySelector(".cmd").textContent = `${mine.match} — ${mine.command.slice(0, 72)}`;
-			for (const b of inl.querySelectorAll("button")) {
-				b.onclick = async () => {
-					const action = b.dataset.a === "deny" ? "deny" : "approve";
-					const minutes = b.dataset.a === "approve30" ? 30 : 10;
-					const r = await api("approve", { key: mine.key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
-					if (!r.ok) toast(r.error ?? "操作失败", true); else toast(action === "approve" ? "已批准" : "已拒绝");
-					loadApprovals();
-				};
-			}
-		}
-		$("approvals").hidden = list.length === 0;
-		const box = $("apprList");
-		box.innerHTML = "";
-		for (const a of list) {
-			const el = document.createElement("div");
-			el.className = "appr";
-			el.innerHTML = `<div class="cmd"></div>
-				<div class="ops">
-					<button class="btn" data-variant="outline" data-size="xs" data-a="approve10">批准 10 分钟</button>
-					<button class="btn" data-variant="outline" data-size="xs" data-a="approve30">30 分钟</button>
-					<button class="btn" data-variant="outline" data-size="xs" data-a="deny" style="color:var(--destructive)">拒绝</button>
-				</div>`;
-			el.querySelector(".cmd").textContent = `${a.match} — ${a.command.slice(0, 60)}`;
-			for (const b of el.querySelectorAll("button")) {
-				b.onclick = async () => {
-					const action = b.dataset.a === "deny" ? "deny" : "approve";
-					const minutes = b.dataset.a === "approve30" ? 30 : 10;
-					const r = await api("approve", { key: a.key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
-					if (!r.ok) toast(r.error ?? "操作失败", true);
-					else toast(action === "approve" ? "已批准" : "已拒绝");
-					loadApprovals();
-				};
-			}
-			box.appendChild(el);
-		}
-	} catch { /* 轮询失败忽略 */ }
+/* 审批队列：当前会话的待审只在内联条，侧栏只列其他会话；列表未变不重建 */
+const apprConv = (a) => Number(String(a.key).split(":")[0]);
+function bindApprOps(root, key) {
+	for (const b of root.querySelectorAll("button[data-a]")) {
+		b.onclick = async () => {
+			const action = b.dataset.a === "deny" ? "deny" : "approve";
+			const minutes = b.dataset.a === "approve30" ? 30 : 10;
+			const r = await api("approve", { key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
+			if (!r.ok) toast(r.error ?? "操作失败", true);
+			else toast(action === "approve" ? "已批准" : "已拒绝");
+			apprSig = "";
+			loadApprovals();
+		};
+	}
 }
-setInterval(() => { loadApprovals(); loadConvs(true); }, 5000);
-loadApprovals();
+async function loadApprovals() {
+	let list;
+	try { list = await api("approvals"); } catch { return; /* 轮询失败忽略 */ }
+	const sig = JSON.stringify([convId, list.map((a) => a.key)]);
+	if (sig === apprSig) return;
+	apprSig = sig;
+	const mine = list.find((a) => apprConv(a) === Number(convId));
+	const inl = $("inlappr");
+	inl.classList.toggle("on", mine !== undefined);
+	if (mine !== undefined) {
+		inl.querySelector(".cmd").textContent = `${mine.match} — ${mine.command.slice(0, 72)}`;
+		bindApprOps(inl, mine.key);
+	}
+	const others = list.filter((a) => a !== mine);
+	$("approvals").hidden = others.length === 0;
+	const box = $("apprList");
+	box.replaceChildren();
+	for (const a of others) {
+		const el = document.createElement("div");
+		el.className = "appr";
+		el.innerHTML = `<div class="cmd"></div>
+			<div class="ops">
+				<button class="btn" data-variant="ghost" data-size="xs" data-go>查看</button>
+				<button class="btn" data-variant="outline" data-size="xs" data-a="approve10">批准 10 分钟</button>
+				<button class="btn" data-variant="outline" data-size="xs" data-a="approve30">30 分钟</button>
+				<button class="btn" data-variant="outline" data-size="xs" data-a="deny" style="color:var(--destructive)">拒绝</button>
+			</div>`;
+		el.querySelector(".cmd").textContent = `#${apprConv(a)} ${a.match} — ${a.command.slice(0, 60)}`;
+		el.querySelector(".cmd").title = a.command;
+		el.querySelector("[data-go]").onclick = () => { drawer(false); switchConv(apprConv(a)); };
+		bindApprOps(el, a.key);
+		box.appendChild(el);
+	}
+}
+setInterval(() => { loadApprovals(); loadConvs(true).catch(() => {}); }, 5000);
+
 
 /* 用户管理 */
 $("usersBtn").onclick = async () => {
-	const users = await api("users").catch(() => []);
+	const users = await api("users").catch((e) => (toast(e.message, true), []));
 	$("sheetTitle").textContent = "用户管理";
 	$("sheetBody").innerHTML = `
 		<div style="display:flex;gap:.4rem;margin-bottom:.8rem">
@@ -536,10 +617,12 @@ $("usersBtn").onclick = async () => {
 			<span class="badge" data-variant="${u.role === "admin" ? "default" : "secondary"}">${u.role === "admin" ? "管理员" : "成员"}</span>
 			<button class="btn" data-variant="ghost" data-size="icon-xs" title="移除">✕</button>`;
 		row.querySelector(".mid").textContent = u.id;
-		row.querySelector("button").onclick = async () => {
-			await api("users", { id: u.id, action: "remove" });
-			$("usersBtn").onclick();
-		};
+		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, "✕", async () => {
+			try {
+				await api("users", { id: u.id, action: "remove" });
+				$("usersBtn").onclick();
+			} catch (err) { toast(err.message, true); }
+		}, "确认移除?");
 		list.appendChild(row);
 	}
 	$("sheet").showModal();
@@ -570,13 +653,13 @@ new MutationObserver(reflowFloat).observe($("mainArea"), { subtree: true, attrib
 reflowFloat();
 
 /* inline confirm：二次点击确认（替代弹层） */
-function armConfirm(btn, label, fn) {
+function armConfirm(btn, label, fn, prompt = "确认" + label + "?") {
 	if (btn.dataset.armed === "1") { btn.dataset.armed = ""; btn.classList.remove("confirm-inline"); btn.textContent = label; fn(); return; }
-	btn.dataset.armed = "1"; btn.classList.add("confirm-inline"); btn.textContent = "确认" + label + "?";
+	btn.dataset.armed = "1"; btn.classList.add("confirm-inline"); btn.textContent = prompt;
 	setTimeout(() => { if (btn.dataset.armed === "1") { btn.dataset.armed = ""; btn.classList.remove("confirm-inline"); btn.textContent = label; } }, 2500);
 }
 
-loadConvs();
+loadConvs().catch((e) => { setStatus(false); toast("加载会话失败 " + e.message, true); });
 </script>
 </body>
 </html>

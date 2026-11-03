@@ -1,6 +1,7 @@
 // Panel HTTP 服务：token 准入（内网穿透直连场景），SSE 推流（transcript + live 状态），静态页面。
-// 协议简化：SSE 每帧全量 sync（活动 entries + live 概要），panel 按 id 增量渲染。
+// SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,14 +20,39 @@ interface PanelOptions {
 	token: string;
 }
 
+class HttpError extends Error {
+	readonly status: number;
+	constructor(status: number, message: string) {
+		super(message);
+		this.status = status;
+	}
+}
+
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
 	let body = "";
 	for await (const chunk of req) {
 		body += chunk;
-		if (body.length > 100_000) throw new Error("body too large");
+		if (body.length > 100_000) throw new HttpError(413, "body too large");
 	}
-	return body === "" ? undefined : (JSON.parse(body) as Record<string, unknown>);
+	if (body === "") return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		throw new HttpError(400, "bad json");
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new HttpError(400, "bad json");
+	return parsed as Record<string, unknown>;
 }
+
+/** pi.live 中 panel 用到的部分（完整定义见 pi-durable LiveState）。 */
+type LiveDoc = {
+	run?: unknown;
+	generation?: { message?: { content?: { type: string; text?: string }[] }; retry?: { error: string } };
+	tools?: { name: string; status: string }[];
+};
+
+const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
 
 export function startPanel({ harness, sessions, users, port, token }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
@@ -36,9 +62,17 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 		js: "text/javascript; charset=utf-8",
 	};
 
+	const tokenDigest = digest(token);
+	const COOKIE = "dwell_panel";
+	const cookieToken = (req: IncomingMessage): string | undefined => {
+		const m = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]*)`).exec(req.headers.cookie ?? "");
+		if (m === null) return undefined;
+		try { return decodeURIComponent(m[1] ?? ""); } catch { return undefined; }
+	};
+	// 首次 ?token= 进入后换发 HttpOnly cookie，页面随即把 token 从地址栏移除；SameSite=Strict 挡跨站请求
 	const authed = (req: IncomingMessage, url: URL): boolean => {
-		const t = url.searchParams.get("token") ?? req.headers["x-panel-token"];
-		return t === token;
+		const t = url.searchParams.get("token") ?? req.headers["x-panel-token"] ?? cookieToken(req);
+		return typeof t === "string" && timingSafeEqual(digest(t), tokenDigest);
 	};
 
 	const json = (res: ServerResponse, code: number, body: unknown): void => {
@@ -46,8 +80,14 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 		res.end(JSON.stringify(body));
 	};
 
+	// 未捕获的 rejection 会终止整个进程（飞书 bot 同进程），所有请求错误在此收口
 	const server = createServer((req, res) => {
-		void handle(req, res);
+		handle(req, res).catch((err: unknown) => {
+			const status = err instanceof HttpError ? err.status : 500;
+			if (status === 500) console.error("[dwell] panel 请求失败:", req.method, req.url?.split("?")[0], err);
+			if (res.headersSent) res.end();
+			else json(res, status, { error: err instanceof Error ? err.message : String(err) });
+		});
 	});
 
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -70,7 +110,12 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 		if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
 			void readFile(panelFile, "utf8")
 				.then((html) => {
-					res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+					res.writeHead(200, {
+						"content-type": "text/html; charset=utf-8",
+						"cache-control": "no-store",
+						"referrer-policy": "no-referrer",
+						"set-cookie": `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`,
+					});
 					res.end(html);
 				})
 				.catch(() => json(res, 500, { error: "panel missing" }));
@@ -106,7 +151,9 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 		}
 		if (req.method === "POST" && url.pathname === "/api/rename") {
 			const body = await readBody(req);
-			await sessions.rename(Number(body?.id), String(body?.name ?? "").slice(0, 40));
+			const name = String(body?.name ?? "").trim().slice(0, 40);
+			if (name === "") throw new HttpError(400, "name required");
+			await sessions.rename(Number(body?.id), name);
 			json(res, 200, { ok: true });
 			return;
 		}
@@ -131,7 +178,7 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/approve") {
-			const body = await readBody(req).catch(() => undefined);
+			const body = await readBody(req);
 			const key = String(body?.key ?? "");
 			const convId = Number(key.split(":")[0]);
 			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
@@ -145,17 +192,19 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			const id = String(body?.id ?? "");
 			if (!id.startsWith("ou_")) { json(res, 400, { error: "bad open_id" }); return; }
 			const action = String(body?.action ?? "");
-			if (action === "remove") await users.remove(id);
-			else await users.add(id, body?.role === "admin" ? "admin" : "member");
+			if (action === "remove") {
+				if (users.isAdmin(id) && users.adminCount() <= 1) throw new HttpError(409, "无法移除最后一名管理员");
+				await users.remove(id);
+			} else await users.add(id, body?.role === "admin" ? "admin" : "member");
 			json(res, 200, { ok: true });
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/events") {
-			handleEvents(url, res);
+			await handleEvents(url, res);
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/send") {
-			handleSend(req, url, res);
+			await handleSend(req, res);
 			return;
 		}
 		json(res, 404, { error: "not found" });
@@ -173,72 +222,66 @@ export function startPanel({ harness, sessions, users, port, token }: PanelOptio
 			"cache-control": "no-cache",
 			connection: "keep-alive",
 		});
-		const send = (event: string, data: unknown): void => {
-			res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-		};
-		const context = BACKGROUND_CONTEXT;
-		const view = await conversation.viewState(context);
-		const frame = async (): Promise<void> => {
-			const v = view.value as unknown as {
-				entries: unknown[];
-				docs?: Record<string, unknown>;
+		// close 先于 viewState 挂上：客户端在 attach 期间断开时也能释放订阅
+		let closed = false;
+		const cleanups: (() => void)[] = [];
+		res.on("close", () => {
+			closed = true;
+			for (const fn of cleanups) fn();
+		});
+		const view = await conversation.viewState(BACKGROUND_CONTEXT);
+		cleanups.push(() => view.dispose());
+		if (closed) {
+			view.dispose();
+			return;
+		}
+		let sent: string[] = [];
+		const frame = (): void => {
+			if (closed) return;
+			const v = view.value as unknown as { entries: { id: unknown }[]; docs?: Record<string, unknown> };
+			const ids = v.entries.map((e) => String(e.id));
+			const append = sent.length > 0 && sent.length <= ids.length && ids[0] === sent[0] && ids[sent.length - 1] === sent[sent.length - 1];
+			const entries = append ? v.entries.slice(sent.length) : v.entries;
+			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
+			const slim = live?.run === undefined ? null : {
+				tools: (live.tools ?? []).map((t) => ({ name: t.name, status: t.status })),
+				text: (live.generation?.message?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join(""),
+				retry: live.generation?.retry?.error,
 			};
-			send("sync", { entries: v.entries, live: v.docs?.["pi.live"] ?? null });
+			sent = ids;
+			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim })}\n\n`);
 		};
-		await frame();
-		const unsubscribe = view.subscribe(() => void frame());
+		frame();
+		cleanups.push(view.subscribe(frame));
 		// 心跳保活（穿透链路）
 		const beat = setInterval(() => res.write(": ping\n\n"), 25_000);
-		reqClose(res, () => {
-			clearInterval(beat);
-			unsubscribe();
-			view.dispose();
-		});
+		cleanups.push(() => clearInterval(beat));
 	}
 
 	async function convFromBody(req: IncomingMessage): Promise<Conversation | undefined> {
-		const body = await readBody(req).catch(() => undefined);
+		const body = await readBody(req);
 		const id = Number(body?.conv ?? body?.id);
 		if (!Number.isFinite(id)) return undefined;
 		return harness.conversation(id as ConversationId, BACKGROUND_CONTEXT);
 	}
 
-	function handleSend(req: IncomingMessage, url: URL, res: ServerResponse): void {
-		let body = "";
-		req.on("data", (chunk: Buffer) => {
-			body += chunk;
-			if (body.length > 100_000) req.destroy();
-		});
-		req.on("end", () => {
-			void (async () => {
-				try {
-					const { conv, content } = JSON.parse(body) as { conv?: number; content?: string };
-					if (conv === undefined || typeof content !== "string" || content.trim() === "") {
-						json(res, 400, { error: "bad request" });
-						return;
-					}
-					const conversation = await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT);
-					if (conversation === undefined) {
-						json(res, 404, { error: "conversation not found" });
-						return;
-					}
-					const context = BACKGROUND_CONTEXT;
-					sessions.touchActivity(conversation.id);
-					const submission = await conversation.submit(
-						{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: {} } },
-						context,
-					);
-					void submission.wait(context).catch(() => {});
-					json(res, 200, { ok: true });
-				} catch (err) {
-					json(res, 500, { error: String(err) });
-				}
-			})();
-		});
-	}
-
-	function reqClose(res: ServerResponse, fn: () => void): void {
-		res.on("close", fn);
+	async function handleSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readBody(req);
+		const conv = Number(body?.conv);
+		const content = body?.content;
+		if (!Number.isFinite(conv) || typeof content !== "string" || content.trim() === "") throw new HttpError(400, "bad request");
+		const conversation = await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) {
+			json(res, 404, { error: "conversation not found" });
+			return;
+		}
+		sessions.touchActivity(conversation.id);
+		const submission = await conversation.submit(
+			{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: {} } },
+			BACKGROUND_CONTEXT,
+		);
+		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
+		json(res, 200, { ok: true });
 	}
 
 	server.listen(port, "0.0.0.0", () => {

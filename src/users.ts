@@ -47,7 +47,8 @@ export class Users {
 	}
 
 	list(): { id: string; role: Role }[] {
-		return [...this.members].map((id) => ({ id, role: this.admins.has(id) ? ("admin" as const) : ("member" as const) }));
+		// 管理员可能只在 admins 里（DWELL_ADMINS 播种），两集合取并
+		return [...new Set([...this.admins, ...this.members])].map((id) => ({ id, role: this.admins.has(id) ? ("admin" as const) : ("member" as const) }));
 	}
 
 	async add(openId: string, role: Role): Promise<void> {
