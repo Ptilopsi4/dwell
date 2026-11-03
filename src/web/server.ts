@@ -7,16 +7,28 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
 import { MODEL } from "../harness.ts";
+import { approvals, approvalDecision, pendingApprovals } from "../ext/approval.ts";
 import type { Sessions } from "../sessions.ts";
+import type { Users } from "../users.ts";
 
 interface PanelOptions {
 	harness: Harness;
 	sessions: Sessions;
+	users: Users;
 	port: number;
 	token: string;
 }
 
-export function startPanel({ harness, sessions, port, token }: PanelOptions): void {
+async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+	let body = "";
+	for await (const chunk of req) {
+		body += chunk;
+		if (body.length > 100_000) throw new Error("body too large");
+	}
+	return body === "" ? undefined : (JSON.parse(body) as Record<string, unknown>);
+}
+
+export function startPanel({ harness, sessions, users, port, token }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 
 	const authed = (req: IncomingMessage, url: URL): boolean => {
@@ -53,9 +65,73 @@ export function startPanel({ harness, sessions, port, token }: PanelOptions): vo
 			if (list.length === 0) {
 				// 本地/空库兑底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "" }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel" }];
 			}
 			json(res, 200, list);
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/approvals") {
+			// 待审队列（等人事项优先展示，借 dsh panel 哲学）
+			const list = [...pendingApprovals.entries()].map(([key, p]) => ({ key, ...p }));
+			json(res, 200, list);
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/users") {
+			json(res, 200, users.list());
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/conversations") {
+			// 新建 panel 会话
+			const body = await readBody(req);
+			const name = String(body?.name ?? "").trim().slice(0, 40) || `panel-${new Date().toISOString().slice(11, 19)}`;
+			const conv = await sessions.createPanelConversation(name);
+			json(res, 200, { id: conv.id });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/rename") {
+			const body = await readBody(req);
+			await sessions.rename(Number(body?.id), String(body?.name ?? "").slice(0, 40));
+			json(res, 200, { ok: true });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/archive") {
+			const body = await readBody(req);
+			await sessions.setArchived(Number(body?.id), Boolean(body?.archived));
+			json(res, 200, { ok: true });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/reset") {
+			const conv = await convFromBody(req);
+			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
+			await conv.reset(undefined, BACKGROUND_CONTEXT);
+			json(res, 200, { ok: true });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/abort") {
+			const conv = await convFromBody(req);
+			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
+			await conv.abort(BACKGROUND_CONTEXT);
+			json(res, 200, { ok: true });
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/approve") {
+			const body = await readBody(req).catch(() => undefined);
+			const key = String(body?.key ?? "");
+			const convId = Number(key.split(":")[0]);
+			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
+			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
+			const result = await approvalDecision(conv, key, body?.action === "deny" ? "deny" : "approve", Number(body?.minutes ?? 10));
+			json(res, 200, result);
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/users") {
+			const body = await readBody(req);
+			const id = String(body?.id ?? "");
+			if (!id.startsWith("ou_")) { json(res, 400, { error: "bad open_id" }); return; }
+			const action = String(body?.action ?? "");
+			if (action === "remove") await users.remove(id);
+			else await users.add(id, body?.role === "admin" ? "admin" : "member");
+			json(res, 200, { ok: true });
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/events") {
@@ -102,6 +178,13 @@ export function startPanel({ harness, sessions, port, token }: PanelOptions): vo
 			unsubscribe();
 			view.dispose();
 		});
+	}
+
+	async function convFromBody(req: IncomingMessage): Promise<Conversation | undefined> {
+		const body = await readBody(req).catch(() => undefined);
+		const id = Number(body?.conv ?? body?.id);
+		if (!Number.isFinite(id)) return undefined;
+		return harness.conversation(id as ConversationId, BACKGROUND_CONTEXT);
 	}
 
 	function handleSend(req: IncomingMessage, url: URL, res: ServerResponse): void {

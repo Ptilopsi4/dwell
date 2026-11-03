@@ -46,6 +46,10 @@ export class Users {
 		return this.admins.size;
 	}
 
+	list(): { id: string; role: Role }[] {
+		return [...this.members].map((id) => ({ id, role: this.admins.has(id) ? ("admin" as const) : ("member" as const) }));
+	}
+
 	async add(openId: string, role: Role): Promise<void> {
 		this.members.add(openId);
 		if (role === "admin") this.admins.add(openId);

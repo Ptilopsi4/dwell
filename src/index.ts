@@ -37,7 +37,7 @@ async function main(): Promise<void> {
 	// Web panel（内网穿透后 IP 直连，token 准入）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0 && (process.env.DWELL_PANEL_TOKEN ?? "") !== "") {
-		startPanel({ harness, sessions, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
+		startPanel({ harness, sessions, users, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			return;

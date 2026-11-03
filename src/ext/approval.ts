@@ -1,6 +1,7 @@
 // 危险命令审批（简版 Mandate）：bash 危险模式默认 block，审批窗口内放行。
 // 窗口键 = (conversationId, sender)：谁触发谁申请，互不搭车。
-import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
+import { defineExtension, hook, ToolTask, type Conversation } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 /** conversationId → 当前 run 的发起者（submit 前设置，run 归属判定用）。 */
 export const runSender = new Map<number, string>();
@@ -51,6 +52,38 @@ export function windowOpen(conversationId: number, sender: string): boolean {
 		return false;
 	}
 	return true;
+}
+
+/** 面板/卡片共用的审批决策：开/关窗口并唤醒（或通知）模型。 */
+export async function approvalDecision(
+	conversation: Conversation,
+	key: string,
+	action: "approve" | "deny",
+	minutes: number,
+): Promise<{ ok: boolean; error?: string }> {
+	if (!pendingApprovals.has(key)) return { ok: false, error: "该请求已失效" };
+	if (action === "approve") {
+		pendingApprovals.delete(key);
+		approvals.set(key, Date.now() + minutes * 60_000);
+		const s = await conversation.submit({
+			type: "input",
+			content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
+			whenBusy: "steer",
+			requestId: `decision-${key}-${Date.now()}`,
+		}, BACKGROUND_CONTEXT);
+		void s.wait(BACKGROUND_CONTEXT).catch(() => {});
+	} else {
+		pendingApprovals.delete(key);
+		approvals.delete(key);
+		const s = await conversation.submit({
+			type: "input",
+			content: "用户拒绝了危险命令。请停止该操作并改用其他方案，或询问用户意图。",
+			whenBusy: "steer",
+			requestId: `decision-${key}-${Date.now()}`,
+		}, BACKGROUND_CONTEXT);
+		void s.wait(BACKGROUND_CONTEXT).catch(() => {});
+	}
+	return { ok: true };
 }
 
 /** 挂到 registry 的 extension；只管 bash，其余工具放行。 */
