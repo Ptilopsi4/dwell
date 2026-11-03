@@ -346,14 +346,22 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 		case "/approve": {
 			const minutes = Number(parts[1]) || 10;
 			approvals.set(windowKey(convId, msg.senderId), Date.now() + minutes * 60_000);
-			await replyTo(target, `已批准：你的任务线 ${minutes} 分钟内危险命令免拦截。`);
-			const s = await conversation.submit({
-				type: "input",
-				content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
-				whenBusy: "steer",
-				requestId: `${msg.messageId}-approve`,
-			}, context);
-			void submitAndReply(conversation, s, target);
+			const pending = pendingApprovals.get(windowKey(convId, msg.senderId));
+			if (pending !== undefined) {
+				// 事后批准：存在被拦截的待审命令，唤醒模型重试
+				pendingApprovals.delete(windowKey(convId, msg.senderId));
+				await replyTo(target, `已批准：本任务线 ${minutes} 分钟内危险命令免拦截，继续执行。`);
+				const s = await conversation.submit({
+					type: "input",
+					content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
+					whenBusy: "steer",
+					requestId: `${msg.messageId}-approve`,
+				}, context);
+				void submitAndReply(conversation, s, target);
+			} else {
+				// 预授：没有待审命令，只开窗口，不唤醒模型
+				await replyTo(target, `已预先批准：本任务线 ${minutes} 分钟内危险命令免拦截。`);
+			}
 			break;
 		}
 		case "/deny":
@@ -366,7 +374,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				return;
 			}
 			approvals.delete(windowKey(convId, msg.senderId));
-			await replyTo(target, "已关闭你的批准窗口。");
+			pendingApprovals.delete(windowKey(convId, msg.senderId));
+			await replyTo(target, "已关闭你的批准窗口并取消待审请求。");
 			break;
 		case "/allow": {
 			if (!admin) {
