@@ -411,7 +411,6 @@ function helpCard(): Record<string, unknown> {
 		header: { title: { tag: "plain_text", content: "dwell 使用说明" }, template: "blue" },
 		body: { elements: [
 			{ tag: "markdown", content: [
-				"**命令**",
 				cmd("/new", "开启新对话（清空本任务线上下文）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员）"),
@@ -423,7 +422,7 @@ function helpCard(): Record<string, unknown> {
 				cmd("/help", "显示本说明"),
 			].join("\n") },
 			{ tag: "markdown", content: "---" },
-			{ tag: "markdown", content: "**对话规则**\n群里 @我 发消息（每人独立任务线，互不打扰）；回复某条消息可加入该任务线；话题群内直接发言即可。" },
+			{ tag: "markdown", content: "**对话规则**\n群里 @dwell 发消息（每人独立任务线，互不打扰）；回复某条消息可加入该任务线；话题群内直接发言即可。" },
 		] },
 	};
 }
