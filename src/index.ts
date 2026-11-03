@@ -159,7 +159,10 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		}
 
 		const submission = await submitInput(conversation, content, msg);
-		void submitAndReply(conversation, submission, target);
+		// queued = 插话并入活跃 run（或紧随排队）：旧卡的 watcher 会把新轮文本 append 进原卡，
+		// 再开新卡会出现两张内容相同的卡（实测），故 queued 不开卡
+		const record = await submission.status(BACKGROUND_CONTEXT);
+		if (record.status !== "queued") void submitAndReply(conversation, submission, target);
 	} catch (err) {
 		console.error("[dwell] 消息处理出错:", err);
 	}
@@ -220,6 +223,12 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 					});
 					const text = msg.content.trim();
 					submission = await submitInput(conversation, text === "" ? attachment : `${text}\n\n${attachment}`, msg);
+					const record = await submission.status(context);
+					if (record.status === "queued") {
+						// 插话并入活跃 run：答案会在原任务的卡上继续，这张占位卡给终态即可
+						await s.setContent("✅ 已并入正在进行的回答（见上方卡片）");
+						return;
+					}
 					await s.setContent(""); // 清占位，主模型流从空白起
 					await streamReplyCore(conversation, submission, s, context);
 				},
