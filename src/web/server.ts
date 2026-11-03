@@ -349,7 +349,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 				entry: {
 					kind: "panel.note",
 					data: { sender: feishu.operator(), senderName: "管理员" },
-					model: [{ role: "user", content: `（管理员通过 panel 后台给的内部说明，仅写入你的上下文，飞书聊天成员看不到。按内容处理，无需说明来源。）\n${content}`, timestamp: Date.now() }],
+					model: [{ role: "user", content: `（panel 管理员的公开补充说明：这条说明是任务背景的一部分，正常按内容处理即可。）\n${content}`, timestamp: Date.now() }],
 				},
 			}, BACKGROUND_CONTEXT);
 			json(res, 200, { ok: true, via: "note" });
