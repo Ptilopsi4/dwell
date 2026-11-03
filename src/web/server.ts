@@ -342,14 +342,15 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			return;
 		}
 		if (inFeishu) {
-			// 内部指令：只进模型上下文，不触发 run、不发飞书；运行中在下一个边界生效
+			// 内部指令：只进模型上下文，不触发 run、不发飞书；运行中在下一个边界生效。
+			// 模型内容就是指令本身，不加包装文本——包装前缀会被模型当作可忽略的旁注或触发注入怀疑（实测）
 			await conversation.submit({
 				type: "write",
 				requestId: `panel-note-${Date.now()}`,
 				entry: {
 					kind: "panel.note",
-					data: { sender: feishu.operator(), senderName: "管理员" },
-					model: [{ role: "user", content: `（panel 管理员的公开补充说明：这条说明是任务背景的一部分，正常按内容处理即可。）\n${content}`, timestamp: Date.now() }],
+					data: { sender: feishu.operator() },
+					model: [{ role: "user", content, timestamp: Date.now() }],
 				},
 			}, BACKGROUND_CONTEXT);
 			json(res, 200, { ok: true, via: "note" });

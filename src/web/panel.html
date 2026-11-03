@@ -788,7 +788,7 @@ function appendEntry(entry) {
 		}
 		const text = contentText(model?.content);
 		// 内部指令的模型文本首行是给模型的来源说明，界面只显示正文
-		el.querySelector(".bd").textContent = note ? text.replace(/^（[^\n]*）\n/, "") : text;
+		el.querySelector(".bd").textContent = text;
 		log.appendChild(el);
 		T.lastKind = "user";
 		return;
