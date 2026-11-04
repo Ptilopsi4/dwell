@@ -1,7 +1,6 @@
-// Panel HTTP 服务：token 准入（内网穿透直连场景），SSE 推流（transcript + live 状态），静态页面。
+// Panel HTTP 服务：无内置鉴权（部署前提：WireGuard 隧道等网络层隔离），SSE 推流（transcript + live 状态），静态页面。
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +19,6 @@ interface PanelOptions {
 	directory: Directory;
 	feishu: FeishuBridge;
 	port: number;
-	token: string;
 }
 
 /** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
@@ -74,17 +72,13 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
-
-export function startPanel({ harness, sessions, users, directory, feishu, port, token }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, port }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
 		css: "text/css; charset=utf-8",
 		js: "text/javascript; charset=utf-8",
 	};
-
-	const tokenDigest = digest(token);
 
 	/** 会话显示名：手动重命名优先；飞书会话按 key 结构组合群名/用户名；查不到返回 null，由前端回退。 */
 	async function titleOf(c: { key: string; owner: string; name: string; type: string }): Promise<string | null> {
@@ -96,19 +90,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		const tail = c.type === "thread" ? `话题 ${String(rest ?? "").slice(2, 10)}` : (user ?? c.owner.slice(0, 10));
 		return `${chat ?? "群聊"} · ${tail}`;
 	}
-	const COOKIE = "dwell_panel";
-	const cookieToken = (req: IncomingMessage): string | undefined => {
-		const m = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]*)`).exec(req.headers.cookie ?? "");
-		if (m === null) return undefined;
-		try { return decodeURIComponent(m[1] ?? ""); } catch { return undefined; }
-	};
-	// 首次 ?token= 进入后换发 HttpOnly cookie，页面随即把 token 从地址栏移除；SameSite=Strict 挡跨站请求
-	const authed = (req: IncomingMessage, url: URL): boolean => {
-		const t = url.searchParams.get("token") ?? req.headers["x-panel-token"] ?? cookieToken(req);
-		return typeof t === "string" && timingSafeEqual(digest(t), tokenDigest);
-	};
-
-	const json = (res: ServerResponse, code: number, body: unknown): void => {
+const json = (res: ServerResponse, code: number, body: unknown): void => {
 		res.writeHead(code, { "content-type": "application/json" });
 		res.end(JSON.stringify(body));
 	};
@@ -125,7 +107,6 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-		// vendor 静态资源（UI 库）免 token：内容无敏感性，页面本体仍受保护
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
 			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }
@@ -136,10 +117,6 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 			} catch { json(res, 404, { error: "asset not found" }); }
 			return;
 		}
-		if (!authed(req, url)) {
-			json(res, 401, { error: "unauthorized" });
-			return;
-		}
 		if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
 			void readFile(panelFile, "utf8")
 				.then((html) => {
@@ -147,7 +124,6 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 						"content-type": "text/html; charset=utf-8",
 						"cache-control": "no-store",
 						"referrer-policy": "no-referrer",
-						"set-cookie": `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`,
 					});
 					res.end(html);
 				})
@@ -399,7 +375,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 	}
 
 	server.listen(port, "0.0.0.0", () => {
-		console.log(`[dwell] panel: http://0.0.0.0:${port}/?token=<DWELL_PANEL_TOKEN>`);
+		console.log(`[dwell] panel: http://0.0.0.0:${port}/`);
 	});
 }
 

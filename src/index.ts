@@ -67,16 +67,14 @@ async function main(): Promise<void> {
 
 	panelUser = process.env.DWELL_PANEL_USER || users.list().find((u) => u.role === "admin")?.id || "panel";
 
-	// Web panel（内网穿透后 IP 直连，token 准入）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
+	// Web panel（无内置鉴权，部署前提：WireGuard 隧道等网络层隔离）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
-	if (panelPort > 0 && (process.env.DWELL_PANEL_TOKEN ?? "") !== "") {
-		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, token: process.env.DWELL_PANEL_TOKEN ?? "" });
+	if (panelPort > 0) {
+		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			return;
 		}
-	} else if (panelPort > 0) {
-		console.error("DWELL_PANEL_PORT 已设但 DWELL_PANEL_TOKEN 缺失，panel 未启动");
 	}
 
 	channel = await connectChannel({

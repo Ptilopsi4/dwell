@@ -350,12 +350,6 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 "use strict";
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-// token 首次由 URL 带入，服务端已换发 HttpOnly cookie；从地址栏移除，避免进历史/截图/分享链接
-if (params.has("token")) {
-	const clean = new URLSearchParams(params);
-	clean.delete("token");
-	history.replaceState(null, "", location.pathname + (clean.toString() !== "" ? `?${clean}` : ""));
-}
 const api = async (path, body) => {
 	const res = await fetch(`/api/${path}`, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 	if (!res.ok) {
