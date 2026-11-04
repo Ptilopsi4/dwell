@@ -4,3 +4,4 @@ lark-auth/
 .env
 state/
 data-local/
+.pi/DEPLOYMENT.md
