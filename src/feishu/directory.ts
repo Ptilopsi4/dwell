@@ -1,6 +1,7 @@
-// 飞书通讯录查询：open_id → 用户名、chat_id → 群名，供 panel 显示。
-// 需要应用开通 contact:user.base:readonly（或 contact:user.basic_profile:readonly）与 im:chat:readonly；
-// 未开通时查询返回空，panel 回退显示 ID。
+// 飞书通讯录查询：open_id → 用户名（昵称优先）、chat_id → 群名，供 panel 显示。
+// 权限分三层（官方文档 user.get）：API 级 scope（contact:contact.base:readonly 等四选一）
+// + name/nickname 字段 scope（contact:user.base:readonly）+ 通讯录权限范围（数据权限，需含目标用户）。
+// 范围外返回 41050 no user authority；未开通字段 scope 时接口仍 code=0 但不带 name。
 import { Client, LoggerLevel } from "@larksuiteoapi/node-sdk";
 
 type Cached = { name: string | undefined; at: number };
