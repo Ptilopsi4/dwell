@@ -188,6 +188,9 @@ async function submitAndReply(
 	target: ReplyTarget,
 ): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
+	// 插话并入活跃 run 时不开新卡：旧卡的 watcher 会把续跑文本 append 进原卡，再开卡即重复（同 handleMessage 的 queued 检查）
+	const record = await submission.status(context);
+	if (record.status === "queued") return;
 	try {
 		// 回答卡登记锚点：回复这张卡即续接该任务线（群聊免 @），否则 route 必 miss
 		const sent = await channel.stream(target.chatId, { markdown: (s) => streamReplyCore(conversation, submission, s, context) }, { replyTo: target.messageId });
