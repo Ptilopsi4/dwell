@@ -250,6 +250,13 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 	}
 }
 
+/** 群平消息线的回复卡首行标签：同 chat 内 emoji 唯一（Sessions 分配），多线并行时标识归属；其余线型无线歧义不带。 */
+function lineLabel(conversationId: number): string | undefined {
+	const info = sessions.listConversations().find((c) => c.id === conversationId);
+	if (info?.type !== "group" || info.chatId === null) return undefined;
+	return `当前会话：${sessions.lineEmoji(conversationId, info.chatId)}`;
+}
+
 /** 主模型流式回复主体：watch pi.live 增量 append，settled 后补齐最终答案。占位阶段的 setContent 由调用方负责。 */
 async function streamReplyCore(
 	conversation: Conversation,
@@ -259,6 +266,8 @@ async function streamReplyCore(
 ): Promise<void> {
 	try {
 		{
+			const label = lineLabel(conversation.id as number);
+			if (label !== undefined) await s.append(`${label}\n\n`);
 			const watch = await conversation.watch(context);
 				let cursor = "";
 				// 工具概述：callId → 摘要（从 transcript 的 assistant toolCall 取参数），done 后报告一次
@@ -351,7 +360,8 @@ async function submitAndReplyPlain(
 		const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
 		const answer = entry?.model?.[0] as AssistantMessage | undefined;
 		const reply = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-		await replyTo(target, reply || "（空回复）", conversation);
+		const label = lineLabel(conversation.id as number);
+		await replyTo(target, (label !== undefined ? `${label}\n\n` : "") + (reply || "（空回复）"), conversation);
 	} else {
 		const reason = settled.status === "unanswered" ? settled.reason : settled.status;
 		await replyTo(target, `处理失败：${reason}`, conversation);

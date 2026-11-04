@@ -9,12 +9,30 @@ import { stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
+/** 群平消息线回复卡首行标签的 emoji 池（同 chat 内唯一分配）。 */
+export const LINE_EMOJI_POOL = ["🔵", "🟢", "🟣", "🟠", "🟡", "🔴", "🟤", "⚫", "🔷", "🔶"];
+
+/** 纯分配逻辑：优先未占用；池满则转移最久未活跃线的 emoji（正常群到不了 10 条活跃线，边界兑底）。 */
+export function allocateEmoji(active: { id: number; emoji?: string; lastTs: number }[], pool: readonly string[] = LINE_EMOJI_POOL): { emoji: string; stealFrom?: number } {
+	const taken = new Map<string, number>();
+	for (const line of active) if (line.emoji !== undefined) taken.set(line.emoji, line.id);
+	for (const e of pool) if (!taken.has(e)) return { emoji: e };
+	let oldest: { id: number; lastTs: number } | undefined;
+	for (const line of active) {
+		if (line.emoji === undefined) continue;
+		if (oldest === undefined || line.lastTs < oldest.lastTs) oldest = { id: line.id, lastTs: line.lastTs };
+	}
+	if (oldest === undefined) return { emoji: pool[0] };
+	return { emoji: active.find((l) => l.id === oldest.id)!.emoji!, stealFrom: oldest.id };
+}
+
 export class Sessions {
 	private convKeys = new Map<string, ConversationId>(); // 路由键 → conversation
 	private owners = new Map<ConversationId, string>(); // conversation → owner open_id
 	private names = new Map<ConversationId, string>(); // conversation → 显示名（panel 重命名）
 	private archived = new Set<ConversationId>(); // 归档（panel 隐藏，不删数据）
 	private notify = new Set<ConversationId>(); // panel 任务飞书通知开关
+	private emojis = new Map<ConversationId, string>(); // 群平消息线的标签 emoji（同 chat 内唯一）
 	private lastTs = new Map<ConversationId, number>(); // conversation → 最后活动时间戳（panel 排序）
 	private messageMap = new Map<string, ConversationId>(); // messageId → conversation（任务线锚点）
 	private file = stateFile("sessions.json");
@@ -27,8 +45,9 @@ export class Sessions {
 
 	async load(): Promise<void> {
 		try {
-			const saved = JSON.parse(await readFile(this.file, "utf8")) as Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean }>;
+			const saved = JSON.parse(await readFile(this.file, "utf8")) as Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string }>;
 			for (const [key, v] of Object.entries(saved)) {
+				if (v.emoji !== undefined) this.emojis.set(v.id as ConversationId, v.emoji);
 				this.convKeys.set(key, v.id as ConversationId);
 				this.owners.set(v.id as ConversationId, v.owner);
 				if (v.name !== undefined) this.names.set(v.id as ConversationId, v.name);
@@ -48,13 +67,14 @@ export class Sessions {
 	}
 
 	private async save(): Promise<void> {
-		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean }> = {};
+		const out: Record<string, { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string }> = {};
 		for (const [key, id] of this.convKeys) {
 			const name = this.names.get(id);
 			const archived = this.archived.has(id);
 			const ts = this.lastTs.get(id);
 			const notify = this.notify.has(id);
-			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}), ...(notify ? { notify } : {}) };
+			const emoji = this.emojis.get(id);
+			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}), ...(notify ? { notify } : {}), ...(emoji !== undefined ? { emoji } : {}) };
 		}
 		await writeStateJson(this.file, out);
 	}
@@ -109,6 +129,21 @@ export class Sessions {
 	touchActivity(conversationId: ConversationId): void {
 		this.lastTs.set(conversationId, Date.now());
 		void this.save();
+	}
+
+	/** 群平消息线的标签 emoji：已有则返回；否则在 chat 内唯一分配（池满转移最久未活跃线）并落盘。 */
+	lineEmoji(conversationId: number, chatId: string): string {
+		const id = conversationId as ConversationId;
+		const existing = this.emojis.get(id);
+		if (existing !== undefined) return existing;
+		const active = this.listConversations()
+			.filter((c) => c.chatId === chatId && !c.archived)
+			.map((c) => ({ id: c.id, emoji: this.emojis.get(c.id as ConversationId), lastTs: c.lastTs }));
+		const got = allocateEmoji(active);
+		if (got.stealFrom !== undefined) this.emojis.delete(got.stealFrom as ConversationId);
+		this.emojis.set(id, got.emoji);
+		void this.save();
+		return got.emoji;
 	}
 
 	/** panel 用：全部会话线概览。 */
