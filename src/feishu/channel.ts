@@ -27,8 +27,8 @@ export function connectChannel(handlers: {
 export type { CardActionEvent, LarkChannel, MarkdownStreamController, MentionInfo, NormalizedMessage };
 
 /** 命令参数里的 @提及 → openId+姓名。SDK 会把 content 里的占位符（@_user_N）二次替换成「@名字」
- *  （bot 提及默认剥离），所以这里按渲染名或占位 key 匹配；前缀匹配（名字后跟补充文字，如「@s3loy（唐帅）」）
- *  需唯一，歧义视为未提及。返回 null = 不是提及。 */
+ *  （bot 提及默认剥离）；昵称≠本名的用户，飞书把提及渲染成「@昵称（本名）」，故除渲染名/占位 key
+ *  精确匹配外再做唯一前缀匹配。歧义视为未提及，返回 null = 不是提及。 */
 export function matchMention(arg: string, mentions: MentionInfo[]): { id: string; name: string } | null {
 	const exact: { id: string; name: string }[] = [];
 	const prefix: { id: string; name: string }[] = [];
