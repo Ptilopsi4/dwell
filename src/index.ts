@@ -294,10 +294,11 @@ async function streamReplyCore(
 							}
 						}
 						scanned = entries.length;
-						// 工具完成：报告概述行
-						const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined> }).docs?.["pi.live"];
+							const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined> }).docs?.["pi.live"];
 						for (const slot of live?.tools ?? []) {
-							if (slot.status === "done" && !reported.has(slot.callId) && callSummary.has(slot.callId)) {
+							// 工具开跑即报：槽位首次可见（pending/running）就 append 概述行，长命令运行期间卡片不再静默；
+						// append-only 流无法回改已完成标记，故不区分状态、只报一次
+						if (!reported.has(slot.callId) && callSummary.has(slot.callId)) {
 								reported.add(slot.callId);
 								// 尾部空行不可省：markdown 引用块（>）会把紧邻的下一行吸入——正文首句会被包进工具概述
 							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n\n`);
