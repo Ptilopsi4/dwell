@@ -136,7 +136,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };
 		if (degraded) {
-			await replyTo(target, "引用的消息不在任务线记录内（可能未 @ 直接发送或已超出记录范围），这条在你的任务线上继续。", conversation);
+			await replyTo(target, "未找到引用的任务线，已在你当前线上继续。", conversation);
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
