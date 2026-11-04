@@ -1,5 +1,5 @@
 // 飞书连接：官方 SDK Channel 模块（单 WebSocket 收事件+卡片回调，自动重连，消息归一化）。
-// 凭证走环境变量，不依赖 ~/.lark-cli。
+// 凭证走环境变量 LARK_APP_ID / LARK_APP_SECRET。
 import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
 
 export function connectChannel(handlers: {

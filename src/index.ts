@@ -26,7 +26,6 @@ let panelUser = "";
 const imageDescriber: ImageDescriber | null = makeImageDescriber();
 
 async function main(): Promise<void> {
-	const context = BACKGROUND_CONTEXT;
 	await initStateDir();
 	harness = await openDwell(undefined, [
 		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
@@ -41,13 +40,13 @@ async function main(): Promise<void> {
 	const realigned = await sessions.alignModel();
 	console.log(`[dwell] 模型 ${MODEL.provider}/${MODEL.modelId}${realigned > 0 ? `（${realigned} 个会话已切换到该模型）` : ""}`);
 	await users.load();
-	if (!users.isAllowed("__none__") && [...new Set([process.env.DWELL_ALLOW, process.env.DWELL_ADMINS])].every((s) => !s?.trim())) {
-		if (!users.isAllowed("")) console.error("[dwell] 白名单为空，dwell 将拒绝所有消息（用 /allow 添加或配置 DWELL_ALLOW/DWELL_ADMINS）");
+	if (users.list().length === 0) {
+		console.error("[dwell] 白名单为空，dwell 将拒绝所有消息（用 /allow 添加或配置 DWELL_ALLOW/DWELL_ADMINS）");
 	}
 
 	setApprovalCallback((conversationId, sender, command, match) => {
 		const pending = pendingApprovals.get(windowKey(conversationId, sender));
-		// panel 发起的 run：审批卡私发给操作者（不发放起群），回复通知即可续接任务
+		// panel 发起的 run：审批卡私发给操作者（不发到发起群），回复通知即可续接任务
 		if (pending?.via === "panel") {
 			void (async () => {
 				try {
@@ -140,7 +139,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
-		// panel 会话（无对应 chat）经飞书续接时保持 panel 入口语义：审批仍私发管理员，不发放起群
+		// panel 会话（无对应 chat）经飞书续接时保持 panel 入口语义：审批仍私发管理员，不发到发起群
 		runSender.set(conversation.id as number, msg.senderId);
 		runVia.set(conversation.id as number, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
@@ -336,7 +335,7 @@ async function streamReplyCore(
 	}
 }
 
-/** 非流式回复（流式通道失败时的兑底）。 */
+/** 非流式回复（流式通道失败时的兜底）。 */
 async function submitAndReplyPlain(
 	conversation: Conversation,
 	submission: Awaited<ReturnType<Conversation["submit"]>>,

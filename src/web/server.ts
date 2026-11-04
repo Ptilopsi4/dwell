@@ -133,7 +133,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		if (req.method === "GET" && url.pathname === "/api/conversations") {
 			let list = [...sessions.listConversations()];
 			if (list.length === 0) {
-				// 本地/空库兑底：root 会话总可用（带默认模型）
+				// 本地/空库兜底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
 				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null, notify: false }];
 			}

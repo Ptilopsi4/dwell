@@ -40,7 +40,7 @@ const DANGEROUS: RegExp[] = [
 	/\bdocker\b|\bsystemctl\b|\bcrontab\b/,
 ];
 
-/** 状态文件名兑底：路径已移出 agent 可写域，此检查防 cwd 相对猜测（减速带非硬墙）。 */
+/** 状态文件名兜底：路径已移出 agent 可写域，此检查防 cwd 相对猜测（减速带非硬墙）。 */
 const STATE_FILES = /users\.json|sessions\.json|message-map\.json|(\/|\.)state\//;
 
 /** 返回命中的敏感片段（如 "rm -rf"），未命中返回 null。 */

@@ -1,6 +1,9 @@
 // dwell harness 装配：SQLite storage + 模型 provider（zai-coding-cn 或 deepseek）+ CodingTools + dwell 系统提示。
 // 全部配置来自环境变量，见 README。
+import { mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
@@ -17,9 +20,6 @@ const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", 
 export function scrubSecretEnv(): void {
 	for (const name of SECRET_ENV) delete process.env[name];
 }
-import { mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { normalizeContext } from "@earendil-works/pi-ai";
 
 export const DATA_DIR = process.env.DWELL_DATA ?? "./data";
 /** 状态文件目录（users/sessions/message-map）：独立于 data/（agent 可写域），避免模型覆写自升权限/劫持路由。 */
@@ -80,8 +80,8 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
 	if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
 
-	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），使 lark-cli 等服务凭证程序对模型不可见；
-	// 不影响 dwell 自身的消息收发（直接 spawn，不经工具 shell）。本机开发不设。
+	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
+	// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
 	const env = ({ cwd }: { cwd?: string }) =>
 		new NodeExecutionEnv({
 			cwd: resolve(cwd ?? process.cwd()),

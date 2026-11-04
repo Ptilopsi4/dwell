@@ -9,12 +9,6 @@ import { stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
-export interface RouteTarget {
-	conversation: Conversation;
-	/** 本次消息是否因映射淘汰降级到了新任务线（用于显式提示） */
-	degraded: boolean;
-}
-
 export class Sessions {
 	private convKeys = new Map<string, ConversationId>(); // 路由键 → conversation
 	private owners = new Map<ConversationId, string>(); // conversation → owner open_id
