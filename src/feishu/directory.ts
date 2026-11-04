@@ -31,7 +31,9 @@ export class Directory {
 	async userName(openId: string): Promise<string | undefined> {
 		return this.lookup(this.users, `u:${openId}`, openId, async (client) => {
 			const r = await client.contact.v3.user.get({ path: { user_id: openId }, params: { user_id_type: "open_id" } });
-			const name = r.data?.user?.name || undefined;
+			const user = r.data?.user;
+			// 昵称优先（与聊天内提及显示一致），无昵称回退本名
+			const name = user?.nickname || user?.name || undefined;
 			// 缺字段权限时接口仍返回 code=0，只是不带 name
 			if (name === undefined && !this.warned.has("u:noname")) {
 				this.warned.add("u:noname");
