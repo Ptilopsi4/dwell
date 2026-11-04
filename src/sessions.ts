@@ -131,6 +131,11 @@ export class Sessions {
 		void this.save();
 	}
 
+	/** 线标签 emoji（只读；分配用 lineEmoji）。 */
+	emojiOf(conversationId: number): string | undefined {
+		return this.emojis.get(conversationId as ConversationId);
+	}
+
 	/** 群平消息线的标签 emoji：已有则返回；否则在 chat 内唯一分配（池满转移最久未活跃线）并落盘。 */
 	lineEmoji(conversationId: number, chatId: string): string {
 		const id = conversationId as ConversationId;

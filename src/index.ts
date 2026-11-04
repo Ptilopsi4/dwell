@@ -584,16 +584,6 @@ type StatusTask = {
 };
 
 /** 任务状态 → 中文摘要。 */
-function statusZh(t: StatusTask): string {
-	switch (t.state.status) {
-		case "pending": return "排队中";
-		case "running": return `运行中 · ${t.state.phase ?? ""}`;
-		case "waiting": return `等待依赖 ×${t.state.on?.length ?? 0}`;
-		case "sleeping": return `休眠至 ${new Date(t.state.until ?? 0).toLocaleTimeString("zh-CN", { hour12: false })}`;
-		case "completing": return `收尾 · ${t.state.outcome ?? ""}`;
-		default: return t.state.status;
-	}
-}
 
 /** /status 卡片：每个运行中任务一行（状态 · 类型 · 任务线 · 触发人）。 */
 function statusCard(lines: string[]): Record<string, unknown> {
