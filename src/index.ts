@@ -81,6 +81,8 @@ async function main(): Promise<void> {
 		onMessage: (msg) => void handleMessage(msg),
 		onCardAction: (evt) => void handleCardAction(evt),
 	});
+	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
+	await reattachStreams();
 	// 凭证均已注入内存（credential store / SDK Client），从进程环境移除，堵死 bash 工具的 printenv 窃取面
 	scrubSecretEnv();
 	console.log(`[dwell] 就绪（bot: ${channel.botIdentity?.name ?? "?"}）`);
@@ -819,6 +821,73 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 
 process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
+/** 重启后为活跃 run 重挂流式镜像卡：镜像 live 文本至 run 结束并补齐最终答案（tool 行不重放，只保结果可见）。 */
+async function reattachStreams(): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	const graphState = await harness.taskGraph?.(context);
+	try {
+		const tasks = Object.values((graphState?.value as { tasks?: Record<string, { status?: string; conversationId?: number }> } | undefined)?.tasks ?? {});
+		const busy = [...new Set(tasks.filter((t) => ["pending", "running", "waiting", "sleeping", "completing"].includes(String(t.status))).map((t) => t.conversationId as number))];
+		for (const id of busy) {
+			const chatId = sessions.chatOf(id);
+			if (chatId === undefined) continue;
+			const conversation = await harness.conversation(id as ConversationId, context);
+			if (conversation === undefined) continue;
+			console.log(`[dwell] 重启后续跑 #${id}，重挂流式卡`);
+			const anchor = sessions.lastAnchor(id as ConversationId);
+			void channel.stream(chatId, { markdown: (s) => mirrorStream(conversation, s, context) }, anchor === undefined ? undefined : { replyTo: anchor })
+				.then((sent) => sessions.anchor(sent.messageId, id as ConversationId))
+				.catch((err) => console.error(`[dwell] 续跑镜像卡失败 #${id}:`, err instanceof Error ? err.message : err));
+		}
+	} finally {
+		graphState?.dispose();
+	}
+}
+
+/** 镜像 live 文本；run 结束（pi.live.run 消失）后从 transcript 补齐最终答案尾段。 */
+async function mirrorStream(conversation: Conversation, s: MarkdownStreamController, context: typeof BACKGROUND_CONTEXT): Promise<void> {
+	const label = lineLabel(conversation.id as number);
+	if (label !== undefined) await s.append(`${label}\n\n`);
+	await s.append("（服务重启，任务续跑中）\n\n");
+	const watch = await conversation.watch(context);
+	let cursor = "";
+	let runAlive = true;
+	const textOf = (value: unknown): { live: string; runGone: boolean } => {
+		const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; run?: unknown } | undefined> }).docs?.["pi.live"];
+		return {
+			live: (live?.generation?.message?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join(""),
+			runGone: live?.run === undefined,
+		};
+	};
+	const frame = async (value: unknown): Promise<void> => {
+		const { live, runGone } = textOf(value);
+		if (runGone) runAlive = false;
+		if (live.length === 0) return;
+		if (live.startsWith(cursor) && live.length > cursor.length) await s.append(live.slice(cursor.length));
+		else if (!live.startsWith(cursor)) await s.append(`\n\n${live}`); // 新轮/重试：重置游标加分隔
+		cursor = live;
+	};
+	try {
+		await frame(watch.value);
+		watch.start((value) => frame(value));
+		const deadline = Date.now() + 20 * 60_000;
+		while (runAlive && Date.now() < deadline) await new Promise((r) => setTimeout(r, 400));
+	} finally {
+		await watch.stop();
+	}
+	// 最终答案：transcript 最后一段非空 assistant 文本（partial 节流可能落后，补尾段）
+	const entries = (watch.value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; text?: string }[] }[] }[] }).entries ?? [];
+	let final = "";
+	for (const e of entries) {
+		if (e.kind !== "pi.assistant") continue;
+		const t = (e.model?.[0]?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
+		if (t !== "") final = t;
+	}
+	if (final.startsWith(cursor) && final.length > cursor.length) await s.append(final.slice(cursor.length));
+	else if (final !== "" && !final.startsWith(cursor)) await s.append(`\n\n${final}`);
+	else if (final === "" && cursor === "") await s.append("（本次运行没有产出文本：可能被中止，可重发）");
+}
+
 async function shutdown(): Promise<void> {
 	console.log("[dwell] 关闭中…");
 	await channel?.disconnect();
