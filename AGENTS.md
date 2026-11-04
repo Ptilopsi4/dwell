@@ -1,0 +1,96 @@
+# AGENTS.md — dwell
+
+服务器常驻通用 agent：飞书 bot 与 Web panel 两个入口，底层 pi-durable 每步 checkpoint，进程重启后续跑。用户文档见 `README.md`，方案与决策记录见 `.pi/PLAN.md`。
+
+## 技术栈
+
+- Node ≥ 22.19，直接运行 `.ts`（type stripping），**无构建步骤**。`tsconfig` 开了 `erasableSyntaxOnly`：不能用 enum、namespace、构造函数参数属性；import 必须带 `.ts` 后缀
+- `@earendil-works/pi-durable` / `pi-ai` / `chord` 锁精确版本 `1.4.0`（experimental，API 可能变）。不加 `^`，升级作为单独任务处理
+- 飞书：`@larksuiteoapi/node-sdk` 的 Channel 模块（单 WebSocket 收消息和卡片回调，自动重连）。lark-cli 已退出运行时，不要再引入
+- 模型：`DWELL_PROVIDER` 选 `zai-coding-cn`（默认 glm-5.3）或 `deepseek`；图片走视觉模型 `DWELL_VISION_MODEL`（默认 glm-5.3-flash）
+- 存储：pi-durable SQLite（`$DWELL_DATA/dwell.sqlite`），路由和角色状态是 JSON 文件（`$DWELL_STATE/`）
+- Panel：单文件 `src/web/panel.html` + vendored Basecoat CSS/JS，没有前端框架和打包
+
+## 目录
+
+```
+src/
+  index.ts          主程序：装配、飞书消息管线、会话路由、命令（/new /status /cancel /approve /deny /allow /disallow /help /whoami）、审批卡、FeishuBridge
+  harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer
+  sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
+  users.ts          角色（env 播种，state/users.json 为运行时真相）
+  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）
+  media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
+  smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
+  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender)
+  ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
+  ext/lark.ts       dwell.lark.read（飞书聊天记录，SDK rawClient 直调）
+  feishu/channel.ts Channel 连接 + 用户消息资源下载
+  feishu/directory.ts 用户名/群名查询与缓存
+  web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
+test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探针，不在 npm test 内
+```
+
+## 命令
+
+```sh
+npm run check   # tsc --noEmit，改完必跑
+npm test        # node --test "test/*.test.ts"（全量 25 个，<1s）
+npm run smoke   # 无 key 时 faux 模型验证装配链路
+DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
+```
+
+单测按改动范围跑：`node --test test/lark.test.ts`。
+
+## 工程原则（贯穿全部代码）
+
+- 文件少而平。单文件能说清就不拆模块，不提前建目录
+- 不过度设计：不做配置层次、plugin 系统、provider 注册表；后续阶段的功能不留插桩、hook 点或 TODO 占位
+- 不过度防御：schema 已校验的参数不再判型；错误处理只包真实会失败的边界（网络、文件 IO、飞书 API）
+- 注释只写"为什么"和约束，不写对话过程或决策摇摆
+- 新依赖顺序：标准库 > 已有依赖 > 先和 pt 确认
+
+## 必须守住的不变量
+
+- **凭证不进 bash 可读面**：启动读完凭证后 `scrubSecretEnv()` 从 `process.env` 删除（列表在 `harness.ts` 的 `SECRET_ENV`）。新增密钥 env 要加进这个列表，并在清理前读进闭包。web 工具的 key 也走闭包
+- **状态文件在 agent 可写域之外**：`DWELL_STATE` 与 `DWELL_DATA` 分开，`approval.ts` 的 `STATE_FILES` 正则兜底拦截。不要把 users/sessions/message-map 挪进 `data/`
+- **`NodeExecutionEnv` 的 cwd 必须是绝对路径**，否则 bash 工具会双拼路径（见 gotchas）
+- **幂等**：飞书输入以 `requestId = message_id` 提交，重推不会产生第二次 run。handler 里只做 submit，`wait`/流式放到 handler 之外（飞书 3 秒 ack）
+- **运行中插话**用 `whenBusy: "steer"`；`queued` 状态的提交不开新卡（会和旧卡重复）
+- **run 归属**：每次 submit 前设置 `runSender` / `runVia`，审批和 /cancel 靠它判定
+- **panel 不设隐藏通道**：panel 向飞书会话发的消息一律先在原 chat 可见转发，再作为普通输入提交
+- 状态 JSON 一律经 `writeStateJson` 写
+
+## 新增工具约定
+
+- 命名空间 `dwell.*`；`defineExtension` + `defineTool` + TypeBox schema
+- 只读工具 `replay: "safe"`，有副作用的保持默认 `unsafe`
+- 飞书类工具 `executionMode: "sequential"`（rate limit）
+- 依赖运行时对象（channel、sessions）时用 getter 延迟绑定，参考 `makeLarkExtension`
+- 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS` 并补 `test/approval.test.ts`
+- 对外 HTTP 用 `fetch` + `AbortSignal.timeout`，单测 mock `fetch`（参考 `test/web.test.ts`）
+
+## 飞书侧注意
+
+- 同一 app 的长连接是全局的，多客户端会随机分流消息。**本机不要连 Channel**：模型层用 smoke / panel-only 验证，飞书层只在服务器验证
+- 用户消息里的图片/文件必须走 `downloadMessageResource`（messages/:id/resources/:key），不能用 SDK 自带的 `downloadResource`
+- 需要按钮回调的卡片用 Card V2 + `behaviors: [{ type: "callback", value }]`
+- SDK 报错是 axios 外壳，真实 code/msg 在 `e.response.data`
+- `message.list` 用 Asc 排序加 `start_time` 时必须显式传 `end_time`
+
+## 工作流文件（`.pi/`）
+
+- `PLAN.md`：架构决策。涉及公共接口、路由/权限模型、新模块、新工具时先写一节，pt 确认后再落地，并在"决策记录"追加一条
+- `TODO.md`：多步任务进度，完成即勾选
+- `gotchas.md`：项目踩坑库。构建或运行报错先 grep 这里；同类问题返工 ≥2 次解决后补一条（症状 → 根因 → 解法）
+- `DEPLOYMENT.md`：部署档案，gitignored，仅 pt 本机有。服务器地址等部署细节只写这里，不写进代码注释、README 或本文件
+
+## 部署
+
+仓库里的 `Dockerfile` / `docker-compose.yml` 是通用容器形态。实际生产环境的部署方式和 SOP 见 `.pi/DEPLOYMENT.md`。部署前先备份，SSH 操作需要 pt 显式同意。
+
+## Git
+
+- 默认在分支上开发，经 PR 合入 main；未经允许不 push
+- Conventional Commits，原子提交
+- 改代码用 edit 工具，不要用 sed/python 批量替换（匹配失败不会报错）
