@@ -135,7 +135,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId };
 		if (degraded) {
-			await replyTo(target, "原任务线的记录已过期，这条在新的任务线上开始。");
+			await replyTo(target, "原任务线的记录已过期，这条在新的任务线上开始。", conversation);
 		}
 
 		// run 归属：审批与 /cancel 按触发者判定
@@ -188,7 +188,9 @@ async function submitAndReply(
 ): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	try {
-		await channel.stream(target.chatId, { markdown: (s) => streamReplyCore(conversation, submission, s, context) }, { replyTo: target.messageId });
+		// 回答卡登记锚点：回复这张卡即续接该任务线（群聊免 @），否则 route 必 miss
+		const sent = await channel.stream(target.chatId, { markdown: (s) => streamReplyCore(conversation, submission, s, context) }, { replyTo: target.messageId });
+		await sessions.anchor(sent.messageId, conversation.id);
 	} catch (err) {
 		// 流式通道失败时退回普通回复
 		console.error("[dwell] 流式回复失败，退回普通回复:", err);
@@ -205,7 +207,7 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 	const context = BACKGROUND_CONTEXT;
 	let submission: Awaited<ReturnType<Conversation["submit"]>> | undefined;
 	try {
-		await channel.stream(
+		const sent = await channel.stream(
 			target.chatId,
 			{
 				markdown: async (s) => {
@@ -232,13 +234,14 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 			},
 			{ replyTo: target.messageId },
 		);
+		await sessions.anchor(sent.messageId, conversation.id);
 	} catch (err) {
 		console.error("[dwell] 媒体流式回复失败:", err);
 		try {
 			if (submission !== undefined) {
 					await submitAndReplyPlain(conversation, submission, target);
 			} else {
-					await channel.send(target.chatId, { text: "图片/文件处理失败，请重试。" }, { replyTo: target.messageId });
+					await replyTo(target, "图片/文件处理失败，请重试。", conversation);
 			}
 		} catch (err2) {
 			console.error("[dwell] 回复彻底失败:", err2);
@@ -347,15 +350,16 @@ async function submitAndReplyPlain(
 		const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
 		const answer = entry?.model?.[0] as AssistantMessage | undefined;
 		const reply = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-		await replyTo(target, reply || "（空回复）");
+		await replyTo(target, reply || "（空回复）", conversation);
 	} else {
 		const reason = settled.status === "unanswered" ? settled.reason : settled.status;
-		await replyTo(target, `处理失败：${reason}`);
+		await replyTo(target, `处理失败：${reason}`, conversation);
 	}
 }
 
-async function replyTo(target: ReplyTarget, text: string): Promise<void> {
-	await channel.send(target.chatId, { markdown: text }, { replyTo: target.messageId });
+async function replyTo(target: ReplyTarget, text: string, conversation?: Conversation): Promise<void> {
+	const sent = await channel.send(target.chatId, { markdown: text }, { replyTo: target.messageId });
+	if (conversation !== undefined) await sessions.anchor(sent.messageId, conversation.id);
 }
 
 /** 命令参数解析：@提及（mentions 占位符）→ openId+姓名；否则原样返回。 */
@@ -380,9 +384,11 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 	const isOwner = msg.senderId === owner;
 
 	switch (cmd) {
-		case "/help":
-			await channel.send(target.chatId, { card: helpCard() }, { replyTo: target.messageId });
+		case "/help": {
+			const sent = await channel.send(target.chatId, { card: helpCard() }, { replyTo: target.messageId });
+			await sessions.anchor(sent.messageId, conversation.id);
 			break;
+		}
 		case "/whoami":
 			await replyTo(target, `你的 ID：${msg.senderId}${users.isAdmin(msg.senderId) ? "（管理员）" : ""}`);
 			break;
@@ -421,7 +427,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				const ownerName = owner !== undefined && owner !== "panel" ? await directory.userName(owner) : undefined;
 				return `**${statusZh(t)}** \`${t.kind}\` · ${convLabel}${ownerName !== undefined ? ` · ${ownerName}` : ""}${t.abortRequested ? " · ⏹ 已请求中止" : ""}${t.blocked !== undefined ? ` · 阻塞：${t.blocked}` : ""}${t.background ? " · 后台" : ""}`;
 			}));
-			await channel.send(target.chatId, { card: statusCard(lines) }, { replyTo: target.messageId });
+			const sent = await channel.send(target.chatId, { card: statusCard(lines) }, { replyTo: target.messageId });
+			await sessions.anchor(sent.messageId, conversation.id);
 			break;
 		}
 		case "/cancel":
