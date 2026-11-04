@@ -147,7 +147,7 @@ export class Sessions {
 	}
 
 	/** panel 用：全部会话线概览。 */
-	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string; lastTs: number; chatId: string | null; notify: boolean }[] {
+	listConversations(): { id: number; key: string; owner: string; name: string; archived: boolean; type: string; lastTs: number; chatId: string | null; notify: boolean; emoji: string | null }[] {
 		return [...this.convKeys.entries()].map(([key, id]) => ({
 			id: id as number,
 			key,
@@ -158,6 +158,7 @@ export class Sessions {
 			lastTs: this.lastTs.get(id) ?? 0,
 			chatId: key.startsWith("oc_") ? (key.split("#")[0] ?? null) : null,
 			notify: this.notify.has(id),
+			emoji: this.emojis.get(id) ?? null,
 		}));
 	}
 

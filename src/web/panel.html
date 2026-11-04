@@ -605,7 +605,7 @@ async function loadConvs(keep) {
 			el.dataset.id = String(c.id);
 			el.innerHTML = `${ic(c.type in ICONS ? c.type : "panel", "sm")}<span class="nm"></span><span class="pend" hidden></span><span class="tm"></span>`;
 			el.title = `${TYPE_ZH[c.type] ?? c.type} · #${c.id}${c.archived ? " · 已归档" : ""}\n${c.key}`;
-			el.querySelector(".nm").textContent = c.shortTitle ?? convTitle(c);
+			el.querySelector(".nm").textContent = c.emoji ? `${c.emoji} ${c.shortTitle ?? convTitle(c)}` : (c.shortTitle ?? convTitle(c));
 			el.onclick = () => { drawer(false); if (String(c.id) !== String(convId)) switchConv(c.id); };
 			return el;
 		};

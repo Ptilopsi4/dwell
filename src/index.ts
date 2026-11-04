@@ -86,6 +86,21 @@ async function main(): Promise<void> {
 	console.log(`[dwell] 就绪（bot: ${channel.botIdentity?.name ?? "?"}）`);
 }
 
+/** run 归属登记：仅当该线无活跃 run 时更新（插话并入活跃 run 时不覆写，防 steer 把审批归属漂移到插话者）。 */
+async function setRunAttributionIfIdle(conversationId: number, sender: string, via: "panel" | "feishu"): Promise<void> {
+	const graphState = await harness.taskGraph?.(BACKGROUND_CONTEXT);
+	try {
+		const busy = Object.values((graphState?.value as { tasks?: Record<string, { status?: string; conversationId?: number }> } | undefined)?.tasks ?? {})
+			.some((t) => t.conversationId === conversationId && ["pending", "running", "waiting", "sleeping", "completing"].includes(String(t.status)));
+		if (!busy) {
+			runSender.set(conversationId, sender);
+			runVia.set(conversationId, via);
+		}
+	} finally {
+		graphState?.dispose();
+	}
+}
+
 /** 会话路由：私聊 chat 级 / 群平消息 per-sender / 话题 per-thread / replyTo 跟随。 */
 async function route(msg: NormalizedMessage): Promise<{ conversation: Conversation; degraded: boolean } | null> {
 	// replyTo 跟随（优先级最高，群聊/私聊通用）
@@ -141,8 +156,8 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		// run 归属：审批与 /cancel 按触发者判定
 		// panel 会话（无对应 chat）经飞书续接时保持 panel 入口语义：审批仍私发管理员，不发到发起群
-		runSender.set(conversation.id as number, msg.senderId);
-		runVia.set(conversation.id as number, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
+		// run 归属：审批与 /cancel 按触发者判定（线内已有活跃 run 时保留原归属，见 setRunAttributionIfIdle）
+		await setRunAttributionIfIdle(conversation.id as number, msg.senderId, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
 		const content = msg.content.trim();
 		if (content.startsWith("/")) {
@@ -278,6 +293,9 @@ async function streamReplyCore(
 				const reported = new Set<string>();
 				// 运行中输出尾行：callId → 首见时间 / 上次 append 时间 / 已消费的完整输出长度
 				const runningOut = new Map<string, { firstSeen: number; lastAppend: number; baseline: number }>();
+				// 工具耗时与终态：首见时间 / 已标 done 的调用
+				const startedAt = new Map<string, number>();
+				const doneMarked = new Set<string>();
 				let scanned = 0;
 				const summarize = (name: string, args: Record<string, unknown>): string => {
 					const arg = args.command ?? args.path ?? JSON.stringify(args);
@@ -299,8 +317,9 @@ async function streamReplyCore(
 							}
 						}
 						scanned = entries.length;
-							const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string; output?: string }[] } | undefined> }).docs?.["pi.live"];
+							const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string; name?: string; output?: string; entry?: unknown }[] } | undefined> }).docs?.["pi.live"];
 						for (const slot of live?.tools ?? []) {
+							if (!startedAt.has(slot.callId)) startedAt.set(slot.callId, Date.now());
 							// 工具开跑即报：槽位首次可见（pending/running）就 append 概述行，长命令运行期间卡片不再静默；
 						// append-only 流无法回改已完成标记，故不区分状态、只报一次
 						if (!reported.has(slot.callId) && callSummary.has(slot.callId)) {
@@ -328,6 +347,14 @@ async function streamReplyCore(
 								}
 								prog.baseline = cut;
 							}
+						}
+						// 终态标记：成功/失败 + 耗时（entry 缺席 = 任务 faulted/orphaned）
+						if (slot.status === "done" && !doneMarked.has(slot.callId)) {
+							doneMarked.add(slot.callId);
+							const secs = ((Date.now() - (startedAt.get(slot.callId) ?? Date.now())) / 1000).toFixed(1);
+							await s.append(`> ${slot.entry !== undefined ? "✓" : "✗"} ${slot.name ?? "?"}（${secs}s）
+
+`);
 						}
 					}
 						// 模型文本流
@@ -689,8 +716,7 @@ const feishuBridge: FeishuBridge = {
 		sessions.touchActivity(conversation.id);
 		// 飞书侧有新动静的线不再留在归档组
 		if (sessions.isArchived(id)) await sessions.setArchived(id, false);
-		runSender.set(id, panelUser);
-		runVia.set(id, "feishu");
+		await setRunAttributionIfIdle(id, panelUser, "feishu");
 		const submission = await conversation.submit({
 			type: "input",
 			content: text,
