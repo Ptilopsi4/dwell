@@ -24,7 +24,7 @@ src/
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
   ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender)
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
-  ext/lark.ts       dwell.lark.read（飞书聊天记录，SDK rawClient 直调）
+  ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
   feishu/directory.ts 用户名/群名查询与缓存
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权

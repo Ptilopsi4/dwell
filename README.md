@@ -108,12 +108,14 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 | `bash` / `read` / `write` / `edit` | 在会话工作目录内操作文件和执行命令 | bash 危险命令需审批 |
 | `dwell.web.search` / `dwell.web.fetch` | 全网搜索、读取网页正文。走智谱 Coding Plan Remote MCP，计入套餐额度。设置了 `ZAI_CODING_CN_API_KEY` 就会启用，与 `DWELL_PROVIDER` 无关 | 免审 |
 | `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内 | 免审 |
+| `dwell.lark.image` | 按消息 id 拉取图片描述：群里不 @ 发的图不进上下文，模型读历史看到 `[图片]` 占位后按需回看（回复用户提问时自动用） | 免审 |
 
 图片和文件：
 
 - 图片由 `DWELL_VISION_MODEL` 生成文字描述后交给主模型，原图存到工作目录 `uploads/`。没有智谱 key 时只存图，不做识别
 - 文件存到 `uploads/`，模型用 `read` 读取
-- 音视频暂不支持
+- 群聊里**不 @ bot 发的图不会自动进入上下文**（避免无关图片消耗）：模型会通过 `dwell.lark.image` 在用户问及时按需回看
+- 表情包不支持识别，音视频暂不支持
 
 ## Web panel
 
