@@ -33,6 +33,7 @@ async function main(): Promise<void> {
 			getClient: () => channel?.rawClient,
 			getDirectory: () => directory,
 			chatOf: (id) => sessions.chatOf(id),
+			getDescriber: () => imageDescriber,
 		}),
 	]);
 	sessions = new Sessions(harness);

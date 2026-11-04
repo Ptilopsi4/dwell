@@ -3,12 +3,16 @@
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Directory } from "../feishu/directory.ts";
+import type { ImageDescriber } from "../harness.ts";
+import { sniffImageMime } from "../media.ts";
 
 /** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。 */
 export type LarkDeps = {
-	getClient: () => { im: { v1: { message: unknown } } } | undefined;
+	getClient: () => { im: { v1: { message: unknown; messageResource?: unknown } } } | undefined;
 	getDirectory: () => Directory | undefined;
 	chatOf: (conversationId: number) => string | undefined;
+	/** 视觉描述器（harness 装配；无 ZAI key 时为 null，工具诚实提示） */
+	getDescriber?: () => ImageDescriber | null;
 };
 
 /** message.list/get 返回条目的最小形状。 */
@@ -96,7 +100,7 @@ async function formatItems(items: MessageItem[], chatName: string | undefined, d
 		const name = item.senderName || (senderId in names ? names[senderId] : undefined) || (senderId === "" ? "?" : senderId.slice(-6));
 		return `[${formatTime(item.create_time)}] ${name} (${item.message_id ?? "?"}): ${messageText(item)}`;
 	});
-	return `${chatName ?? "会话"} 最近消息（正序，括号内为消息 id，可用于 around 定位）：\n${lines.join("\n")}`;
+	return `${chatName ?? "会话"} 最近消息（正序，括号内为消息 id，可用于 around 定位或 dwell.lark.image 识图）：\n${lines.join("\n")}`;
 }
 
 /** 拉取一页消息（list 只取第一页，page_size 上限 50）。 */
@@ -189,15 +193,64 @@ function makeReadTool(deps: LarkDeps) {
 	});
 }
 
+/** dwell.lark.image：按消息 id 拉取图片描述（下载 + 视觉模型单发单答）。群发图不 @ 不进上下文，模型在此按需回看。 */
+function makeImageTool(deps: LarkDeps) {
+	const text = (t: string, isError = false) => ({ output: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+	return defineTool({
+		name: "dwell.lark.image",
+		description:
+			"看懂某条飞书图片消息的内容。输入消息 id（om_ 开头，取自 dwell.lark.read 返回）：下载图片并返回内容描述（主体、文字转录、图表数据）。典型场景：用户问「这是什么/这题怎么写」但上下文里没有图——先 dwell.lark.read 拿历史，找到 [图片] 占位的消息 id，再调本工具。仅支持图片消息，表情包不支持。",
+		parameters: Type.Object({
+			message: Type.String({ description: "图片消息 id（om_ 开头），取自 dwell.lark.read 的返回" }),
+		}),
+		replay: "safe",
+		executionMode: "sequential",
+		async execute(args) {
+			const client = deps.getClient();
+			if (client === undefined) return text("飞书通道未就绪", true);
+			const describer = deps.getDescriber?.() ?? null;
+			if (describer === null) return text("未配置视觉模型（需要 ZAI_CODING_CN_API_KEY），无法识别图片。", true);
+			try {
+				const message = client.im.v1.message as {
+					get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
+				};
+				const got = await message.get({ path: { message_id: args.message } });
+				const item = got.data?.items?.[0];
+				if (item === undefined) return text(`消息 ${args.message} 不存在或 bot 无权读取`, true);
+				if (item.msg_type === "sticker") return text("这是表情包，暂不支持识别；请让用户改发图片消息。", true);
+				if (item.msg_type !== "image") return text(`该消息不是图片（类型 ${item.msg_type ?? "?"}），无法识图。`, true);
+				const imageKey = (JSON.parse(item.body?.content ?? "{}") as { image_key?: string }).image_key;
+				if (imageKey === undefined) return text("消息内容缺少 image_key，无法下载。", true);
+				const resource = client.im.v1.messageResource as {
+					get: (payload: { path: { message_id: string; file_key: string }; params: { type: "image" } }) => Promise<{ getReadableStream: () => AsyncIterable<Uint8Array | Buffer> }>;
+				};
+				const response = await resource.get({ path: { message_id: args.message, file_key: imageKey }, params: { type: "image" } });
+				const chunks: Buffer[] = [];
+				for await (const chunk of response.getReadableStream()) chunks.push(Buffer.from(chunk));
+				const buffer = Buffer.concat(chunks);
+				const mime = sniffImageMime(buffer);
+				if (mime === null) return text("图片格式无法识别（非 png/jpeg/gif/webp）。", true);
+				if (buffer.length > 10 * 1024 * 1024) return text("图片超过 10MB，无法识别。", true);
+				const description = await describer(buffer.toString("base64"), mime);
+				return text(`图片 ${args.message} 的内容：\n${description}`);
+			} catch (err) {
+				const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
+				if (data?.code !== undefined) return text(`下载失败：飞书 API ${data.code}: ${data.msg ?? ""}`, true);
+				return text(`下载失败：${err instanceof Error ? err.message : String(err)}`, true);
+			}
+		},
+	});
+}
+
 /** 装配：deps 为运行时访问器（channel/directory/sessions 后于 harness 初始化）。 */
 export function makeLarkExtension(deps: LarkDeps) {
 	return defineExtension({
 		name: "dwell-lark",
-		tools: [makeReadTool(deps)],
+		tools: [makeReadTool(deps), makeImageTool(deps)],
 		sections: [
 			section(
 				"lark",
-				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id，可作 around 参数二次展开前后文）。",
+				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id，可作 around 参数二次展开前后文）。历史里的 [图片] 占位可展开：用户问及图中内容而上下文没有图时，把该条消息 id 传给 dwell.lark.image 获取图片描述。",
 				{ tag: false },
 			),
 		],

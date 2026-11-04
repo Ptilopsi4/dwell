@@ -116,3 +116,60 @@ test("空结果提示", async () => {
 	const r = await toolOf(deps).execute({}, api, context);
 	assert.match(out(r as never), /没有可读消息/);
 });
+
+// ── dwell.lark.image：按消息 id 按需识图 ──
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0]);
+
+function imageDeps(item: Item | undefined, describer: ((b64: string, mime: string) => Promise<string>) | null = async () => "一张测试图：内容 X") {
+	const calls: string[] = [];
+	return {
+		calls,
+		deps: {
+			getClient: () => ({
+				im: {
+					v1: {
+						message: {
+							get: async ({ path }: { path: { message_id: string } }) => {
+								calls.push(`get:${path.message_id}`);
+								return { code: 0, data: { items: item !== undefined ? [item] : [] } };
+							},
+						},
+						messageResource: {
+							get: async ({ path }: { path: { message_id: string; file_key: string } }) => {
+								calls.push(`res:${path.message_id}:${path.file_key}`);
+								return { getReadableStream: () => (async function* () { yield PNG; })() };
+							},
+						},
+					},
+				},
+			}),
+			getDirectory: () => undefined,
+			chatOf: () => undefined,
+			getDescriber: () => describer,
+		},
+	};
+}
+
+function imageToolOf(deps: ReturnType<typeof imageDeps>["deps"]) {
+	const tool = makeLarkExtension(deps).tools?.find((t) => t.name === "dwell.lark.image");
+	if (tool === undefined) throw new Error("工具未注册");
+	return tool;
+}
+
+test("image：下载图片并返回描述", async () => {
+	const { deps, calls } = imageDeps({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "img_v2_k" }) } });
+	const r = await imageToolOf(deps).execute({ message: "om_img" }, api, context);
+	assert.match(out(r as never), /一张测试图/);
+	assert.ok(calls.includes("res:om_img:img_v2_k"), "走消息资源接口下载");
+});
+
+test("image：表情包/非图片/无描述器/消息不存在各给诚实提示", async () => {
+	const run = async (item: Item | undefined, describer: ((b: string, m: string) => Promise<string>) | null, re: RegExp) => {
+		const r = await imageToolOf(imageDeps(item, describer).deps).execute({ message: "om_x" }, api, context);
+		assert.match(out(r as never), re);
+	};
+	await run({ message_id: "om_x", msg_type: "sticker" }, async () => "", /表情包，暂不支持/);
+	await run({ message_id: "om_x", msg_type: "text" }, async () => "", /不是图片/);
+	await run({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "k" }) } }, null, /未配置视觉模型/);
+	await run(undefined, async () => "", /不存在或 bot 无权读取/);
+});
