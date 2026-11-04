@@ -124,10 +124,10 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"读飞书聊天记录（当前会话默认）。场景：用户说「上面那个问题/之前聊的」但上下文里没有时；回顾群聊；了解其他任务线。返回按时间正序的消息（含发送者与消息 id）。around 参数用返回的 om_ 开头消息 id 定位某条消息的前后文。",
+			"读飞书聊天记录（当前会话默认）。场景：用户说「上面那个问题/之前聊的」但上下文里没有时；回顾群聊；了解其他任务线。返回按时间正序的消息（含发送者与消息 id）。需要展开某条消息的前后文时：先用无参数调用拿到列表（输出已含 om_ 消息 id），再用返回的 id 作 around 定位——用户看不到消息 id，永远不要向用户索要。卡片消息（bot 回复）只显示占位，正文在会话上下文里，无需深挖，看前后的用户消息即可。",
 		parameters: Type.Object({
 			count: Type.Optional(Type.Number({ description: "读取条数（默认 20，上限 50）" })),
-			around: Type.Optional(Type.String({ description: "消息 id（om_ 开头）：读该消息前后各一半" })),
+			around: Type.Optional(Type.String({ description: "消息 id（om_ 开头）：读该消息前后各一半。来自本工具上次返回，不要向用户索要" })),
 			chat: Type.Optional(Type.String({ description: "会话 id（oc_ 开头）：读其他会话（bot 需在该会话内）。默认当前会话" })),
 			sinceHours: Type.Optional(Type.Number({ description: "只读最近 N 小时内的消息（与 chat 搭配）" })),
 		}),
@@ -197,7 +197,7 @@ export function makeLarkExtension(deps: LarkDeps) {
 		sections: [
 			section(
 				"lark",
-				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条）。",
+				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id 可二次 around 展开；消息 id 用户看不到，索要 id 是错误行为）。",
 				{ tag: false },
 			),
 		],
