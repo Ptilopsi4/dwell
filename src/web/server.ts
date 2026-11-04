@@ -374,8 +374,10 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 	}
 
-	server.listen(port, "0.0.0.0", () => {
-		console.log(`[dwell] panel: http://0.0.0.0:${port}/`);
+	// DWELL_PANEL_HOST：绑定指定接口（如 WireGuard 隧道 IP），不设则监听全部接口
+	const host = process.env.DWELL_PANEL_HOST;
+	server.listen(port, host, () => {
+		console.log(`[dwell] panel: http://${host ?? "0.0.0.0"}:${port}/`);
 	});
 }
 
