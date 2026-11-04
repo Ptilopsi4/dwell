@@ -12,9 +12,13 @@
 | `DWELL_PROVIDER` | 模型来源：`zai-coding-cn`（默认）/ `deepseek`。切换后重启，已有会话自动改用新模型 |
 | `ZAI_CODING_CN_API_KEY` | 智谱 Coding Plan 凭证（`DWELL_PROVIDER=zai-coding-cn` 时必填） |
 | `DEEPSEEK_API_KEY` | DeepSeek 凭证（`DWELL_PROVIDER=deepseek` 时必填） |
-| `DWELL_ALLOW` | 飞书 open_id 白名单，逗号分隔（不设则拒绝所有消息） |
+| `DWELL_ALLOW` | 飞书 open_id 成员白名单，逗号分隔（仅首次启动播种 `users.json`；白名单为空则拒绝所有消息） |
+| `DWELL_ADMINS` | 管理员 open_id，逗号分隔（同上，仅播种） |
+| `LARK_APP_ID` / `LARK_APP_SECRET` | 飞书应用凭证 |
 | `DWELL_MODEL` | 模型 id，默认 `glm-5.3`（zai-coding-cn）/ `deepseek-v4-pro`（deepseek，另有 `deepseek-flash`） |
-| `DWELL_DATA` | 数据目录（sqlite/sessions/会话工作目录），默认 `./data`，容器内 `/data` |
+| `DWELL_DATA` | 数据目录（sqlite/会话工作目录），默认 `./data`，容器内 `/data` |
+| `DWELL_STATE` | 状态目录（users/sessions/message-map），默认 `./state`，容器内 `/state`；须在 agent 可写域之外 |
+| `DWELL_TOOL_PATH` | 设置后收窄 bash 工具的 `PATH`（如 `/usr/bin:/bin`），可选 |
 | `DWELL_VISION_MODEL` | 图片理解模型（glm-5.3 无视觉，默认 `glm-5.3-flash`，走智谱套餐；需在 zai-coding-cn catalog 内） |
 
 ## Web 工具
@@ -63,4 +67,4 @@ docker compose up -d --build
 - 访问：`http://<服务器IP>:7788/`。**无内置鉴权**：需部署侧保证网络边界（私网/防火墙/隧道，或 `DWELL_PANEL_HOST` 绑定内网接口），勿暴露公网
 - 功能：会话侧栏（我的任务/私聊/群分组/归档）、实时 transcript（SSE 增量，含生成中文本预览与工具调用折叠）、审批、用户管理；给飞书会话发消息会转发到原对话（From admin），panel 任务可开飞书通知（回复通知即续接）；窄屏侧栏为抽屉
 - 主题：未手动切换时跟随系统，◐/◑ 手动切换后记忆
-- 配置：`DWELL_PANEL_PORT`（端口）、`DWELL_PANEL_HOST`（绑定的网络接口，缺省全部）；本地开发 `DWELL_PANEL_ONLY=1` 只起 panel 不连飞书
+- 配置：`DWELL_PANEL_PORT`（端口，不设则不启动 panel）、`DWELL_PANEL_HOST`（绑定的网络接口，缺省全部）、`DWELL_PANEL_USER`（panel 操作者 open_id，缺省取第一个管理员）、`DWELL_PANEL_URL`（panel 外部地址，设置后飞书通知带跳转链接）；本地开发 `DWELL_PANEL_ONLY=1` 只起 panel 不连飞书
