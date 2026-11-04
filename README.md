@@ -15,10 +15,7 @@
 | `DWELL_ALLOW` | 飞书 open_id 白名单，逗号分隔（不设则拒绝所有消息） |
 | `DWELL_MODEL` | 模型 id，默认 `glm-5.3`（zai-coding-cn）/ `deepseek-v4-pro`（deepseek，另有 `deepseek-flash`） |
 | `DWELL_DATA` | 数据目录（sqlite/sessions/会话工作目录），默认 `./data`，容器内 `/data` |
-
-## Web 工具
-
-`dwell.web.search`（全网搜索）与 `dwell.web.fetch`（读网页正文）：智谱 GLM Coding Plan Remote MCP，计入套餐额度。只要设置了 `ZAI_CODING_CN_API_KEY` 就会注册（与 `DWELL_PROVIDER` 解耦，主模型切 deepseek 时仍可用）；只读免审批，回答自带来源 URL。
+| `DWELL_VISION_MODEL` | 图片理解模型（glm-5.3 无视觉，默认 `glm-5.3-flash`，走智谱套餐；需在 zai-coding-cn catalog 内） |
 
 ## Web 工具
 
