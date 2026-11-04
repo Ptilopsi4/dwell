@@ -7,7 +7,7 @@ import { describeResources } from "./media.ts";
 import { initStateDir } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
-import { connectChannel, downloadMessageResource, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
+import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
@@ -362,15 +362,11 @@ async function replyTo(target: ReplyTarget, text: string, conversation?: Convers
 	if (conversation !== undefined) await sessions.anchor(sent.messageId, conversation.id);
 }
 
-/** 命令参数解析：@提及（mentions 占位符）→ openId+姓名；否则原样返回。 */
+/** 命令参数解析：@提及 → openId+姓名（SDK 已把占位符渲染成名字，见 matchMention）；否则原样返回。 */
 function resolveArg(parts: string[], msg: NormalizedMessage): { id: string; name: string } | null {
 	const arg = parts[1];
 	if (arg === undefined) return null;
-	const mention = msg.mentions.find((m) => m.key === arg || arg.includes(m.key));
-	if (mention !== undefined && mention.openId !== undefined) {
-		return { id: mention.openId, name: mention.name ?? mention.openId };
-	}
-	return { id: arg, name: arg };
+	return matchMention(arg, msg.mentions) ?? { id: arg, name: arg };
 }
 
 /** 命令权限矩阵：/new owner|admin；/cancel admin；/allow /deny admin。 */
