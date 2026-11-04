@@ -276,6 +276,8 @@ async function streamReplyCore(
 				// 工具概述：callId → 摘要（从 transcript 的 assistant toolCall 取参数），done 后报告一次
 				const callSummary = new Map<string, string>();
 				const reported = new Set<string>();
+				// 运行中输出尾行：callId → 首见时间 / 上次 append 时间 / 已消费的完整输出长度
+				const runningOut = new Map<string, { firstSeen: number; lastAppend: number; baseline: number }>();
 				let scanned = 0;
 				const summarize = (name: string, args: Record<string, unknown>): string => {
 					const arg = args.command ?? args.path ?? JSON.stringify(args);
@@ -297,7 +299,7 @@ async function streamReplyCore(
 							}
 						}
 						scanned = entries.length;
-							const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string }[] } | undefined> }).docs?.["pi.live"];
+							const live = (value as unknown as { docs?: Record<string, { generation?: { message?: { content?: { type: string; text?: string }[] } }; tools?: { callId: string; status: string; output?: string }[] } | undefined> }).docs?.["pi.live"];
 						for (const slot of live?.tools ?? []) {
 							// 工具开跑即报：槽位首次可见（pending/running）就 append 概述行，长命令运行期间卡片不再静默；
 						// append-only 流无法回改已完成标记，故不区分状态、只报一次
@@ -306,7 +308,28 @@ async function streamReplyCore(
 								// 尾部空行不可省：markdown 引用块（>）会把紧邻的下一行吸入——正文首句会被包进工具概述
 							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n\n`);
 						}
+						// 长命令进展：运行 >3s 且距上次 ≥3s 时，把新增完整输出的最后一行 append 进卡（输出型命令可见进展；无输出命令不扰）
+						if (slot.status === "running") {
+							const now = Date.now();
+							let prog = runningOut.get(slot.callId);
+							if (prog === undefined) {
+								prog = { firstSeen: now, lastAppend: 0, baseline: 0 };
+								runningOut.set(slot.callId, prog);
+							}
+							const out = slot.output ?? "";
+							const cut = out.lastIndexOf("\n");
+							if (cut < prog.baseline) prog.baseline = Math.max(0, cut); // 输出窗前移致长度回缩：重同步，本轮跳过
+							else if (cut > prog.baseline && now - prog.firstSeen >= 3_000 && now - prog.lastAppend >= 3_000) {
+								const fresh = out.slice(prog.baseline, cut);
+								const line = fresh.slice(fresh.lastIndexOf("\n") + 1).trim();
+								if (line !== "") {
+									await s.append(`> ▸ ${line.slice(0, 120)}\n\n`);
+									prog.lastAppend = now;
+								}
+								prog.baseline = cut;
+							}
 						}
+					}
 						// 模型文本流
 						const parts = live?.generation?.message?.content ?? [];
 						const text = parts.flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
