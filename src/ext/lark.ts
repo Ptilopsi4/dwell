@@ -159,7 +159,7 @@ function makeReadTool(deps: LarkDeps) {
 					const half = Math.ceil(count / 2);
 					const center = anchor.create_time ?? "0";
 					const before = await listMessages(deps, { container_id_type: "chat", container_id: targetChat, sort_type: "ByCreateTimeDesc", page_size: half, end_time: center, with_sender_name: true });
-					const after = await listMessages(deps, { container_id_type: "chat", container_id: targetChat, sort_type: "ByCreateTimeAsc", page_size: half, start_time: center, with_sender_name: true });
+					const after = await listMessages(deps, { container_id_type: "chat", container_id: targetChat, sort_type: "ByCreateTimeAsc", page_size: half, start_time: center, end_time: String(Date.now()), with_sender_name: true });
 					const seen = new Set<string>();
 					items = [...before, ...after].filter((item) => {
 						const id = item.message_id ?? "";

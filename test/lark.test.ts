@@ -74,7 +74,9 @@ test("around：get 定位后前后拼装去重", async () => {
 	const r = await toolOf(deps).execute({ around: "om_2", count: 10 }, api, context);
 	assert.ok(calls.includes("get:om_2"));
 	assert.ok(calls.some((c) => c.startsWith("list:oc_anchor:ByCreateTimeDesc::1500")), "前半段按时间倒序取");
-	assert.ok(calls.some((c) => c.startsWith("list:oc_anchor:ByCreateTimeAsc:1500:")), "后半段按时间正序取");
+	// Asc + start_time 必须显式带 end_time，否则飞书默认 end=0 报 230001（历史假修复，回归断言）
+	const after = calls.find((c) => c.startsWith("list:oc_anchor:ByCreateTimeAsc:1500:"));
+	assert.ok(after !== undefined && after.split(":")[4] !== "", "后半段必须携带 end_time");
 	assert.ok(out(r as never).includes("最近消息"));
 });
 

@@ -62,6 +62,20 @@ test("非图片魔数留档但不做视觉分析", async () => {
 	assert.match(out, /无法识别或超过 10MB，未做视觉分析/);
 });
 
+test("表情包不打下载请求，直接提示改发图片", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	let called = false;
+	const out = await describeResources(msgOf([{ type: "sticker", fileKey: "k5" }]), dir, {
+		download: async () => {
+			called = true;
+			return Buffer.from("x");
+		},
+		describer: null,
+	});
+	assert.equal(called, false);
+	assert.match(out, /\[表情1\] sticker：表情包暂不支持识别，请改发图片消息。/);
+});
+
 test("文件落盘 sanitize 文件名并提示 read 路径", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const out = await describeResources(msgOf([{ type: "file", fileKey: "k2", fileName: "..\\evil:/name.txt" }]), dir, {

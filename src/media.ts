@@ -31,16 +31,21 @@ export async function describeResources(
 			parts.push(`[媒体${index}] ${label}：暂不支持音视频，请改发图片或文件。`);
 			continue;
 		}
+		// 表情包：消息资源接口不支持下载（官方文档），不打注定失败的请求，直接给明确提示
+		if (resource.type === "sticker") {
+			parts.push(`[表情${index}] ${label}：表情包暂不支持识别，请改发图片消息。`);
+			continue;
+		}
 		let buffer: Buffer;
 		try {
-			buffer = await deps.download(resource.fileKey, resource.type === "sticker" || resource.type === "image" ? "image" : "file");
+			buffer = await deps.download(resource.fileKey, resource.type === "image" ? "image" : "file");
 		} catch (err) {
 			console.error(`[dwell] 资源下载失败（${resource.type} ${resource.fileKey}）:`, err instanceof Error ? err.message : err);
 			parts.push(`[资源${index}] ${label}：下载失败。`);
 			continue;
 		}
 		const uploads = join(cwd, "uploads");
-		if (resource.type === "image" || resource.type === "sticker") {
+		if (resource.type === "image") {
 			const mime = sniffImageMime(buffer);
 			const ext = mime?.split("/")[1] ?? "bin";
 			const saved = `image-${index}.${ext}`;
