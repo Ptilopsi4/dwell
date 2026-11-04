@@ -481,14 +481,37 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "当前无任务运行。");
 				break;
 			}
-			const typeZh: Record<string, string> = { direct: "私聊线", group: "群聊线", thread: "话题线", panel: "panel 线" };
-			const lines = await Promise.all(tasks.map(async (t) => {
-				const conv = sessions.listConversations().find((c) => c.id === (t.conversationId as number));
-				const convLabel = sessions.nameOf(t.conversationId as number)
-					?? `${conv !== undefined ? typeZh[conv.type] ?? "会话" : "会话"} #${t.conversationId}`;
-				const owner = sessions.ownerOf(t.conversationId);
-				const ownerName = owner !== undefined && owner !== "panel" ? await directory.userName(owner) : undefined;
-				return `**${statusZh(t)}** \`${t.kind}\` · ${convLabel}${ownerName !== undefined ? ` · ${ownerName}` : ""}${t.abortRequested ? " · ⏹ 已请求中止" : ""}${t.blocked !== undefined ? ` · 阻塞：${t.blocked}` : ""}${t.background ? " · 后台" : ""}`;
+			// 聚合到任务线：一个 run 的 tool/generation 图节点不逐条展示，只报线级状态与人能认识的标签
+			const byConv = new Map<number, StatusTask[]>();
+			for (const t of tasks) {
+				const id = t.conversationId as number;
+				const list = byConv.get(id);
+				if (list === undefined) byConv.set(id, [t]);
+				else list.push(t);
+			}
+			const convs = sessions.listConversations();
+			const lines = await Promise.all([...byConv.entries()].map(async ([convId, ts]) => {
+				const conv = convs.find((c) => c.id === convId);
+				const owner = sessions.ownerOf(convId as ConversationId) ?? "";
+				const ownerName = owner !== "" && owner !== "panel" ? await directory.userName(owner) : undefined;
+				let label = sessions.nameOf(convId);
+				if (label === undefined && conv?.type === "group" && conv.chatId !== null) {
+					const chatName = await directory.chatName(conv.chatId);
+					label = `${sessions.emojiOf(convId) ?? "▫️"} ${chatName ?? "群聊"} · ${ownerName ?? conv.owner.slice(-6)}`;
+				} else if (label === undefined && conv?.type === "thread" && conv.chatId !== null) {
+					const chatName = await directory.chatName(conv.chatId);
+					label = `${chatName ?? "群聊"} · 话题`;
+				} else if (label === undefined && conv?.type === "direct") {
+					label = `私聊 · ${ownerName ?? "?"}`;
+				} else if (label === undefined) {
+					label = "panel 任务";
+				}
+				const abort = ts.some((t) => t.abortRequested);
+				const sleeper = ts.find((t) => t.state.status === "sleeping");
+				const state = ts.some((t) => t.state.status === "running") ? "运行中"
+					: sleeper !== undefined ? `休眠至 ${new Date(sleeper.state.until ?? 0).toLocaleTimeString("zh-CN", { hour12: false })}`
+					: "排队中";
+				return `**${state}${abort ? " · ⏹ 已请求中止" : ""}** · ${label}`;
 			}));
 			const sent = await channel.send(target.chatId, { card: statusCard(lines) }, { replyTo: target.messageId });
 			await sessions.anchor(sent.messageId, conversation.id);
