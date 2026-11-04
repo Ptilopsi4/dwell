@@ -1,70 +1,149 @@
 # dwell
 
-服务器常驻通用 agent：飞书 bot 进出，pi-durable 每步 checkpoint，重启续跑。
+常驻服务器的通用 agent。通过飞书 bot 和 Web panel 两个入口使用，对话和工具调用每步都在 SQLite 里 checkpoint，进程重启后从断点续跑。
 
-- 方案与决策记录：`.pi/PLAN.md`
-- 架构：飞书官方 SDK Channel（单 WebSocket 收发）→ 会话路由/权限 → pi-durable conversation（多用户多线）→ GLM（zai-coding-cn）→ 流式卡片回复
+```
+飞书 ⇄ SDK Channel（单 WebSocket）─┐
+                                   ├→ 会话路由 / 权限 → pi-durable conversation → 模型（GLM / DeepSeek）
+浏览器 ⇄ Web panel（HTTP + SSE）───┘                         └→ 工具：bash/read/write/edit、dwell.web.*、dwell.lark.read
+```
 
-## 环境变量
+基于 [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.4.0 和飞书官方 SDK [`@larksuiteoapi/node-sdk`](https://www.npmjs.com/package/@larksuiteoapi/node-sdk)。
+
+## 快速开始
+
+需要 Node ≥ 22.19（直接运行 `.ts`，没有构建步骤）。
+
+```sh
+npm install
+cp .env.example .env    # 填飞书应用凭证、模型 key、白名单
+npm start
+```
+
+容器部署：
+
+```sh
+docker compose up -d --build    # ./data → /data，./state → /state
+```
+
+## 配置
+
+全部通过环境变量配置，`.env.example` 有模板。
+
+**模型**
 
 | 变量 | 说明 |
 |---|---|
-| `DWELL_PROVIDER` | 模型来源：`zai-coding-cn`（默认）/ `deepseek`。切换后重启，已有会话自动改用新模型 |
-| `ZAI_CODING_CN_API_KEY` | 智谱 Coding Plan 凭证（`DWELL_PROVIDER=zai-coding-cn` 时必填） |
-| `DEEPSEEK_API_KEY` | DeepSeek 凭证（`DWELL_PROVIDER=deepseek` 时必填） |
-| `DWELL_ALLOW` | 飞书 open_id 成员白名单，逗号分隔（仅首次启动播种 `users.json`；白名单为空则拒绝所有消息） |
-| `DWELL_ADMINS` | 管理员 open_id，逗号分隔（同上，仅播种） |
-| `LARK_APP_ID` / `LARK_APP_SECRET` | 飞书应用凭证 |
-| `DWELL_MODEL` | 模型 id，默认 `glm-5.3`（zai-coding-cn）/ `deepseek-v4-pro`（deepseek，另有 `deepseek-flash`） |
-| `DWELL_DATA` | 数据目录（sqlite/会话工作目录），默认 `./data`，容器内 `/data` |
-| `DWELL_STATE` | 状态目录（users/sessions/message-map），默认 `./state`，容器内 `/state`；须在 agent 可写域之外 |
-| `DWELL_TOOL_PATH` | 设置后收窄 bash 工具的 `PATH`（如 `/usr/bin:/bin`），可选 |
-| `DWELL_VISION_MODEL` | 图片理解模型（glm-5.3 无视觉，默认 `glm-5.3-flash`，走智谱套餐；需在 zai-coding-cn catalog 内） |
+| `DWELL_PROVIDER` | `zai-coding-cn`（默认）或 `deepseek`。切换后重启，已有会话自动改用新模型 |
+| `ZAI_CODING_CN_API_KEY` | 智谱 GLM Coding Plan key。provider 为 zai-coding-cn 时必填；web 工具和图片理解也用它 |
+| `DEEPSEEK_API_KEY` | provider 为 deepseek 时必填 |
+| `DWELL_MODEL` | 默认 `glm-5.3`（zai-coding-cn）/ `deepseek-v4-pro`（deepseek，另有 `deepseek-flash`） |
+| `DWELL_VISION_MODEL` | 图片理解模型，默认 `glm-5.3-flash`，必须在 zai-coding-cn catalog 内 |
 
-## Web 工具
+**飞书与用户**
 
-`dwell.web.search`（全网搜索）与 `dwell.web.fetch`（读网页正文）：智谱 GLM Coding Plan Remote MCP，计入套餐额度。只要设置了 `ZAI_CODING_CN_API_KEY` 就会注册（与 `DWELL_PROVIDER` 解耦，主模型切 deepseek 时仍可用）；只读免审批，回答自带来源 URL。
+| 变量 | 说明 |
+|---|---|
+| `LARK_APP_ID` / `LARK_APP_SECRET` | 飞书自建应用凭证 |
+| `DWELL_ADMINS` | 管理员 open_id，逗号分隔 |
+| `DWELL_ALLOW` | 成员 open_id，逗号分隔 |
 
-## 多模态输入
+`DWELL_ADMINS` 和 `DWELL_ALLOW` 只在 `state/users.json` 不存在时播种一次，之后以 `users.json` 为准，用 `/allow`、`/disallow` 或 panel 维护。白名单为空时拒绝所有消息。
 
-飞书发图：glm-5.3 无视觉，图片由 `DWELL_VISION_MODEL`（默认 glm-5.3-flash，走套餐）单发单答生成描述，描述文本进主上下文，原图留档 `uploads/`。发文件：直接落盘 `uploads/` 并告知模型路径（read 可读）。音视频暂不支持。无 ZAI key 时图片仅留档。
+**Panel**
 
-## 飞书历史读取
+| 变量 | 说明 |
+|---|---|
+| `DWELL_PANEL_PORT` | panel 端口（如 `7788`），不设则不启动 panel |
+| `DWELL_PANEL_HOST` | 绑定的网络接口，缺省监听全部 |
+| `DWELL_PANEL_USER` | panel 操作者的 open_id，panel 发出的消息和审批记在这个人名下；缺省取第一个管理员 |
+| `DWELL_PANEL_URL` | panel 的外部访问地址，设置后飞书通知附带跳转链接 |
+| `DWELL_PANEL_ONLY` | 设为 `1` 时只启动 panel、不连飞书，用于本地开发 |
 
-`dwell.lark.read`：模型可读飞书聊天记录——默认当前会话最近 20 条（零参数），或 `around`（消息 id）定位某条前后文，或 `chat` 指定会话。返回正序消息（发送者/时间/消息 id）。跨线引用「上面那个问题」、回顾群聊场景适用。只读免审批，bot 必须在目标会话内。
+**目录与运行环境**
 
-## 飞书命令
+| 变量 | 说明 |
+|---|---|
+| `DWELL_DATA` | 数据目录，默认 `./data`（容器内 `/data`）：`dwell.sqlite` 和各会话工作目录 `work/` |
+| `DWELL_STATE` | 状态目录，默认 `./state`（容器内 `/state`）：`users.json`、`sessions.json`、`message-map.json`。必须放在 agent 可写的数据目录之外 |
+| `DWELL_TOOL_PATH` | 设置后收窄 bash 工具的 `PATH`（如 `/usr/bin:/bin`），让模型看不到服务器上带凭证的程序 |
 
-`/new` 新对话 / `/status` 任务状态 / `/cancel` 中止 / `/approve [分钟]` 批准危险命令 / `/deny` 拒绝
+## 飞书使用
+
+### 对话规则
+
+| 消息形态 | 进入的任务线 |
+|---|---|
+| 私聊 | 个人任务线，连续对话 |
+| 群聊 @bot | 发送者在该群的独立任务线，每人一条，互不干扰、可并行 |
+| 回复任务线里的某条消息（成员发给 bot 的消息、审批卡、通知等） | 加入那条任务线，不需要 @ |
+| 话题群里发言 | 该话题的任务线，话题内共享上下文，不需要 @ |
+
+同一个群的所有任务线共享工作目录 `work/<chat_id>/`。任务运行中再发消息会作为补充插入当前任务。被回复的消息查不到所属任务线时（例如超出最近 1 万条的记录上限），私聊和 @bot 的消息会转到新任务线并提示。
+
+### 命令
+
+| 命令 | 作用 | 谁能用 |
+|---|---|---|
+| `/new` | 清空本任务线上下文 | 线主、管理员 |
+| `/cancel` | 中止当前任务 | 线主、管理员 |
+| `/status` | 查看运行中的任务 | 管理员 |
+| `/approve [分钟]` | 开启危险命令批准窗口（默认 10 分钟）；有待审命令时同时让模型继续 | 所有人（只对自己生效） |
+| `/deny` | 关闭自己的批准窗口并取消待审请求；管理员关闭整条任务线的 | 所有人 |
+| `/allow @某人 [admin]` | 添加成员或管理员 | 管理员 |
+| `/disallow @某人` | 移除用户（不能移除最后一名管理员） | 管理员 |
+| `/whoami` | 显示自己的 open_id | 所有人 |
+| `/help` | 使用说明卡片 | 所有人 |
+
+### 危险命令审批
+
+bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` 远程、带数据或非 GET 的 `curl`、`wget --post`、全局安装包（`npm install -g`、`apt install`、`pip install`）、`docker`/`systemctl`/`crontab`。`sudo` 直接拒绝。访问状态文件的命令也会被拒绝。
+
+拦截后 bot 发审批卡片，点批准或回复 `/approve` 开启时间窗口，窗口内同一人在该任务线的危险命令放行。能审批的人：触发者本人、线主、管理员。panel 发起的任务审批卡只私发给 panel 操作者，不发到群里。
+
+## 模型可用的工具
+
+| 工具 | 说明 | 审批 |
+|---|---|---|
+| `bash` / `read` / `write` / `edit` | 在会话工作目录内操作文件和执行命令 | bash 危险命令需审批 |
+| `dwell.web.search` / `dwell.web.fetch` | 全网搜索、读取网页正文。走智谱 Coding Plan Remote MCP，计入套餐额度。设置了 `ZAI_CODING_CN_API_KEY` 就会启用，与 `DWELL_PROVIDER` 无关 | 免审 |
+| `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内 | 免审 |
+
+图片和文件：
+
+- 图片由 `DWELL_VISION_MODEL` 生成文字描述后交给主模型，原图存到工作目录 `uploads/`。没有智谱 key 时只存图，不做识别
+- 文件存到 `uploads/`，模型用 `read` 读取
+- 音视频暂不支持
+
+## Web panel
+
+浏览器访问 `http://<host>:<DWELL_PANEL_PORT>/`。
+
+**panel 没有内置鉴权。** 必须由部署侧保证只有可信网络能访问（私网、防火墙、隧道，或用 `DWELL_PANEL_HOST` 绑定到内网接口），不要暴露到公网。
+
+- 侧栏按「我的任务 / 私聊 / 群聊 / 已归档」分组，实时显示 transcript（流式文本、工具调用、思考过程可折叠）
+- 可以新建 panel 任务、重命名、归档、清空上下文、中止、审批、管理用户
+- 向飞书会话发消息时，消息先以「From admin」形式出现在原聊天里，再由 bot 回复，群成员都看得到
+- 在 panel 里中止或清空飞书会话，原聊天会收到通知
+- panel 任务可以开启飞书通知：完成、失败或需要审批时 bot 私聊操作者；直接回复这条通知就能在飞书里继续该任务
+
+## 安全边界
+
+- 飞书 open_id 白名单准入，白名单外的消息回复固定提示
+- 模型 key、飞书凭证、白名单读入内存后从进程环境删除，bash 工具里 `printenv` 拿不到
+- 状态文件（角色、路由）放在 agent 可写目录之外，模型无法通过改文件给自己提权
+- 进程应以非 root 运行（Dockerfile 已创建 `dwell` 用户），容器是最终隔离边界；工作目录只是路径约定，bash 能 `cd` 出去
+- **群聊是互信域**：同群成员共享工作目录，且能通过回复加入他人的任务线，看到该线处理过的内容。敏感内容请用私聊
 
 ## 开发
 
 ```sh
-npm install
-npm run check     # 类型检查
-npm test          # 单测
-npm run smoke     # 冒烟（无 key 时 faux 模型验证链路）
-npm start         # 常驻运行
+npm run check    # tsc --noEmit
+npm test         # node:test 单测（test/*.test.ts）
+npm run smoke    # 冒烟：有模型 key 时走真模型，没有时用 faux 模型验证装配链路
+DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start    # 本地只起 panel
 ```
 
-## 部署
+同一个飞书应用的长连接会在多个客户端之间随机分流消息，本机调试不要和线上实例同时连同一个应用。
 
-```sh
-cp .env.example .env   # 填 key 与白名单
-docker compose up -d --build
-```
-
-## 多用户与安全边界
-
-- 角色：`DWELL_ADMINS`（管理员）/ `DWELL_ALLOW`（成员）播种，运行时用 `/allow <open_id> [admin]`、`/disallow <open_id>` 热更新（持久化到 `data/users.json`，重启不丢）
-- 会话路由：私聊=个人线；群聊平消息=每人独立任务线（互不污染、并行）；回复某条消息=参与该任务线；话题群=话题即任务
-- **群聊是互信域**：共享工作目录（`work/<chat_id>/`）+ 回复可参与任务线意味着参与者可访问该线上处理过的内容。敏感内容请用私聊
-- 权限：`/new` `/cancel` `/status` 管理员（或线主）；审批=触发者/线主/管理员；白名单外回复固定提示
-- 安全：敏感凭证启动后从进程环境移除（bash 工具 `printenv` 拿不到）；状态文件在 agent 可写域之外
-
-## Web panel
-
-- 访问：`http://<服务器IP>:7788/`。**无内置鉴权**：需部署侧保证网络边界（私网/防火墙/隧道，或 `DWELL_PANEL_HOST` 绑定内网接口），勿暴露公网
-- 功能：会话侧栏（我的任务/私聊/群分组/归档）、实时 transcript（SSE 增量，含生成中文本预览与工具调用折叠）、审批、用户管理；给飞书会话发消息会转发到原对话（From admin），panel 任务可开飞书通知（回复通知即续接）；窄屏侧栏为抽屉
-- 主题：未手动切换时跟随系统，◐/◑ 手动切换后记忆
-- 配置：`DWELL_PANEL_PORT`（端口，不设则不启动 panel）、`DWELL_PANEL_HOST`（绑定的网络接口，缺省全部）、`DWELL_PANEL_USER`（panel 操作者 open_id，缺省取第一个管理员）、`DWELL_PANEL_URL`（panel 外部地址，设置后飞书通知带跳转链接）；本地开发 `DWELL_PANEL_ONLY=1` 只起 panel 不连飞书
+贡献约定和代码结构见 `AGENTS.md`，设计与决策记录见 `.pi/PLAN.md`。
