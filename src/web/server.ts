@@ -1,4 +1,4 @@
-// Panel HTTP 服务：无内置鉴权（部署前提：WireGuard 隧道等网络层隔离），SSE 推流（transcript + live 状态），静态页面。
+// Panel HTTP 服务：无内置鉴权（部署侧自行保证网络边界，可用 DWELL_PANEL_HOST 绑定内网接口），SSE 推流（transcript + live 状态），静态页面。
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -374,7 +374,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 	}
 
-	// DWELL_PANEL_HOST：绑定指定接口（如 WireGuard 隧道 IP），不设则监听全部接口
+	// DWELL_PANEL_HOST：绑定指定网络接口（不设则监听全部接口）
 	const host = process.env.DWELL_PANEL_HOST;
 	server.listen(port, host, () => {
 		console.log(`[dwell] panel: http://${host ?? "0.0.0.0"}:${port}/`);

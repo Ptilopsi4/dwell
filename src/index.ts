@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 
 	panelUser = process.env.DWELL_PANEL_USER || users.list().find((u) => u.role === "admin")?.id || "panel";
 
-	// Web panel（无内置鉴权，部署前提：WireGuard 隧道等网络层隔离）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
+	// Web panel（无内置鉴权，部署侧自行保证网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
 		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort });
