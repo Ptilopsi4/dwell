@@ -45,10 +45,13 @@ export async function describeResources(
 			continue;
 		}
 		const uploads = join(cwd, "uploads");
+		// 同 chat 所有任务线共享 cwd：固定序号名会互相覆盖（旧上下文里的路径指向别人的图）。用消息 id 末 8 位做前缀；
+		// 同一消息重推（requestId 幂等）覆写同名文件，内容相同无副作用
+		const tag = `${msg.messageId.replace(/^om_/, "").slice(-8)}-`;
 		if (resource.type === "image") {
 			const mime = sniffImageMime(buffer);
 			const ext = mime?.split("/")[1] ?? "bin";
-			const saved = `image-${index}.${ext}`;
+			const saved = `${tag}image-${index}.${ext}`;
 			await mkdir(uploads, { recursive: true });
 			await writeFile(join(uploads, saved), buffer);
 			if (mime === null || buffer.length > IMAGE_MAX_BYTES) {
@@ -68,7 +71,7 @@ export async function describeResources(
 			continue;
 		}
 		// file：落盘，read 工具可直接读（无需视觉）
-		const safeName = basename(resource.fileName ?? `file-${index}`).replace(/[\\/:*?"<>|]/g, "_");
+		const safeName = `${tag}${basename(resource.fileName ?? `file-${index}`).replace(/[\\/:*?"<>|]/g, "_")}`;
 		await mkdir(uploads, { recursive: true });
 		await writeFile(join(uploads, safeName), buffer);
 		parts.push(`[文件${index}] ${safeName}（${(buffer.length / 1024).toFixed(1)}KB）已保存到 uploads/${safeName}，可用 read 工具读取。`);

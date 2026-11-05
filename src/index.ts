@@ -1,16 +1,16 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
-import { MODEL, makeImageDescriber, openDwell, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
+import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
+import { MODEL, busyConversations, makeImageDescriber, openDwell, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
 import { describeResources } from "./media.ts";
-import { initStateDir } from "./state.ts";
+import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
-import { approvals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
+import { approvals, clampMinutes, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
@@ -19,14 +19,21 @@ let harness: Harness;
 let sessions: Sessions;
 let channel: LarkChannel;
 const users = new Users();
-const directory = new Directory(process.env.LARK_APP_ID, process.env.LARK_APP_SECRET);
+let directory: Directory;
 /** panel 操作者（pt）：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
 let panelUser = "";
-/** 图片理解 subagent（启动时装配；无 ZAI key 时为 null，图片降级为落盘+提示） */
-const imageDescriber: ImageDescriber | null = makeImageDescriber();
+/** 图片理解 subagent（main 启动时装配，凭证读闭包；无 ZAI key 时为 null，图片降级为落盘+提示） */
+let imageDescriber: ImageDescriber | null = null;
 
 async function main(): Promise<void> {
+	// 密钥只在启动期读一次：Directory/Channel 用参数接，provider/web/vision 在 openDwell 内读进闭包。
+	// 之后 scrubSecretEnv 把 env 与 /proc 原始环境区彻底擦净，resume 才放行任何任务（含续跑的 bash）
+	const larkAppId = process.env.LARK_APP_ID;
+	const larkAppSecret = process.env.LARK_APP_SECRET;
+	directory = new Directory(larkAppId, larkAppSecret);
+	imageDescriber = makeImageDescriber();
 	await initStateDir();
+	await loadApprovalState();
 	harness = await openDwell(undefined, [
 		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
 		makeLarkExtension({
@@ -34,6 +41,13 @@ async function main(): Promise<void> {
 			getDirectory: () => directory,
 			chatOf: (id) => sessions.chatOf(id),
 			getDescriber: () => imageDescriber,
+			isAdmin: (id) => users.isAdmin(id),
+			senderOf: (id) => runSender.get(id),
+		}),
+		// 文件工具路径治理：按会话解析 cwd（write/edit 限 cwd+tmp；read 禁 state/应用根/sqlite/proc）
+		makePathGuardExtension(async (id, context) => {
+			const conversation = await harness.conversation(id as ConversationId, context);
+			return conversation === undefined ? undefined : (await conversation.agent(context)).cwd ?? undefined;
 		}),
 	]);
 	sessions = new Sessions(harness);
@@ -53,6 +67,8 @@ async function main(): Promise<void> {
 				try {
 					const sent = await channel.send(panelUser, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
 					pending.cardMessageId = sent.messageId;
+					pending.cardChatId = panelUser; // 私发会话即 panelUser 的 p2p；panel 决定后据此更新卡片并把续跑回复锚到这张卡
+					void persistApprovals();
 					await sessions.anchor(sent.messageId, conversationId as ConversationId);
 				} catch (err) {
 					console.error("[dwell] panel 审批卡片私发失败:", err);
@@ -67,24 +83,32 @@ async function main(): Promise<void> {
 
 	panelUser = process.env.DWELL_PANEL_USER || users.list().find((u) => u.role === "admin")?.id || "panel";
 
-	// Web panel（无内置鉴权，部署侧自行保证网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
+	// 密钥已全部进入闭包：从 env 与 /proc 原始环境区彻底移除（失败即拒绝启动），此后任何任务都读不回
+	await scrubSecretEnv();
+
+	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
 		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
+			harness.resume();
 			return;
 		}
 	}
 
+	// 飞书凭证只在真连 Channel 时要求（panel-only 本地开发无凭证可跑）；scrub 前已捕获进参数，环境已擦净
+	if (larkAppId === undefined || larkAppSecret === undefined) throw new Error("LARK_APP_ID / LARK_APP_SECRET 未设置");
 	channel = await connectChannel({
+		appId: larkAppId,
+		appSecret: larkAppSecret,
 		onMessage: (msg) => void handleMessage(msg),
 		onCardAction: (evt) => void handleCardAction(evt),
 	});
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
 	await reattachStreams();
-	// 凭证均已注入内存（credential store / SDK Client），从进程环境移除，堵死 bash 工具的 printenv 窃取面
-	scrubSecretEnv();
+	// resume 放在擦除密钥与飞书重挂之后：续跑任务（含其 bash）从这里才开跑
+	harness.resume();
 	console.log(`[dwell] 就绪（bot: ${channel.botIdentity?.name ?? "?"}）`);
 }
 
@@ -92,11 +116,11 @@ async function main(): Promise<void> {
 async function setRunAttributionIfIdle(conversationId: number, sender: string, via: "panel" | "feishu"): Promise<void> {
 	const graphState = await harness.taskGraph?.(BACKGROUND_CONTEXT);
 	try {
-		const busy = Object.values((graphState?.value as { tasks?: Record<string, { status?: string; conversationId?: number }> } | undefined)?.tasks ?? {})
-			.some((t) => t.conversationId === conversationId && ["pending", "running", "waiting", "sleeping", "completing"].includes(String(t.status)));
-		if (!busy) {
+		const busy = busyConversations(graphState?.value);
+		if (!busy.has(conversationId)) {
 			runSender.set(conversationId, sender);
 			runVia.set(conversationId, via);
+			void persistApprovals();
 		}
 	} finally {
 		graphState?.dispose();
@@ -162,7 +186,9 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		await setRunAttributionIfIdle(conversation.id as number, msg.senderId, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
 		const content = msg.content.trim();
-		if (content.startsWith("/")) {
+		// 命令表精确匹配：未知斜杠文本（如路径「/usr/bin 下有什么」）当普通输入交模型，不再回「未知命令」
+		const KNOWN_COMMANDS = new Set(["/help", "/whoami", "/new", "/status", "/cancel", "/approve", "/deny", "/allow", "/disallow"]);
+		if (KNOWN_COMMANDS.has(content.split(/\s+/)[0] ?? "")) {
 			await runCommand(content, conversation, msg, target);
 			return;
 		}
@@ -471,9 +497,9 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				return;
 			}
 			const graphState = await harness.taskGraph?.(context);
-			let tasks: StatusTask[] = [];
+			let tasks: TaskGraphNode[] = [];
 			try {
-					tasks = Object.values((graphState?.value as { tasks?: Record<string, StatusTask> } | undefined)?.tasks ?? {});
+					tasks = Object.values((graphState?.value as TaskGraph | undefined)?.tasks ?? {});
 				} finally {
 					graphState?.dispose();
 			}
@@ -482,7 +508,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				break;
 			}
 			// 聚合到任务线：一个 run 的 tool/generation 图节点不逐条展示，只报线级状态与人能认识的标签
-			const byConv = new Map<number, StatusTask[]>();
+			const byConv = new Map<number, TaskGraphNode[]>();
 			for (const t of tasks) {
 				const id = t.conversationId as number;
 				const list = byConv.get(id);
@@ -507,9 +533,9 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					label = "panel 任务";
 				}
 				const abort = ts.some((t) => t.abortRequested);
-				const sleeper = ts.find((t) => t.state.status === "sleeping");
+				const sleeper = ts.find((t) => t.state.status === "sleeping")?.state as Extract<TaskGraphState, { status: "sleeping" }> | undefined;
 				const state = ts.some((t) => t.state.status === "running") ? "运行中"
-					: sleeper !== undefined ? `休眠至 ${new Date(sleeper.state.until ?? 0).toLocaleTimeString("zh-CN", { hour12: false })}`
+					: sleeper !== undefined ? `休眠至 ${new Date(sleeper.until ?? 0).toLocaleTimeString("zh-CN", { hour12: false })}`
 					: "排队中";
 				return `**${state}${abort ? " · ⏹ 已请求中止" : ""}** · ${label}`;
 			}));
@@ -526,12 +552,14 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			await replyTo(target, "已中止当前任务。");
 			break;
 		case "/approve": {
-			const minutes = Number(parts[1]) || 10;
+			const minutes = clampMinutes(Number(parts[1]) || 10);
 			approvals.set(windowKey(convId, msg.senderId), Date.now() + minutes * 60_000);
+			void persistApprovals();
 			const pending = pendingApprovals.get(windowKey(convId, msg.senderId));
 			if (pending !== undefined) {
 				// 事后批准：存在被拦截的待审命令，唤醒模型重试
 				pendingApprovals.delete(windowKey(convId, msg.senderId));
+				void persistApprovals();
 				await replyTo(target, `已批准：本任务线 ${minutes} 分钟内危险命令免拦截，继续执行。`);
 				const s = await conversation.submit({
 					type: "input",
@@ -552,11 +580,13 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				const prefix = `${convId}:`;
 				for (const k of approvals.keys()) if (k.startsWith(prefix)) approvals.delete(k);
 				for (const k of pendingApprovals.keys()) if (k.startsWith(prefix)) pendingApprovals.delete(k);
+				void persistApprovals();
 				await replyTo(target, "已关闭本任务线的全部批准窗口。");
 				return;
 			}
 			approvals.delete(windowKey(convId, msg.senderId));
 			pendingApprovals.delete(windowKey(convId, msg.senderId));
+			void persistApprovals();
 			await replyTo(target, "已关闭你的批准窗口并取消待审请求。");
 			break;
 		case "/allow": {
@@ -583,7 +613,11 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "用法：/disallow @某人");
 				return;
 			}
-			if (who.id === msg.senderId && users.adminCount() <= 1) {
+			if (!users.isAllowed(who.id)) {
+				await replyTo(target, `${who.name} 不在白名单内，无需移除。`);
+				return;
+			}
+			if (users.isAdmin(who.id) && users.adminCount() <= 1) {
 				await replyTo(target, "无法移除最后一名管理员（会自锁）。");
 				return;
 			}
@@ -595,18 +629,6 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			await replyTo(target, `未知命令 ${cmd}，回复 /help 查看可用命令。`);
 	}
 }
-
-/** taskGraph 节点中 /status 用到的字段（结构性类型，避免依赖内部导出）。 */
-type StatusTask = {
-	kind: string;
-	conversationId: ConversationId;
-	background: boolean;
-	abortRequested: boolean;
-	state: { status: string; phase?: string; until?: number; on?: readonly unknown[]; outcome?: string };
-	blocked?: string;
-};
-
-/** 任务状态 → 中文摘要。 */
 
 /** /status 卡片：每个运行中任务一行（状态 · 类型 · 任务线 · 触发人）。 */
 function statusCard(lines: string[]): Record<string, unknown> {
@@ -690,12 +712,20 @@ function approvalCard(
 
 async function sendApprovalCard(chatId: string, conversationId: number, sender: string, command: string, match: string): Promise<void> {
 	try {
-		const sent = await channel.send(chatId, { card: approvalCard(conversationId, sender, command, match, { kind: "request" }) });
+		// 群/话题线回复该线锚点（成员看得出属于哪条任务；话题线发回话题内），私聊直接发
+		const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
+		const anchor = kind === undefined || kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
+		const sent = await channel.send(
+			chatId,
+			{ card: approvalCard(conversationId, sender, command, match, { kind: "request" }) },
+			anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" },
+		);
 		// 记下卡片位置：panel 做出决定时同步卡片状态，并把续跑结果回复到卡片下
 		const pending = pendingApprovals.get(windowKey(conversationId, sender));
 		if (pending !== undefined) {
 			pending.cardMessageId = sent.messageId;
 			pending.cardChatId = chatId;
+			void persistApprovals();
 		}
 		await sessions.anchor(sent.messageId, conversationId as ConversationId);
 	} catch (err) {
@@ -812,6 +842,7 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 	if (v.action === "approve") {
 		pendingApprovals.delete(key);
 		approvals.set(key, Date.now() + minutes * 60_000);
+		void persistApprovals();
 		const s = await conversation.submit({
 			type: "input",
 			content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
@@ -822,6 +853,7 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 	} else {
 		pendingApprovals.delete(key);
 		approvals.delete(key);
+		void persistApprovals();
 		const s = await conversation.submit({
 			type: "input",
 			content: "用户拒绝了危险命令。请停止该操作并改用其他方案，或询问用户意图。",
@@ -834,14 +866,16 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 
 process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
+// Node ≥15 默认把 unhandledRejection 当致命错拖垮整个进程（飞书 bot 同进程）：兜底记日志不退出
+process.on("unhandledRejection", (reason) => {
+	console.error("[dwell] 未处理的 rejection:", reason);
+});
 /** 重启后为活跃 run 重挂流式镜像卡：镜像 live 文本至 run 结束并补齐最终答案（tool 行不重放，只保结果可见）。 */
 async function reattachStreams(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	const graphState = await harness.taskGraph?.(context);
 	try {
-		const tasks = Object.values((graphState?.value as { tasks?: Record<string, { status?: string; conversationId?: number }> } | undefined)?.tasks ?? {});
-		const busy = [...new Set(tasks.filter((t) => ["pending", "running", "waiting", "sleeping", "completing"].includes(String(t.status))).map((t) => t.conversationId as number))];
-		for (const id of busy) {
+		for (const id of busyConversations(graphState?.value)) {
 			const chatId = sessions.chatOf(id);
 			if (chatId === undefined) continue;
 			const conversation = await harness.conversation(id as ConversationId, context);
@@ -908,4 +942,8 @@ async function shutdown(): Promise<void> {
 	process.exit(0);
 }
 
-void main();
+// 启动失败必须遇错即遇（退出码非 0，systemd/docker 可感知重启）；不走 unhandledRejection 兜底（那会挂着不退）
+void main().catch((err: unknown) => {
+	console.error("[dwell] 启动失败:", err);
+	process.exit(1);
+});

@@ -4,8 +4,8 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
-import { DATA_DIR, MODEL } from "./harness.ts";
-import { stateFile, writeStateJson } from "./state.ts";
+import { MODEL } from "./harness.ts";
+import { DATA_DIR, stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
@@ -64,6 +64,11 @@ export class Sessions {
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] message-map.json 损坏，replyTo 路由将全部降级:", err);
 		}
+	}
+
+	/** fire-and-forget 写入统一兜错：磁盘满/权限错误只记日志，不变成 unhandledRejection 拖垮进程。 */
+	private kickSave(): void {
+		this.save().catch((err: unknown) => console.error("[dwell] sessions 状态写入失败:", err));
 	}
 
 	private async save(): Promise<void> {
@@ -128,7 +133,7 @@ export class Sessions {
 	/** 消息进入时调用：记录会话最后活动（panel 列表排序/显示）。 */
 	touchActivity(conversationId: ConversationId): void {
 		this.lastTs.set(conversationId, Date.now());
-		void this.save();
+		this.kickSave();
 	}
 
 	/** 线标签 emoji（只读；分配用 lineEmoji）。 */
@@ -147,7 +152,7 @@ export class Sessions {
 		const got = allocateEmoji(active);
 		if (got.stealFrom !== undefined) this.emojis.delete(got.stealFrom as ConversationId);
 		this.emojis.set(id, got.emoji);
-		void this.save();
+		this.kickSave();
 		return got.emoji;
 	}
 
@@ -175,7 +180,7 @@ export class Sessions {
 	setNotify(conversationId: number, on: boolean): void {
 		if (on) this.notify.add(conversationId as ConversationId);
 		else this.notify.delete(conversationId as ConversationId);
-		void this.save();
+		this.kickSave();
 	}
 
 	notifyEnabled(conversationId: number): boolean {

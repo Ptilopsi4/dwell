@@ -1,7 +1,7 @@
 // node --test "test/lark.test.ts"
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeLarkExtension } from "../src/ext/lark.ts";
+import { makeLarkExtension, type LarkDeps } from "../src/ext/lark.ts";
 
 type Item = { message_id: string; msg_type?: string; create_time?: string; chat_id?: string; deleted?: boolean; body?: { content?: string }; sender?: { id?: string; sender_type?: string }; senderName?: string };
 
@@ -32,7 +32,7 @@ function fakeDeps(items: Item[], anchor?: Item) {
 	};
 }
 
-function toolOf(deps: ReturnType<typeof fakeDeps>["deps"]) {
+function toolOf(deps: LarkDeps) {
 	const ext = makeLarkExtension(deps);
 	const tool = ext.tools?.[0];
 	if (tool === undefined) throw new Error("工具未注册");
@@ -66,18 +66,38 @@ test("媒体与富文本占位/截断", async () => {
 	assert.match(text, new RegExp(`x{200}…`)); // 单条截 200 字
 });
 
-test("around：get 定位后前后拼装去重", async () => {
+test("around：get 定位后前后拼装去重（同会话）", async () => {
 	const { deps, calls } = fakeDeps(
 		[{ message_id: "om_1" }, { message_id: "om_2" }, { message_id: "om_3" }],
-		{ message_id: "om_2", create_time: "1500", chat_id: "oc_anchor" },
+		{ message_id: "om_2", create_time: "1500", chat_id: "oc_current" },
 	);
 	const r = await toolOf(deps).execute({ around: "om_2", count: 10 }, api, context);
 	assert.ok(calls.includes("get:om_2"));
-	assert.ok(calls.some((c) => c.startsWith("list:oc_anchor:ByCreateTimeDesc::1500")), "前半段按时间倒序取");
+	assert.ok(calls.some((c) => c.startsWith("list:oc_current:ByCreateTimeDesc::1500")), "前半段按时间倒序取");
 	// Asc + start_time 必须显式带 end_time，否则飞书默认 end=0 报 230001（历史假修复，回归断言）
-	const after = calls.find((c) => c.startsWith("list:oc_anchor:ByCreateTimeAsc:1500:"));
+	const after = calls.find((c) => c.startsWith("list:oc_current:ByCreateTimeAsc:1500:"));
 	assert.ok(after !== undefined && after.split(":")[4] !== "", "后半段必须携带 end_time");
 	assert.ok(out(r as never).includes("最近消息"));
+});
+
+test("跨会话读取（chat/around 指向别的会话）仅管理员放行", async () => {
+	const anchorOther = { message_id: "om_2", create_time: "1500", chat_id: "oc_other" };
+	// 普通成员：chat 参数直指他群 → 拒绝
+	let deps: LarkDeps = fakeDeps([], anchorOther).deps;
+	let r = await toolOf(deps).execute({ chat: "oc_other" }, api, context);
+	assert.match(out(r as never), /仅管理员可用/);
+	// 普通成员：around 锚点落在他群 → 拒绝（list 不应发出）
+	deps = fakeDeps([], anchorOther).deps;
+	r = await toolOf({ ...deps, senderOf: () => "ou_member", isAdmin: () => false }).execute({ around: "om_2" }, api, context);
+	assert.match(out(r as never), /仅管理员可用/);
+	// 管理员：around 跨群放行
+	deps = fakeDeps([{ message_id: "om_1" }], anchorOther).deps;
+	r = await toolOf({ ...deps, senderOf: () => "ou_admin", isAdmin: (id: string) => id === "ou_admin" }).execute({ around: "om_2" }, api, context);
+	assert.match(out(r as never), /最近消息/);
+	// 无发起者信息（重启后归属缺失）：从严拒绝
+	deps = fakeDeps([], anchorOther).deps;
+	r = await toolOf({ ...deps, isAdmin: () => true }).execute({ chat: "oc_other" }, api, context);
+	assert.match(out(r as never), /仅管理员可用/);
 });
 
 test("panel 会话（无对应 chat）给明确提示", async () => {

@@ -1,19 +1,16 @@
 // 飞书连接：官方 SDK Channel 模块（单 WebSocket 收事件+卡片回调，自动重连，消息归一化）。
-// 凭证走环境变量 LARK_APP_ID / LARK_APP_SECRET。
+// 凭证由调用方传入（启动时读进闭包，scrubSecretEnv 之后环境里已没有密钥）。
 import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type MentionInfo, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
 
 export function connectChannel(handlers: {
+	appId: string;
+	appSecret: string;
 	onMessage: (msg: NormalizedMessage) => void;
 	onCardAction: (evt: CardActionEvent) => void;
 }): Promise<LarkChannel> {
-	const appId = process.env.LARK_APP_ID;
-	const appSecret = process.env.LARK_APP_SECRET;
-	if (appId === undefined || appSecret === undefined) {
-		throw new Error("LARK_APP_ID / LARK_APP_SECRET 未设置");
-	}
 	const channel = createLarkChannel({
-		appId,
-		appSecret,
+		appId: handlers.appId,
+		appSecret: handlers.appSecret,
 		loggerLevel: LoggerLevel.warn,
 		// 群聊 mention 门禁由 dwell 自管（话题内/回复锚点消息不需要 @）：SDK 层放开
 		policy: { requireMention: false, dmMode: "open" },

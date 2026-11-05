@@ -10,8 +10,8 @@ import type { NormalizedMessage } from "../src/feishu/channel.ts";
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
-function msgOf(resources: { type: "image" | "file" | "audio" | "sticker"; fileKey: string; fileName?: string }[]): NormalizedMessage {
-	return { resources, content: "", rawContentType: "image" } as unknown as NormalizedMessage;
+function msgOf(resources: { type: "image" | "file" | "audio" | "sticker"; fileKey: string; fileName?: string }[], messageId = "om_ABCDEFGH"): NormalizedMessage {
+	return { resources, messageId, content: "", rawContentType: "image" } as unknown as NormalizedMessage;
 }
 
 test("sniffImageMime 识别四种图片格式与未知数据", () => {
@@ -34,9 +34,9 @@ test("图片经 describer 生成描述并落盘留档", async () => {
 		},
 	});
 	assert.deepEqual(seen, [{ mime: "image/png", data: PNG.toString("base64") }]);
-	assert.match(out, /^\[图片1 uploads\/image-1\.png\]\n一张红色测试图$/);
-	assert.deepEqual(await readdir(join(dir, "uploads")), ["image-1.png"]);
-	assert.ok(PNG.equals(await readFile(join(dir, "uploads", "image-1.png"), null)));
+	assert.match(out, /^\[图片1 uploads\/ABCDEFGH-image-1\.png\]\n一张红色测试图$/);
+	assert.deepEqual(await readdir(join(dir, "uploads")), ["ABCDEFGH-image-1.png"]);
+	assert.ok(PNG.equals(await readFile(join(dir, "uploads", "ABCDEFGH-image-1.png"), null)));
 });
 
 test("无 describer 时图片降级留档提示", async () => {
@@ -45,7 +45,7 @@ test("无 describer 时图片降级留档提示", async () => {
 		download: async () => JPEG,
 		describer: null,
 	});
-	assert.match(out, /\[图片1\] 已存 uploads\/image-1\.jpeg（当前未配置视觉模型，仅留档）。/);
+	assert.match(out, /\[图片1\] 已存 uploads\/ABCDEFGH-image-1\.jpeg（当前未配置视觉模型，仅留档）。/);
 });
 
 test("非图片魔数留档但不做视觉分析", async () => {
@@ -82,8 +82,17 @@ test("文件落盘 sanitize 文件名并提示 read 路径", async () => {
 		download: async () => Buffer.from("hello"),
 		describer: null,
 	});
-	assert.match(out, /\[文件1\] name\.txt（0\.0KB）已保存到 uploads\/name\.txt，可用 read 工具读取。/);
-	assert.deepEqual(await readdir(join(dir, "uploads")), ["name.txt"]);
+	assert.match(out, /\[文件1\] ABCDEFGH-name\.txt（0\.0KB）已保存到 uploads\/ABCDEFGH-name\.txt，可用 read 工具读取。/);
+	assert.deepEqual(await readdir(join(dir, "uploads")), ["ABCDEFGH-name.txt"]);
+});
+
+test("不同消息的落盘名不互撞（同 chat 共享 cwd）", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	const run = async (messageId: string) =>
+		await describeResources(msgOf([{ type: "image", fileKey: "k1" }], messageId), dir, { download: async () => PNG, describer: null });
+	await run("om_AAAAAAAA");
+	await run("om_BBBBBBBB");
+	assert.deepEqual((await readdir(join(dir, "uploads"))).sort(), ["AAAAAAAA-image-1.png", "BBBBBBBB-image-1.png"]);
 });
 
 test("音视频与下载失败的降级提示", async () => {

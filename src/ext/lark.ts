@@ -13,6 +13,10 @@ export type LarkDeps = {
 	chatOf: (conversationId: number) => string | undefined;
 	/** 视觉描述器（harness 装配；无 ZAI key 时为 null，工具诚实提示） */
 	getDescriber?: () => ImageDescriber | null;
+	/** 当前 run 发起者是否管理员：跨会话读取（chat/around 指向别的会话）仅管理员放行 */
+	isAdmin?: (openId: string) => boolean;
+	/** 当前 run 发起者（审批归属同源；缺失视为非管理员） */
+	senderOf?: (conversationId: number) => string | undefined;
 };
 
 /** message.list/get 返回条目的最小形状。 */
@@ -128,7 +132,7 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"读飞书聊天记录（当前会话默认）。场景：用户说「上面那个问题/之前聊的」但上下文里没有时；回顾群聊；了解其他任务线。返回按时间正序的消息（含发送者与消息 id）。需要展开某条消息的前后文时：先用无参数调用拿到列表，再用返回的 om_ id 作 around 定位（id 仅存在于本工具的返回中，用户侧不可见）。卡片消息（bot 回复）只显示占位，正文在会话上下文里，看前后的用户消息即可。",
+			"读飞书聊天记录（当前会话默认）。场景：用户说「上面那个问题/之前聊的」但上下文里没有时；回顾群聊；了解其他任务线。返回按时间正序的消息（含发送者与消息 id）。需要展开某条消息的前后文时：先用无参数调用拿到列表，再用返回的 om_ id 作 around 定位（id 仅存在于本工具的返回中，用户侧不可见）。卡片消息（bot 回复）只显示占位，正文在会话上下文里，看前后的用户消息即可。读当前会话之外的其他会话（chat/around 指向别处）仅管理员可用。",
 		parameters: Type.Object({
 			count: Type.Optional(Type.Number({ description: "读取条数（默认 20，上限 50）" })),
 			around: Type.Optional(Type.String({ description: "消息 id（om_ 开头）：读该消息前后各一半；取自本工具上一次返回" })),
@@ -139,10 +143,22 @@ function makeReadTool(deps: LarkDeps) {
 		executionMode: "sequential",
 		async execute(args, api) {
 			const count = Math.min(Math.max(Math.trunc(args.count ?? 20), 1), 50);
-			let chatId = args.chat ?? deps.chatOf(api.conversationId as number);
+			const current = deps.chatOf(api.conversationId as number);
+			// 跨会话读取门槛：bot 在内的任意会话都能列消息，但非本人所在的会话等于越权窥探，仅管理员放行
+			const crossDenied = (): boolean => {
+				const sender = deps.senderOf?.(api.conversationId as number) ?? "";
+				return sender === "" || deps.isAdmin?.(sender) !== true;
+			};
+			let chatId = args.chat;
+			if (chatId !== undefined && chatId !== current && crossDenied()) {
+				return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
+			}
 			if (chatId === undefined) {
-				// panel 会话无对应 chat：让模型转告用户该能力限飞书会话
-				return { output: [{ type: "text", text: "当前会话（panel 任务）没有对应的飞书聊天，无法读取记录。" }] };
+				if (current === undefined) {
+					// panel 会话无对应 chat：让模型转告用户该能力限飞书会话
+					return { output: [{ type: "text", text: "当前会话（panel 任务）没有对应的飞书聊天，无法读取记录。" }] };
+				}
+				chatId = current;
 			}
 			const directory = deps.getDirectory();
 			let nameChat: string = chatId;
@@ -159,6 +175,9 @@ function makeReadTool(deps: LarkDeps) {
 					const anchor = got.data?.items?.[0];
 					if (anchor === undefined) throw new Error(`消息 ${args.around} 不存在或 bot 无权读取`);
 					const targetChat: string = anchor.chat_id ?? chatId; // 锚点消息所在会话优先（chatId 已收窄非空）
+					if (targetChat !== current && crossDenied()) {
+						return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
+					}
 					nameChat = targetChat;
 					const half = Math.ceil(count / 2);
 					const center = anchor.create_time ?? "0";

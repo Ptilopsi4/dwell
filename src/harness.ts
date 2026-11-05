@@ -1,6 +1,6 @@
 // dwell harness 装配：SQLite storage + 模型 provider（zai-coding-cn 或 deepseek）+ CodingTools + dwell 系统提示。
 // 全部配置来自环境变量，见 README。
-import { mkdir } from "node:fs/promises";
+import { mkdir, open as openFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { normalizeContext } from "@earendil-works/pi-ai";
@@ -9,21 +9,64 @@ import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createRegistry, defineExtension, Harness, section, type Extension } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, Harness, section, type Extension, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
+import { DATA_DIR } from "./state.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
 const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
 
-export function scrubSecretEnv(): void {
-	for (const name of SECRET_ENV) delete process.env[name];
+export async function scrubSecretEnv(): Promise<void> {
+	const values: string[] = [];
+	for (const name of SECRET_ENV) {
+		const value = process.env[name];
+		if (value !== undefined && value !== "") values.push(value);
+		delete process.env[name];
+	}
+	if (process.platform !== "linux" || values.length === 0) return;
+	try {
+		await wipeEnvironValues(values);
+	} catch (err) {
+		throw new Error(`密钥擦除失败，拒绝继续启动：${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
-export const DATA_DIR = process.env.DWELL_DATA ?? "./data";
-/** 状态文件目录（users/sessions/message-map）：独立于 data/（agent 可写域），避免模型覆写自升权限/劫持路由。 */
-export const STATE_DIR = process.env.DWELL_STATE ?? "./state";
+/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检密钥值不复存在（fail closed）。 */
+async function wipeEnvironValues(values: string[]): Promise<void> {
+	const environ = await readFile("/proc/self/environ");
+	const spans: { start: number; end: number }[] = [];
+	for (let i = 0; i < environ.length; ) {
+		const zero = environ.indexOf(0, i);
+		const entryEnd = zero === -1 ? environ.length : zero;
+		const entry = environ.subarray(i, entryEnd);
+		const eq = entry.indexOf(61); // '='
+		if (eq > 0 && SECRET_ENV.includes(entry.subarray(0, eq).toString("latin1"))) {
+			spans.push({ start: i + eq + 1, end: i + entry.length }); // 值区，不含结尾 NUL
+		}
+		if (zero === -1) break;
+		i = zero + 1;
+	}
+	if (spans.length === 0) return;
+	const handle = await openFile("/proc/self/mem", "r+");
+	try {
+		const zeros = Buffer.alloc(128, 0);
+		for (const span of spans) {
+			for (let p = span.start; p < span.end; p += zeros.length) {
+				const length = Math.min(zeros.length, span.end - p);
+				await handle.write(zeros, 0, length, p);
+			}
+		}
+	} finally {
+		await handle.close();
+	}
+	const after = (await readFile("/proc/self/environ")).toString("latin1");
+	for (const value of values) {
+		if (after.includes(value)) throw new Error("自检失败：密钥值仍可从 /proc/self/environ 读出");
+	}
+}
+
 /** DWELL_PROVIDER 选择模型来源；每个 provider 的凭证 env 与默认模型。 */
 const PROVIDERS = {
 	"zai-coding-cn": { keyEnv: "ZAI_CODING_CN_API_KEY", defaultModel: "glm-5.3", make: zaiCodingCnProvider },
@@ -88,8 +131,18 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
 		});
 	const harness = await Harness.open(storage, { models, registry, env }, context);
-	harness.resume();
+	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥
 	return harness;
+}
+
+/** taskGraph 中有活跃任务的会话集合。节点状态在 state.status（不是 status——两个已上线修复曾因读错字段静默失效），用官方类型防再错。 */
+export function busyConversations(graph: TaskGraph | undefined): Set<number> {
+	const live = new Set(["pending", "running", "waiting", "sleeping", "completing"]);
+	const busy = new Set<number>();
+	for (const task of Object.values(graph?.tasks ?? {})) {
+		if (live.has(task.state.status)) busy.add(task.conversationId as number);
+	}
+	return busy;
 }
 
 /** 图片理解 subagent：glm-5.3 无视觉，图片交 flash 单发单答，描述文本进主上下文（不进 checkpoint）。 */

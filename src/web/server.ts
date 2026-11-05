@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
 import { MODEL } from "../harness.ts";
-import { approvalDecision, pendingApprovals, runSender, runVia, type PendingApproval } from "../ext/approval.ts";
+import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, type PendingApproval } from "../ext/approval.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
@@ -40,6 +40,46 @@ class HttpError extends Error {
 		super(message);
 		this.status = status;
 	}
+}
+
+/** Host 头里的主机名（去端口；IPv6 字面量去方括号）。 */
+export function hostNameOf(host: string): string {
+	const h = host.trim().toLowerCase();
+	if (h.startsWith("[")) {
+		const end = h.indexOf("]");
+		return end === -1 ? h.slice(1) : h.slice(1, end);
+	}
+	return h.split(":")[0];
+}
+
+const isIpv4 = (s: string): boolean => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(s);
+const isIpv6 = (s: string): boolean => s.includes(":");
+
+/**
+ * panel 请求准入：POST 强制 JSON Content-Type；有 Origin 时必须与 Host 同源；Host 限 IP 字面量或配置名。
+ * 依据：text/plain 跨域 POST 不触发预检、攻击页可借 pt 浏览器打内网 panel（CSRF）；DNS rebinding 用任意域名作 Host 读 SSE。
+ * IP 字面量放行是因为绑定地址不定（DWELL_PANEL_HOST 缺省监听全部接口），而 rebinding 域名不会是 IP。
+ */
+export function checkPanelRequest(
+	req: { method?: string; host?: string; origin?: string; contentType?: string },
+	allowedHosts: ReadonlySet<string>,
+): void {
+	if (req.method === "POST") {
+		const contentType = (req.contentType ?? "").toLowerCase();
+		if (!contentType.startsWith("application/json")) throw new HttpError(415, "json only");
+	}
+	if (req.origin !== undefined) {
+		if (req.origin === "null") throw new HttpError(403, "bad origin");
+		let originHost: string;
+		try {
+			originHost = new URL(req.origin).host.toLowerCase();
+		} catch {
+			throw new HttpError(403, "bad origin");
+		}
+		if (originHost !== (req.host ?? "").toLowerCase()) throw new HttpError(403, "cross-origin denied");
+	}
+	const name = hostNameOf(req.host ?? "");
+	if (!isIpv4(name) && !isIpv6(name) && !allowedHosts.has(name)) throw new HttpError(403, "bad host");
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
@@ -105,7 +145,22 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		});
 	});
 
+	// Host 白名单：本机名 + 显式配置（DWELL_PANEL_HOST / DWELL_PANEL_URL）；IP 字面量由 checkPanelRequest 直接放行
+	const allowedHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+	const addHost = (value: string | undefined): void => {
+		if (value !== undefined && value !== "") allowedHosts.add(hostNameOf(value));
+	};
+	addHost(process.env.DWELL_PANEL_HOST);
+	if (process.env.DWELL_PANEL_URL !== undefined) {
+		try {
+			addHost(new URL(process.env.DWELL_PANEL_URL).host);
+		} catch {
+			console.error("[dwell] DWELL_PANEL_URL 不是合法 URL，已忽略:", process.env.DWELL_PANEL_URL);
+		}
+	}
+
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
@@ -214,7 +269,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const action = body?.action === "deny" ? "deny" : "approve";
-			const minutes = Number(body?.minutes ?? 10);
+			const minutes = clampMinutes(Number(body?.minutes ?? 10));
 			const result = await approvalDecision(conv, key, action, minutes);
 			if (!result.ok) { json(res, 200, result); return; }
 			await feishu.afterDecision(conv, result.pending, action, minutes, result.submission);
@@ -334,6 +389,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 		runSender.set(id, feishu.operator());
 		runVia.set(id, "panel");
+		void persistApprovals();
 		const submission = await conversation.submit(
 			{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,

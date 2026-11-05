@@ -19,10 +19,10 @@ src/
   harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer
   sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
   users.ts          角色（env 播种，state/users.json 为运行时真相）
-  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）
+  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR 常量（放这里避免 approval→harness 循环依赖）
   media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
-  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender)
+  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
   ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
@@ -35,7 +35,7 @@ test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探�
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 25 个，<1s）
+npm test        # node --test "test/*.test.ts"（全量 53 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -52,8 +52,10 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 
 ## 必须守住的不变量
 
-- **凭证不进 bash 可读面**：启动读完凭证后 `scrubSecretEnv()` 从 `process.env` 删除（列表在 `harness.ts` 的 `SECRET_ENV`）。新增密钥 env 要加进这个列表，并在清理前读进闭包。web 工具的 key 也走闭包
-- **状态文件在 agent 可写域之外**：`DWELL_STATE` 与 `DWELL_DATA` 分开，`approval.ts` 的 `STATE_FILES` 正则兜底拦截。不要把 users/sessions/message-map 挪进 `data/`
+- **凭证不进 bash 可读面**：启动读取后 `scrubSecretEnv()` 删除 `process.env` 并（Linux）覆写 `/proc/self/environ` 原始环境区的密钥值，自检失败拒绝启动；续跑任务（`harness.resume()`）在擦除后才开跑。新增密钥 env 要加进 `harness.ts` 的 `SECRET_ENV`，并在清理前读进闭包；凭证一律参数传递（Directory/connectChannel），不事后读 env
+- **- **文件工具限可写域**：`write`/`edit` 限会话 cwd 与系统临时目录，`read` 禁状态目录/应用根/sqlite/`/proc`（`ext/approval.ts` 的 `fileToolViolation`，挂 `dwell-path-guard` 扩展）
+- **panel 请求准入**：POST 强制 JSON Content-Type + Origin 同源 + Host 白名单（IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置名），见 `server.ts` 的 `checkPanelRequest`
+- **状态文件在 agent 可写域之外**：`DWELL_STATE` 与 `DWELL_DATA` 分开（目录权限），STATE_FILES 正则与文件工具路径治理双重拦截（含 approvals.json）。不要把 users/sessions/message-map/approvals 挪进 `data/`
 - **`NodeExecutionEnv` 的 cwd 必须是绝对路径**，否则 bash 工具会双拼路径（见 gotchas）
 - **幂等**：飞书输入以 `requestId = message_id` 提交，重推不会产生第二次 run。handler 里只做 submit，`wait`/流式放到 handler 之外（飞书 3 秒 ack）
 - **运行中插话**用 `whenBusy: "steer"`；`queued` 状态的提交不开新卡（会和旧卡重复）
@@ -67,7 +69,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - 只读工具 `replay: "safe"`，有副作用的保持默认 `unsafe`
 - 飞书类工具 `executionMode: "sequential"`（rate limit）
 - 依赖运行时对象（channel、sessions）时用 getter 延迟绑定，参考 `makeLarkExtension`
-- 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS` 并补 `test/approval.test.ts`
+- 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS`/`rmRecursiveMatch`/`STATE_FILES` 并补 `test/approval.test.ts`
 - 对外 HTTP 用 `fetch` + `AbortSignal.timeout`，单测 mock `fetch`（参考 `test/web.test.ts`）
 
 ## 飞书侧注意

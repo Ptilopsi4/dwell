@@ -24,6 +24,8 @@ if (process.env[MODEL_KEY_ENV]) {
 }
 const context = BACKGROUND_CONTEXT;
 try {
+	// openDwell 不再内部 resume（凭证擦除时序，见 index.ts main）；冒烟直接开跑
+	harness.resume();
 	const root = await harness.root(context, { agent: { model } });
 	const submission = await root.submit({ type: "input", content: prompt, requestId: `smoke-${Date.now()}` }, context);
 	const settled = await submission.wait(context);

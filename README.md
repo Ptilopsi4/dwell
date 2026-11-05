@@ -65,7 +65,7 @@ docker compose up -d --build    # ./data → /data，./state → /state
 | 变量 | 说明 |
 |---|---|
 | `DWELL_DATA` | 数据目录，默认 `./data`（容器内 `/data`）：`dwell.sqlite` 和各会话工作目录 `work/` |
-| `DWELL_STATE` | 状态目录，默认 `./state`（容器内 `/state`）：`users.json`、`sessions.json`、`message-map.json`。必须放在 agent 可写的数据目录之外 |
+| `DWELL_STATE` | 状态目录，默认 `./state`（容器内 `/state`）：`users.json`、`sessions.json`、`message-map.json`、`approvals.json`。必须放在 agent 可写的数据目录之外 |
 | `DWELL_TOOL_PATH` | 设置后收窄 bash 工具的 `PATH`（如 `/usr/bin:/bin`），让模型看不到服务器上带凭证的程序 |
 
 ## 飞书使用
@@ -95,6 +95,8 @@ docker compose up -d --build    # ./data → /data，./state → /state
 | `/whoami` | 显示自己的 open_id | 所有人 |
 | `/help` | 使用说明卡片 | 所有人 |
 
+命令按已知命令表精确匹配；`/approve` 的分钟数限制在 1–120。
+
 ### 危险命令审批
 
 bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` 远程、带数据或非 GET 的 `curl`、`wget --post`、全局安装包（`npm install -g`、`apt install`、`pip install`）、`docker`/`systemctl`/`crontab`。`sudo` 直接拒绝。访问状态文件的命令也会被拒绝。
@@ -107,7 +109,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 |---|---|---|
 | `bash` / `read` / `write` / `edit` | 在会话工作目录内操作文件和执行命令 | bash 危险命令需审批 |
 | `dwell.web.search` / `dwell.web.fetch` | 全网搜索、读取网页正文。走智谱 Coding Plan Remote MCP，计入套餐额度。设置了 `ZAI_CODING_CN_API_KEY` 就会启用，与 `DWELL_PROVIDER` 无关 | 免审 |
-| `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内 | 免审 |
+| `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内；读当前会话之外的会话仅管理员触发的任务可用 | 免审 |
 | `dwell.lark.image` | 按消息 id 拉取图片描述：群里不 @ 发的图不进上下文，模型读历史看到 `[图片]` 占位后按需回看（回复用户提问时自动用） | 免审 |
 
 图片和文件：
@@ -121,7 +123,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 
 浏览器访问 `http://<host>:<DWELL_PANEL_PORT>/`。
 
-**panel 没有内置鉴权。** 必须由部署侧保证只有可信网络能访问（私网、防火墙、隧道，或用 `DWELL_PANEL_HOST` 绑定到内网接口），不要暴露到公网。
+**panel 没有内置鉴权。** 必须由部署侧保证只有可信网络能访问（私网、防火墙、隧道，或用 `DWELL_PANEL_HOST` 绑定到内网接口），不要暴露到公网。服务端做了请求准入：POST 强制 JSON Content-Type、Origin 同源、Host 限 IP 或配置名（用域名访问需配 `DWELL_PANEL_URL`）。
 
 - 侧栏按「我的任务 / 私聊 / 群聊 / 已归档」分组，实时显示 transcript（流式文本、工具调用、思考过程可折叠）
 - 可以新建 panel 任务、重命名、归档、清空上下文、中止、审批、管理用户
@@ -131,9 +133,14 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 
 ## 安全边界
 
+层次从硬到软：容器/系统隔离 → 凭证擦除 → 文件工具路径治理 → 请求准入 → bash 危险命令正则。
+
 - 飞书 open_id 白名单准入，白名单外的消息回复固定提示
-- 模型 key、飞书凭证、白名单读入内存后从进程环境删除，bash 工具里 `printenv` 拿不到
-- 状态文件（角色、路由）放在 agent 可写目录之外，模型无法通过改文件给自己提权
+- **凭证**：模型 key、飞书凭证、白名单读入内存后从进程环境删除；Linux 下还会把启动时原始环境区（`/proc/<pid>/environ`）里的密钥值覆写为 0 并自检，擦不干净拒绝启动。续跑任务在擦除完成后才恢复调度，bash 里 `printenv` 和 `cat /proc/$PPID/environ` 都拿不到
+- **文件工具**：`write`/`edit` 只能写本会话工作目录与系统临时目录；`read` 不能读状态目录、应用目录、数据库和 `/proc`（其余系统路径可读）。相对路径的 `..` 逃逸会被归一化后拦下
+- **panel 请求准入**：POST 强制 `Content-Type: application/json`；有 `Origin` 时必须与 `Host` 同源；`Host` 只接受 IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置的主机名。防跨站 CSRF 借浏览器打内网 panel，也防 DNS rebinding 读 SSE
+- **状态文件在 agent 可写域之外**：目录权限 + 文件工具路径治理双重保证（`users.json`/`sessions.json`/`message-map.json`/`approvals.json`），模型无法通过改文件给自己提权、劫持路由或伪造审批
+- bash 危险命令正则是减速带而非硬墙（变体无限）：命中危险模式需审批，访问状态文件、`.env`、`/proc/*/environ` 直接拒绝；`sudo` 直接拒绝。真正把伤害限在会话工作目录内的是上面的文件工具治理与部署隔离
 - 进程应以非 root 运行（Dockerfile 已创建 `dwell` 用户），容器是最终隔离边界；工作目录只是路径约定，bash 能 `cd` 出去
 - **群聊是互信域**：同群成员共享工作目录，且能通过回复加入他人的任务线，看到该线处理过的内容。敏感内容请用私聊
 
