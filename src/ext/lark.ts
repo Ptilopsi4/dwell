@@ -238,11 +238,11 @@ function makeImageTool(deps: LarkDeps) {
 				const got = await message.get({ path: { message_id: args.message } });
 				const item = got.data?.items?.[0];
 				if (item === undefined) return text(`消息 ${args.message} 不存在或 bot 无权读取`, true);
-			// 跨会话识图门槛：消息所在会话不是当前会话时仅管理员放行（与 dwell.lark.read 同一门槛，防拿别的群/私聊的消息 id 窥探图片）
-			const current = deps.chatOf(api.conversationId as number);
-			if ((item.chat_id ?? current) !== current && crossChatDenied(deps, api.conversationId as number)) {
-				return text("无权查看当前会话之外的图片（仅管理员可用）。", true);
-			}
+				// 跨会话识图门槛：消息所在会话不是当前会话时仅管理员放行（与 dwell.lark.read 同一门槛，防拿别的群/私聊的消息 id 窥探图片）
+				const current = deps.chatOf(api.conversationId as number);
+				if ((item.chat_id ?? current) !== current && crossChatDenied(deps, api.conversationId as number)) {
+					return text("无权查看当前会话之外的图片（仅管理员可用）。", true);
+				}
 				if (item.msg_type === "sticker") return text("这是表情包，暂不支持识别；请让用户改发图片消息。", true);
 				if (item.msg_type !== "image") return text(`该消息不是图片（类型 ${item.msg_type ?? "?"}），无法识图。`, true);
 				const imageKey = (JSON.parse(item.body?.content ?? "{}") as { image_key?: string }).image_key;

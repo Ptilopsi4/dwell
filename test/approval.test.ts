@@ -108,3 +108,24 @@ test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦
 		assert.match((await fileToolViolationReal("read", "../../../proc/self/environ", work)) ?? "", /不允许读取/);
 	}
 });
+
+test("基准也走 realpath：cwd 自身位于软链之下时写自己的 cwd 放行（否则部署路径含软链即全面误拦）", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "dwell-guard-"));
+	t.after(async () => {
+		await rm(base, { recursive: true, force: true });
+	});
+	await mkdir(join(base, "real", "work"), { recursive: true });
+	let linked = true;
+	try {
+		await symlink(join(base, "real"), join(base, "alias"), process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		linked = false;
+	}
+	if (!linked) {
+		t.skip("当前环境无法创建符号链接");
+		return;
+	}
+	const cwd = join(base, "alias", "work"); // 字面路径含软链，realpath 后为 base/real/work
+	assert.equal(await fileToolViolationReal("write", "a.txt", cwd), undefined);
+	assert.equal(await fileToolViolationReal("edit", "sub/b.txt", cwd), undefined); // 不存在的新建子目录：最近已存在祖先（real/work）为 cwd 本身，仍在其内
+});

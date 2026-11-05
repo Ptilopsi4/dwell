@@ -172,24 +172,33 @@ const DATA_PATH = resolve(DATA_DIR);
 const SQLITE_FILE = join(DATA_PATH, "dwell.sqlite");
 
 // 应用根子树拒读，但 data/（会话工作目录与上传物所在）除外——data 常就部署在应用根下
-const READ_FORBIDDEN = (path: string): boolean =>
-	path === STATE_PATH || path.startsWith(STATE_PATH + sep)
-	|| path.startsWith(SQLITE_FILE) // 含 -wal/-shm
-	|| ((path === APP_ROOT || path.startsWith(APP_ROOT + sep)) && !(path === DATA_PATH || path.startsWith(DATA_PATH + sep)));
+const READ_FORBIDDEN = (path: string, bases: PathBases): boolean =>
+	path === bases.state || path.startsWith(bases.state + sep)
+	|| path.startsWith(bases.sqlite) // 含 -wal/-shm
+	|| ((path === bases.appRoot || path.startsWith(bases.appRoot + sep)) && !(path === bases.data || path.startsWith(bases.data + sep)));
 
-/**
- * 文件工具（read/write/edit）路径治理。write/edit 限本会话 cwd 与系统临时目录；
- * read 只禁状态/应用根/数据库/proc（读系统其余部分是合法探索）。cwd 由调用方按会话解析（相对路径与 .. 逃逸都归一化后再判）。
- */
-export function fileToolViolation(tool: string, path: string, cwd: string): string | undefined {
-	const abs = resolve(cwd, path);
+/** 路径判定基准（均为绝对路径）。目标与基准必须同形态（同为字面 resolve 或同为 realpath）才可比。 */
+export type PathBases = { cwd: string; tmp: string; state: string; appRoot: string; data: string; sqlite: string };
+
+/** 字面基准（不做软链解析）：fileToolViolation 用。 */
+const literalBases = (cwd: string): PathBases => ({ cwd: resolve(cwd), tmp: tmpdir(), state: STATE_PATH, appRoot: APP_ROOT, data: DATA_PATH, sqlite: SQLITE_FILE });
+
+/** 判定核心：`abs` 与 `bases` 同形态。`rawPath` 用于 /proc 的原始路径检查（Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径）。 */
+function violationOf(tool: string, rawPath: string, abs: string, bases: PathBases): string | undefined {
 	if (tool === "read") {
-		// /proc 判原始与归一化路径（Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径，前缀判断会失效）
-		if (path.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs)) return `不允许读取 ${abs}（状态文件、应用目录、数据库、/proc 不在可读域）。`;
+		if (rawPath.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs, bases)) return `不允许读取 ${abs}（状态文件、应用目录、数据库、/proc 不在可读域）。`;
 		return undefined;
 	}
-	if (abs === cwd || abs.startsWith(cwd + sep) || abs.startsWith(tmpdir() + sep)) return undefined;
+	if (abs === bases.cwd || abs.startsWith(bases.cwd + sep) || abs.startsWith(bases.tmp + sep)) return undefined;
 	return `写入仅限本会话工作目录与系统临时目录（已拒绝 ${abs}）。`;
+}
+
+/**
+ * 文件工具（read/write/edit）路径治理（字面路径版，无软链解析，单测用）。write/edit 限本会话 cwd 与系统临时目录；
+ * read 只禁状态/应用根/数据库/proc（读系统其余部分是合法探索）。相对路径与 .. 逃逸都归一化后再判。
+ */
+export function fileToolViolation(tool: string, path: string, cwd: string): string | undefined {
+	return violationOf(tool, path, resolve(cwd, path), literalBases(cwd));
 }
 
 /** 解析到真实路径：取最近一个已存在的祖先 realpath 后拼回余下部分（write 新建文件时终段不存在，祖先足够定去向）。
@@ -210,10 +219,14 @@ async function resolveReal(abs: string): Promise<string> {
 	}
 }
 
-/** 路径治理（含软链解析）：路径按真实位置判，规避 cwd 内软链指向禁区。 */
+/** 路径治理（含软链解析）：目标与全部基准（cwd/tmp/state/应用根/data/sqlite）统一到 realpath 再判——
+ *  只解析目标会把含软链的部署路径搞成两边不可比：写入误拦（cwd 在软链下）或读取漏拦（禁区经软链解析后不再匹配字面前缀）。 */
 export async function fileToolViolationReal(tool: string, path: string, cwd: string): Promise<string | undefined> {
 	const real = await resolveReal(resolve(cwd, path));
-	return fileToolViolation(tool, real, cwd);
+	const [rcwd, rtmp, rstate, rappRoot, rdata, rsqlite] = await Promise.all(
+		[resolve(cwd), tmpdir(), STATE_PATH, APP_ROOT, DATA_PATH, SQLITE_FILE].map(resolveReal),
+	);
+	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite });
 }
 
 /** cwd 访问器：按 conversationId 查 agent cwd（conversation.agent().cwd）。 */
