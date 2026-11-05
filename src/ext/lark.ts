@@ -127,6 +127,12 @@ async function listMessages(deps: LarkDeps, params: ListParams): Promise<Message
 	}
 }
 
+/** 消息所在会话与当前会话不一致 → 跨会话读取/识图门槛：仅管理员触发的 run 放行（缺失发起者信息视为拒绝）。 */
+function crossChatDenied(deps: LarkDeps, conversationId: number): boolean {
+	const sender = deps.senderOf?.(conversationId) ?? "";
+	return sender === "" || deps.isAdmin?.(sender) !== true;
+}
+
 /** dwell.lark.read：读当前会话/指定消息上下文/指定会话的飞书历史。 */
 function makeReadTool(deps: LarkDeps) {
 	return defineTool({
@@ -145,12 +151,8 @@ function makeReadTool(deps: LarkDeps) {
 			const count = Math.min(Math.max(Math.trunc(args.count ?? 20), 1), 50);
 			const current = deps.chatOf(api.conversationId as number);
 			// 跨会话读取门槛：bot 在内的任意会话都能列消息，但非本人所在的会话等于越权窥探，仅管理员放行
-			const crossDenied = (): boolean => {
-				const sender = deps.senderOf?.(api.conversationId as number) ?? "";
-				return sender === "" || deps.isAdmin?.(sender) !== true;
-			};
 			let chatId = args.chat;
-			if (chatId !== undefined && chatId !== current && crossDenied()) {
+			if (chatId !== undefined && chatId !== current && crossChatDenied(deps, api.conversationId as number)) {
 				return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
 			}
 			if (chatId === undefined) {
@@ -175,7 +177,7 @@ function makeReadTool(deps: LarkDeps) {
 					const anchor = got.data?.items?.[0];
 					if (anchor === undefined) throw new Error(`消息 ${args.around} 不存在或 bot 无权读取`);
 					const targetChat: string = anchor.chat_id ?? chatId; // 锚点消息所在会话优先（chatId 已收窄非空）
-					if (targetChat !== current && crossDenied()) {
+					if (targetChat !== current && crossChatDenied(deps, api.conversationId as number)) {
 						return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
 					}
 					nameChat = targetChat;
@@ -224,7 +226,7 @@ function makeImageTool(deps: LarkDeps) {
 		}),
 		replay: "safe",
 		executionMode: "sequential",
-		async execute(args) {
+		async execute(args, api) {
 			const client = deps.getClient();
 			if (client === undefined) return text("飞书通道未就绪", true);
 			const describer = deps.getDescriber?.() ?? null;
@@ -236,6 +238,11 @@ function makeImageTool(deps: LarkDeps) {
 				const got = await message.get({ path: { message_id: args.message } });
 				const item = got.data?.items?.[0];
 				if (item === undefined) return text(`消息 ${args.message} 不存在或 bot 无权读取`, true);
+			// 跨会话识图门槛：消息所在会话不是当前会话时仅管理员放行（与 dwell.lark.read 同一门槛，防拿别的群/私聊的消息 id 窥探图片）
+			const current = deps.chatOf(api.conversationId as number);
+			if ((item.chat_id ?? current) !== current && crossChatDenied(deps, api.conversationId as number)) {
+				return text("无权查看当前会话之外的图片（仅管理员可用）。", true);
+			}
 				if (item.msg_type === "sticker") return text("这是表情包，暂不支持识别；请让用户改发图片消息。", true);
 				if (item.msg_type !== "image") return text(`该消息不是图片（类型 ${item.msg_type ?? "?"}），无法识图。`, true);
 				const imageKey = (JSON.parse(item.body?.content ?? "{}") as { image_key?: string }).image_key;

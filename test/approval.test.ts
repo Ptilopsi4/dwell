@@ -3,7 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dangerMatch, fileToolViolation, stateFileBlocked } from "../src/ext/approval.ts";
+import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dangerMatch, fileToolViolation, fileToolViolationReal, stateFileBlocked } from "../src/ext/approval.ts";
 import { DATA_DIR, STATE_DIR } from "../src/state.ts";
 
 test("命中各危险模式并返回匹配片段", () => {
@@ -75,4 +77,34 @@ test("write/edit 限本会话 cwd 与系统临时目录", () => {
 	assert.match(fileToolViolation("write", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /仅限/);
 	assert.match(fileToolViolation("write", "../../other/x.txt", CWD) ?? "", /仅限/); // 逃出 cwd 的相对路径
 	assert.match(fileToolViolation("edit", join(ROOT, "src/index.ts"), CWD) ?? "", /仅限/);
+});
+
+test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦下", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "dwell-guard-"));
+	t.after(async () => {
+		await rm(base, { recursive: true, force: true });
+	});
+	const work = join(base, "work");
+	await mkdir(work, { recursive: true });
+	let linked = true;
+	try {
+		// Windows 未开开发者模式时 symlink 需要提权，用 junction（仅目录、免权限）保证跨平台可测
+		await symlink(resolve(STATE_DIR), join(work, "lnk"), process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		linked = false;
+	}
+	if (linked) {
+		// write 走链接路径：按目标（state 目录）判，拦
+		assert.match((await fileToolViolationReal("write", "lnk/users.json", work)) ?? "", /仅限/);
+		// read 同理
+		assert.match((await fileToolViolationReal("read", "lnk/sessions.json", work)) ?? "", /不允许读取/);
+	} else {
+		t.skip("当前环境无法创建符号链接");
+	}
+	// 不存在的新建文件：最近已存在祖先是 cwd 本身 → 放行
+	assert.equal(await fileToolViolationReal("write", "new-sub/dir/file.txt", work), undefined);
+	// 相对路径 .. 逃逸到 /proc（Linux：tmpdir 在 /tmp，上溯三级到根；Windows 归一化成盘符路径，由原始路径检查兼顾不到，不测）
+	if (process.platform === "linux") {
+		assert.match((await fileToolViolationReal("read", "../../../proc/self/environ", work)) ?? "", /不允许读取/);
+	}
 });

@@ -2,7 +2,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
-import { MODEL, busyConversations, makeImageDescriber, openDwell, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
+import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
 import { describeResources } from "./media.ts";
 import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
@@ -875,7 +875,8 @@ async function reattachStreams(): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	const graphState = await harness.taskGraph?.(context);
 	try {
-		for (const id of busyConversations(graphState?.value)) {
+		// 只重挂真正有活跃 run（pi.generation）的会话：后台 compaction 等任务没有 pi.live.run，挂卡只会把上一轮旧答案当续跑结果重发
+		for (const id of runConversations(graphState?.value)) {
 			const chatId = sessions.chatOf(id);
 			if (chatId === undefined) continue;
 			const conversation = await harness.conversation(id as ConversationId, context);

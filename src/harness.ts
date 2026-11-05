@@ -33,7 +33,9 @@ export async function scrubSecretEnv(): Promise<void> {
 	}
 }
 
-/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检密钥值不复存在（fail closed）。 */
+/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检密钥值不复存在（fail closed）。
+ *  /proc/self/mem 按虚拟地址寻址，environ 文件内的偏移不能直接当地址用——环境块的基地址是
+ *  /proc/self/stat 的 env_start（第 50 字段），偏移须加上它（实测：不加会写进未映射低地址报 EIO，启动必败）。 */
 async function wipeEnvironValues(values: string[]): Promise<void> {
 	const environ = await readFile("/proc/self/environ");
 	const spans: { start: number; end: number }[] = [];
@@ -49,13 +51,18 @@ async function wipeEnvironValues(values: string[]): Promise<void> {
 		i = zero + 1;
 	}
 	if (spans.length === 0) return;
+	// comm 字段（第 2 字段）可含空格与括号，取最后一个 ')' 之后切分；剩余字段从第 3 字段（state）起数：fields[0]=第 3 字段 → env_start（第 50）= fields[47]
+	const stat = (await readFile("/proc/self/stat", "utf8")).trim();
+	const fields = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+	const envStart = Number(fields[47]);
+	if (!Number.isFinite(envStart) || envStart <= 0) throw new Error("无法从 /proc/self/stat 解析 env_start");
 	const handle = await openFile("/proc/self/mem", "r+");
 	try {
 		const zeros = Buffer.alloc(128, 0);
 		for (const span of spans) {
 			for (let p = span.start; p < span.end; p += zeros.length) {
 				const length = Math.min(zeros.length, span.end - p);
-				await handle.write(zeros, 0, length, p);
+				await handle.write(zeros, 0, length, envStart + p);
 			}
 		}
 	} finally {
@@ -135,14 +142,28 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	return harness;
 }
 
-/** taskGraph 中有活跃任务的会话集合。节点状态在 state.status（不是 status——两个已上线修复曾因读错字段静默失效），用官方类型防再错。 */
+/** taskGraph 中有活跃前台任务的会话集合。节点状态在 state.status（不是 status——两个已上线修复曾因读错字段静默失效），用官方类型防再错。
+ *  跳过 background 任务：会话自持的自动 compaction 默认 background，长对话压缩期间不该算「忙」——
+ *  否则 run 归属不更新（审批记到上一个发送者头上）、重启还会误挂镜像卡。 */
 export function busyConversations(graph: TaskGraph | undefined): Set<number> {
 	const live = new Set(["pending", "running", "waiting", "sleeping", "completing"]);
 	const busy = new Set<number>();
 	for (const task of Object.values(graph?.tasks ?? {})) {
+		if (task.background) continue;
 		if (live.has(task.state.status)) busy.add(task.conversationId as number);
 	}
 	return busy;
+}
+
+/** 有活跃 run 的会话集合：pi.live.run 只由前台 pi.generation 任务持有（RUN_TASK_KINDS），重启重挂镜像卡只认它。 */
+export function runConversations(graph: TaskGraph | undefined): Set<number> {
+	const live = new Set(["pending", "running", "waiting", "sleeping", "completing"]);
+	const running = new Set<number>();
+	for (const task of Object.values(graph?.tasks ?? {})) {
+		if (task.background || task.kind !== "pi.generation") continue;
+		if (live.has(task.state.status)) running.add(task.conversationId as number);
+	}
+	return running;
 }
 
 /** 图片理解 subagent：glm-5.3 无视觉，图片交 flash 单发单答，描述文本进主上下文（不进 checkpoint）。 */

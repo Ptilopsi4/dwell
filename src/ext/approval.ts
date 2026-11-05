@@ -1,8 +1,8 @@
 // 危险命令审批（简版 Mandate）+ 文件工具路径治理 + 审批状态持久化。
 // 窗口键 = (conversationId, sender)：谁触发谁申请，互不搭车。
 // 注意：正则与路径检查是减速带，硬边界是凭证擦除（harness.scrubSecretEnv）+ 部署隔离（容器/systemd）。
-import { readFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { defineExtension, hook, ToolTask, type Conversation, type Submission } from "@earendil-works/pi-durable";
@@ -13,7 +13,7 @@ import { DATA_DIR, STATE_DIR, stateFile, writeStateJson } from "../state.ts";
 export const runSender = new Map<number, string>();
 
 /** conversationId → 当前 run 的发起入口；决定审批卡片是否发到飞书。 */
-export const runVia = new Map<number, "panel" | "feishu">;
+export const runVia = new Map<number, "panel" | "feishu">();
 
 /** 审批窗口：(conversationId, sender) → 到期时间戳。 */
 export const approvals = new Map<string, number>();
@@ -184,12 +184,36 @@ const READ_FORBIDDEN = (path: string): boolean =>
 export function fileToolViolation(tool: string, path: string, cwd: string): string | undefined {
 	const abs = resolve(cwd, path);
 	if (tool === "read") {
-		// /proc 判原始路径：Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径，前缀判断会失效
-		if (path.startsWith("/proc/") || READ_FORBIDDEN(abs)) return `不允许读取 ${abs}（状态文件、应用目录、数据库、/proc 不在可读域）。`;
+		// /proc 判原始与归一化路径（Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径，前缀判断会失效）
+		if (path.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs)) return `不允许读取 ${abs}（状态文件、应用目录、数据库、/proc 不在可读域）。`;
 		return undefined;
 	}
 	if (abs === cwd || abs.startsWith(cwd + sep) || abs.startsWith(tmpdir() + sep)) return undefined;
 	return `写入仅限本会话工作目录与系统临时目录（已拒绝 ${abs}）。`;
+}
+
+/** 解析到真实路径：取最近一个已存在的祖先 realpath 后拼回余下部分（write 新建文件时终段不存在，祖先足够定去向）。
+ *  防 bash 先建软链再走文件工具的逃逸（ln -s /opt/dwell lnk 后 write lnk/state/users.json）；非 ENOENT 异常退回字面路径（减速带非硬墙）。 */
+async function resolveReal(abs: string): Promise<string> {
+	let prefix = abs;
+	const rest: string[] = [];
+	for (;;) {
+		try {
+			return join(await realpath(prefix), ...rest);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") return abs;
+			const parent = dirname(prefix);
+			if (parent === prefix) return abs;
+			rest.unshift(basename(prefix));
+			prefix = parent;
+		}
+	}
+}
+
+/** 路径治理（含软链解析）：路径按真实位置判，规避 cwd 内软链指向禁区。 */
+export async function fileToolViolationReal(tool: string, path: string, cwd: string): Promise<string | undefined> {
+	const real = await resolveReal(resolve(cwd, path));
+	return fileToolViolation(tool, real, cwd);
 }
 
 /** cwd 访问器：按 conversationId 查 agent cwd（conversation.agent().cwd）。 */
@@ -206,7 +230,7 @@ export function makePathGuardExtension(cwdOf: CwdOf) {
 					const path = (call.arguments as { path?: string }).path;
 					if (typeof path !== "string" || path === "") return undefined;
 					const cwd = (await cwdOf(api.conversationId as number, context)) ?? join(DATA_DIR, "work");
-					const violation = fileToolViolation(call.name, path, resolve(cwd));
+					const violation = await fileToolViolationReal(call.name, path, resolve(cwd));
 					if (violation === undefined) return undefined;
 					return { block: violation };
 				},

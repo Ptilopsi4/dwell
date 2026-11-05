@@ -136,11 +136,11 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 层次从硬到软：容器/系统隔离 → 凭证擦除 → 文件工具路径治理 → 请求准入 → bash 危险命令正则。
 
 - 飞书 open_id 白名单准入，白名单外的消息回复固定提示
-- **凭证**：模型 key、飞书凭证、白名单读入内存后从进程环境删除；Linux 下还会把启动时原始环境区（`/proc/<pid>/environ`）里的密钥值覆写为 0 并自检，擦不干净拒绝启动。续跑任务在擦除完成后才恢复调度，bash 里 `printenv` 和 `cat /proc/$PPID/environ` 都拿不到
-- **文件工具**：`write`/`edit` 只能写本会话工作目录与系统临时目录；`read` 不能读状态目录、应用目录、数据库和 `/proc`（其余系统路径可读）。相对路径的 `..` 逃逸会被归一化后拦下
+- **凭证**：模型 key、飞书凭证、白名单读入内存后从进程环境删除；Linux 下还会把启动时原始环境区（`/proc/<pid>/environ`）里的密钥值覆写为 0 并自检，擦不干净拒绝启动（`test/probe-scrub.ts` 服务器上验证）。续跑任务在擦除完成后才恢复调度，bash 里 `printenv` 和 `cat /proc/$PPID/environ` 都拿不到
+- **文件工具**：`write`/`edit` 只能写本会话工作目录与系统临时目录；`read` 不能读状态目录、应用目录、数据库和 `/proc`（其余系统路径可读）。相对路径 `..` 逃逸与符号链接都按归一化后的真实路径判定
 - **panel 请求准入**：POST 强制 `Content-Type: application/json`；有 `Origin` 时必须与 `Host` 同源；`Host` 只接受 IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置的主机名。防跨站 CSRF 借浏览器打内网 panel，也防 DNS rebinding 读 SSE
-- **状态文件在 agent 可写域之外**：目录权限 + 文件工具路径治理双重保证（`users.json`/`sessions.json`/`message-map.json`/`approvals.json`），模型无法通过改文件给自己提权、劫持路由或伪造审批
-- bash 危险命令正则是减速带而非硬墙（变体无限）：命中危险模式需审批，访问状态文件、`.env`、`/proc/*/environ` 直接拒绝；`sudo` 直接拒绝。真正把伤害限在会话工作目录内的是上面的文件工具治理与部署隔离
+- **状态文件在 agent 可写域之外**：`users.json`/`sessions.json`/`message-map.json`/`approvals.json` 由文件工具路径治理与 bash 正则双重拦截。注意 bash 仍可用通配符、软链、重定向等变体绕过这些检查——它们是减速带，硬边界是部署隔离（容器/系统加固），bash 沙箱见 PLAN 待办
+- bash 危险命令正则是减速带而非硬墙（变体无限）：命中危险模式需审批，访问状态文件、`.env`、`/proc/*/environ` 直接拒绝；`sudo` 直接拒绝
 - 进程应以非 root 运行（Dockerfile 已创建 `dwell` 用户），容器是最终隔离边界；工作目录只是路径约定，bash 能 `cd` 出去
 - **群聊是互信域**：同群成员共享工作目录，且能通过回复加入他人的任务线，看到该线处理过的内容。敏感内容请用私聊
 
