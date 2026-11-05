@@ -1,6 +1,9 @@
 // 一次性探针（不在 npm test 内）：Linux 上验证 scrubSecretEnv 把密钥从 /proc 原始环境区真正擦掉。
-// 用法：ZAI_CODING_CN_API_KEY=<随机标记> node test/probe-scrub.ts
-// 标记必须在启动命令里注入——进程启动后才 set 的 env 不在原始环境区，擦除路径不会被触发（探针会拒绝这种空跑）。
+// 用法：ZAI_CODING_CN_API_KEY=<随机标记> node test/probe-scrub.ts（标记必须在启动命令里注入——进程启动后才 set 的 env 不在原始环境区）。
+// 注意不要用 `sudo -u <user> env VAR=<标记> node ...`：sudo 会把整条命令记进 SUDO_COMMAND 环境变量，标记值出现在
+// 非密钥条目里，自检（environ 全文不含标记值，fail-closed）必误报。确需换用户时用 bash 包装脚本：
+//   sudo -u <user> bash /tmp/wrap.sh   # wrap.sh 内 export VAR=<标记> && exec node test/probe-scrub.ts
+//   （/tmp 常见 noexec，须经解释器调用；SUDO_COMMAND 只记 "bash /tmp/wrap.sh"，不含标记）
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
