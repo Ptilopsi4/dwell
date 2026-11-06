@@ -13,6 +13,7 @@ import { createRegistry, defineExtension, Harness, section, type Extension, type
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
+import type { SandboxState } from "./sandbox.ts";
 import { DATA_DIR } from "./state.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
@@ -72,6 +73,13 @@ async function wipeEnvironValues(values: string[]): Promise<void> {
 	for (const value of values) {
 		if (after.includes(value)) throw new Error("自检失败：密钥值仍可从 /proc/self/environ 读出");
 	}
+}
+
+/** bash 沙箱状态：main() 在 scrub 后探测写入（未探测时 disabled）；openDwell 的 env 工厂在任务运行时才读它，探测晚于 openDwell 也生效。 */
+export let sandboxState: SandboxState = { enabled: false, reason: "未探测" };
+
+export function setSandboxState(s: SandboxState): void {
+	sandboxState = s;
 }
 
 /** DWELL_PROVIDER 选择模型来源；每个 provider 的凭证 env 与默认模型。 */
@@ -136,6 +144,8 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		new NodeExecutionEnv({
 			cwd: resolve(cwd ?? process.cwd()),
 			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
+			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
+			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
 		});
 	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
 	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥

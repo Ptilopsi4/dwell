@@ -1,13 +1,15 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
 import { readFile, realpath } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
-import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
+import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { makeReporter } from "./report.ts";
 import { describeResources, sniffImageMime } from "./media.ts";
-import { initStateDir, stateFile } from "./state.ts";
+import { probeSandbox } from "./sandbox.ts";
+import { DATA_DIR, STATE_DIR, initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage, type SendInput } from "./feishu/channel.ts";
@@ -18,6 +20,9 @@ import { approvals, clampMinutes, loadApprovalState, makePathGuardExtension, per
 import { makeLarkExtension } from "./ext/lark.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
+
+/** 应用根（src/ 的上级，与 ext/approval.ts 的 APP_ROOT 同一算法）：沙箱自检断言它不可见；各自计算避免 approval→index 循环依赖 */
+const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 let harness: Harness;
 let sessions: Sessions;
@@ -118,10 +123,16 @@ async function main(): Promise<void> {
 	// 密钥已全部进入闭包：从 env 与 /proc 原始环境区彻底移除（失败即拒绝启动），此后任何任务都读不回
 	await scrubSecretEnv();
 
+	// bash 沙箱探测在 scrub 之后（probe 自身 spawn 不需要密钥）、任何任务开跑之前；未启用不算错误，回退路径治理 + 危险命令正则
+	const sandbox = await probeSandbox({ dataDir: DATA_DIR, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: process.env.DWELL_SANDBOX === "off" });
+	setSandboxState(sandbox);
+	if (sandbox.enabled) console.log(`[dwell] bash 沙箱已启用（wrapper: ${sandbox.wrapperPath}）`);
+	else console.log(`[dwell] bash 沙箱未启用，回退路径治理：${sandbox.reason}`);
+
 	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
-		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber });
+		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			harness.resume();

@@ -47,11 +47,11 @@ test("DNS rebinding：非 IP 非配置域名拒绝（含 SSE 读通道）", () =
 	assert.equal(ok({ method: "GET" }), false); // 无 Host
 });
 
-test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting）200 ok=true", () => {
-	assert.deepEqual(healthOf("failed", 42), { code: 503, body: { ok: false, uptimeSec: 42, feishu: "failed" } });
-	assert.deepEqual(healthOf("connected", 42), { code: 200, body: { ok: true, uptimeSec: 42, feishu: "connected" } });
-	assert.deepEqual(healthOf("reconnecting", 7), { code: 200, body: { ok: true, uptimeSec: 7, feishu: "reconnecting" } });
-	assert.deepEqual(healthOf("off", 0), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off" } });
+test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting）200 ok=true；sandbox 只透出状态不影响 ok", () => {
+	assert.deepEqual(healthOf("failed", 42, true), { code: 503, body: { ok: false, uptimeSec: 42, feishu: "failed", sandbox: true } });
+	assert.deepEqual(healthOf("connected", 42, false), { code: 200, body: { ok: true, uptimeSec: 42, feishu: "connected", sandbox: false } });
+	assert.deepEqual(healthOf("reconnecting", 7, true), { code: 200, body: { ok: true, uptimeSec: 7, feishu: "reconnecting", sandbox: true } });
+	assert.deepEqual(healthOf("off", 0, false), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false } });
 });
 
 // ── GET /api/file：会话 cwd 内文件下载 ──

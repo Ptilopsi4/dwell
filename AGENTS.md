@@ -23,6 +23,7 @@ src/
   state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR 常量（放这里避免 approval→harness 循环依赖）
   media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
   report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
+  sandbox.ts        bash 沙箱：bwrap wrapper 生成 + 启动探测（失败不启用，回退路径治理；真实行为由 probe-bwrap.ts 服务器验证）
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
   ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
@@ -31,13 +32,14 @@ src/
   feishu/directory.ts 用户名/群名查询与缓存
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
 test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探针，不在 npm test 内
+test/probe-bwrap.ts  bash 沙箱服务器探针（需先 apt install bubblewrap；非 Linux 自动 skip）
 ```
 
 ## 命令
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 106 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 113 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -72,6 +74,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - 飞书类工具 `executionMode: "sequential"`（rate limit）
 - 依赖运行时对象（channel、sessions）时用 getter 延迟绑定，参考 `makeLarkExtension`
 - 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS`/`rmRecursiveMatch`/`STATE_FILES` 并补 `test/approval.test.ts`
+- 自研工具执行命令一律用 `env.exec` 的字符串形式（经 shellPath 进沙箱）；禁用字符串数组形式——数组直接 spawn 程序不经 shellPath，绕开 bash 沙箱
 - 对外 HTTP 用 `fetch` + `AbortSignal.timeout`，单测 mock `fetch`（参考 `test/web.test.ts`）
 
 ## 飞书侧注意

@@ -25,6 +25,8 @@ interface PanelOptions {
 	port: number;
 	/** 视觉描述器（启动装配；无 ZAI key 时为 null，上传图片降级为落盘+提示） */
 	describer: () => ImageDescriber | null;
+	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 与 describer 同风格） */
+	sandbox: () => boolean;
 }
 
 /** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
@@ -90,10 +92,10 @@ export function checkPanelRequest(
 	if (!isIpv4(name) && !isIpv6(name) && !allowedHosts.has(name)) throw new HttpError(403, "bad host");
 }
 
-/** /healthz 判定：feishu 连接 "failed" 时 503 ok=false（探活可据此告警），其余（含 off/reconnecting）进程仍算存活。 */
-export function healthOf(feishu: string, uptimeSec: number): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string } } {
+/** /healthz 判定：feishu 连接 "failed" 时 503 ok=false（探活可据此告警），其余（含 off/reconnecting）进程仍算存活。sandbox 只透出状态，不影响 ok。 */
+export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean } } {
 	const ok = feishu !== "failed";
-	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu } };
+	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox } };
 }
 
 /** GET /api/file 判定：限本会话 cwd 内的普通文件。cwd 缺失（root 会话不设 cwd）绝不能退回 process.cwd()——那是应用根。 */
@@ -171,7 +173,7 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, port, describer }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, port, describer, sandbox }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -222,7 +224,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/healthz") {
-			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()));
+			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()), sandbox());
 			json(res, code, body);
 			return;
 		}
