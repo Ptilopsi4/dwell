@@ -2,10 +2,10 @@
 // panel 请求准入：POST Content-Type / Origin 同源 / Host 白名单（防 CSRF 与 DNS rebinding）；/api/file 判定与下载响应头。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, resolveDownload } from "../src/web/server.ts";
+import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload, resolveDownload } from "../src/web/server.ts";
 
 const HOSTS = new Set(["localhost", "10.0.0.5"]);
 
@@ -90,4 +90,54 @@ test("downloadHeaders：attachment + nosniff + no-store，非 ASCII 文件名 RF
 	assert.equal(plain["cache-control"], "no-store");
 	// ASCII 回退：非 [\w.-] 字符一律换成 _，原名走 filename*（UTF-8 + 百分号编码）
 	assert.equal(downloadHeaders("值班日报.md", 1)["content-disposition"], `attachment; filename="____.md"; filename*=UTF-8''${encodeURIComponent("值班日报.md")}`);
+});
+
+// ── POST /api/upload 判定：panel 上传图片/文件 ──
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
+test("ingestUpload：无工作目录 404", async () => {
+	assert.deepEqual(await ingestUpload(undefined, "a.png", "aGk=", null), { status: 404, error: "该会话没有工作目录" });
+});
+
+test("ingestUpload：缺 name/data 400、空数据 400、超 10MB 413", async (t) => {
+	const cwd = await tempCwd(t);
+	assert.equal((await ingestUpload(cwd, "", "aGk=", null)).status, 400);
+	assert.equal((await ingestUpload(cwd, undefined, "aGk=", null)).status, 400);
+	assert.equal((await ingestUpload(cwd, "a.png", undefined, null)).status, 400);
+	assert.equal((await ingestUpload(cwd, "a.png", 42, null)).status, 400);
+	assert.equal((await ingestUpload(cwd, "a.png", "", null)).status, 400);
+	assert.equal((await ingestUpload(cwd, "big.bin", Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"), null)).status, 413);
+});
+
+test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describer）", async (t) => {
+	const cwd = await tempCwd(t);
+	const seen: string[] = [];
+	const result = await ingestUpload(cwd, "shot.png", PNG_BYTES.toString("base64"), async (base64, mime) => {
+		seen.push(`${mime}:${base64}`);
+		return "一张绿色按钮截图";
+	});
+	assert.equal(result.status, 200);
+	if (result.status !== 200) return;
+	assert.equal(result.kind, "image");
+	assert.equal(result.size, PNG_BYTES.length);
+	assert.match(result.path, /^uploads\/[0-9a-f]{8}-shot\.png$/);
+	assert.equal(result.part, `[图片1 ${result.path}]\n一张绿色按钮截图`);
+	assert.deepEqual(seen, [`image/png:${PNG_BYTES.toString("base64")}`]);
+	// 落盘文件确实存在且内容一致
+	const files = await readdir(join(cwd, "uploads"));
+	assert.equal(files.length, 1);
+	assert.ok(PNG_BYTES.equals(await readFile(join(cwd, "uploads", files[0]), null)));
+});
+
+test("ingestUpload：文本 → kind file，文件落在 cwd/uploads", async (t) => {
+	const cwd = await tempCwd(t);
+	const result = await ingestUpload(cwd, "notes.txt", Buffer.from("hello dwell").toString("base64"), null);
+	assert.equal(result.status, 200);
+	if (result.status !== 200) return;
+	assert.equal(result.kind, "file");
+	assert.equal(result.size, 11);
+	assert.match(result.path, /^uploads\/[0-9a-f]{8}-notes\.txt$/);
+	assert.match(result.part, /^\[文件1\] [0-9a-f]{8}-notes\.txt（0\.0KB）已保存到 uploads\/[0-9a-f]{8}-notes\.txt，可用 read 工具读取。$/);
+	assert.equal(await readFile(join(cwd, "uploads", result.path.slice("uploads/".length)), "utf8"), "hello dwell");
 });

@@ -1,10 +1,12 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
+import { readFile, realpath } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
 import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
 import { makeReporter } from "./report.ts";
-import { describeResources } from "./media.ts";
+import { describeResources, sniffImageMime } from "./media.ts";
 import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
@@ -119,7 +121,7 @@ async function main(): Promise<void> {
 	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
-		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort });
+		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			harness.resume();
@@ -779,21 +781,39 @@ const feishuBridge: FeishuBridge = {
 	operator: () => panelUser,
 	// 长连接状态供 /healthz：panel-only 未连接为 "off"；已连接但 WS 尚未就绪按 "connecting" 计
 	status: () => (connected() ? (channel.getConnectionStatus()?.state ?? "connecting") : "off"),
-	async relay(conversation, text) {
+	async relay(conversation, text, attachments) {
 		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
 		const id = conversation.id as number;
+		// 附件先以图片/文件消息发到原 chat（可见转发，panel 不设隐藏通道），每条登记锚点：回复附件即续接任务线
+		if (attachments !== undefined && attachments.length > 0) {
+			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd;
+			if (cwd === undefined) throw new Error("该会话没有工作目录");
+			for (const a of attachments) {
+				// 读判定过的真实路径而非字面路径（与 dwell.lark.send 同一纪律）；图片走图片消息，其余走文件消息
+				const real = await realpath(resolve(cwd, a.path));
+				const buffer = await readFile(real);
+				const input: SendInput = sniffImageMime(buffer) !== null && buffer.length <= 10 * 1024 * 1024
+					? { image: { source: buffer } }
+					: { file: { source: buffer, fileName: basename(real) } };
+				const sent = await sendToConversationChat(id, input);
+				if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
+				await sessions.anchor(sent.messageId, conversation.id);
+			}
+		}
 		// 飞书侧以「From admin:」前缀 + 整段斜体呈现，和成员自己的消息区分；逐段包斜体（markdown 强调不跨空行）
 		const ital = (t: string) => t.split(/\n{2,}/).map((p) => (p.trim() !== "" ? `*${p}*` : p)).join("\n\n");
-		const sent = await sendToConversationChat(id, { markdown: ital(`From admin: ${text}`) });
+		const sent = await sendToConversationChat(id, { markdown: ital(`From admin: ${text.trim() === "" ? "（附件）" : text}`) });
 		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);
 		// 飞书侧有新动静的线不再留在归档组
 		if (sessions.isArchived(id)) await sessions.setArchived(id, false);
 		await setRunAttributionIfIdle(id, panelUser, "feishu");
+		// 提交内容与 panel 会话同规则：文本 + 各附件 part 合并
+		const content = [text.trim(), ...(attachments ?? []).map((a) => a.part)].filter((s) => s !== "").join("\n\n");
 		const submission = await conversation.submit({
 			type: "input",
-			content: text,
+			content,
 			entry: { kind: "chat.message", data: { sender: panelUser, senderName: OPERATOR_LABEL, via: "panel" } },
 			requestId: `panel-${sent.messageId}`,
 			whenBusy: "steer",

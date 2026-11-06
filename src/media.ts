@@ -16,7 +16,47 @@ export function sniffImageMime(buffer: Buffer): string | null {
 	return null;
 }
 
-/** 资源预处理：图片→描述（describer），文件→落盘；原图统一落盘留档。下载与视觉依赖由调用方注入（主链路传 channel 与启动装配的 describer）。 */
+/** 单个已下载资源的落盘与上下文化（飞书消息与 panel 上传共用）。
+ *  tag 为防覆盖前缀；name 给出时保留可读文件名（panel 上传），否则图片用序号名、文件用 file-N。
+ *  返回 saved 为相对 cwd 的 uploads/ 路径，part 为进入模型上下文的文本。 */
+export async function ingestBuffer(
+	buffer: Buffer,
+	opts: { kind: "image" | "file"; index: number; tag: string; name?: string },
+	cwd: string,
+	describer: ImageDescriber | null,
+): Promise<{ saved: string; part: string }> {
+	const uploads = join(cwd, "uploads");
+	if (opts.kind === "file") {
+		// file：落盘，read 工具可直接读（无需视觉）
+		const safeName = `${opts.tag}${basename(opts.name ?? `file-${opts.index}`).replace(/[\\/:*?"<>|]/g, "_")}`;
+		await mkdir(uploads, { recursive: true });
+		await writeFile(join(uploads, safeName), buffer);
+		return {
+			saved: `uploads/${safeName}`,
+			part: `[文件${opts.index}] ${safeName}（${(buffer.length / 1024).toFixed(1)}KB）已保存到 uploads/${safeName}，可用 read 工具读取。`,
+		};
+	}
+	const mime = sniffImageMime(buffer);
+	const ext = mime?.split("/")[1] ?? "bin";
+	const saved = `${opts.tag}${opts.name !== undefined ? opts.name.replace(/[\\/:*?"<>|]/g, "_") : `image-${opts.index}.${ext}`}`;
+	await mkdir(uploads, { recursive: true });
+	await writeFile(join(uploads, saved), buffer);
+	const path = `uploads/${saved}`;
+	if (mime === null || buffer.length > IMAGE_MAX_BYTES) {
+		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（无法识别或超过 10MB，未做视觉分析）。` };
+	}
+	if (describer === null) {
+		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（当前未配置视觉模型，仅留档）。` };
+	}
+	try {
+		const description = await describer(buffer.toString("base64"), mime);
+		return { saved: path, part: `[图片${opts.index} ${path}]\n${description}` };
+	} catch (err) {
+		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（视觉分析失败：${err instanceof Error ? err.message : String(err)}）。` };
+	}
+}
+
+/** 资源预处理：下载后逐个交给 ingestBuffer（图片→描述、文件→落盘）。下载与视觉依赖由调用方注入（主链路传 channel 与启动装配的 describer）。 */
 export async function describeResources(
 	msg: NormalizedMessage,
 	cwd: string,
@@ -44,37 +84,12 @@ export async function describeResources(
 			parts.push(`[资源${index}] ${label}：下载失败。`);
 			continue;
 		}
-		const uploads = join(cwd, "uploads");
 		// 同 chat 所有任务线共享 cwd：固定序号名会互相覆盖（旧上下文里的路径指向别人的图）。用消息 id 末 8 位做前缀；
-		// 同一消息重推（requestId 幂等）覆写同名文件，内容相同无副作用
+		// 同一消息重推（requestId 幂等）覆写同名文件，内容相同无副作用。飞书图片无可用文件名，保持序号名
 		const tag = `${msg.messageId.replace(/^om_/, "").slice(-8)}-`;
-		if (resource.type === "image") {
-			const mime = sniffImageMime(buffer);
-			const ext = mime?.split("/")[1] ?? "bin";
-			const saved = `${tag}image-${index}.${ext}`;
-			await mkdir(uploads, { recursive: true });
-			await writeFile(join(uploads, saved), buffer);
-			if (mime === null || buffer.length > IMAGE_MAX_BYTES) {
-				parts.push(`[图片${index}] 已存 uploads/${saved}（无法识别或超过 10MB，未做视觉分析）。`);
-				continue;
-			}
-			if (deps.describer === null) {
-				parts.push(`[图片${index}] 已存 uploads/${saved}（当前未配置视觉模型，仅留档）。`);
-				continue;
-			}
-			try {
-				const description = await deps.describer(buffer.toString("base64"), mime);
-				parts.push(`[图片${index} uploads/${saved}]\n${description}`);
-			} catch (err) {
-				parts.push(`[图片${index}] 已存 uploads/${saved}（视觉分析失败：${err instanceof Error ? err.message : String(err)}）。`);
-			}
-			continue;
-		}
-		// file：落盘，read 工具可直接读（无需视觉）
-		const safeName = `${tag}${basename(resource.fileName ?? `file-${index}`).replace(/[\\/:*?"<>|]/g, "_")}`;
-		await mkdir(uploads, { recursive: true });
-		await writeFile(join(uploads, safeName), buffer);
-		parts.push(`[文件${index}] ${safeName}（${(buffer.length / 1024).toFixed(1)}KB）已保存到 uploads/${safeName}，可用 read 工具读取。`);
+		const kind = resource.type === "image" ? "image" : "file";
+		const { part } = await ingestBuffer(buffer, { kind, index, tag, name: kind === "file" ? resource.fileName : undefined }, cwd, deps.describer);
+		parts.push(part);
 	}
 	return parts.join("\n\n");
 }

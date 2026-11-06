@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeResources, sniffImageMime } from "../src/media.ts";
+import { describeResources, ingestBuffer, sniffImageMime } from "../src/media.ts";
 import type { NormalizedMessage } from "../src/feishu/channel.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
@@ -112,4 +112,29 @@ test("音视频与下载失败的降级提示", async () => {
 	);
 	assert.match(out, /\[媒体1\] voice\.opus：暂不支持音视频/);
 	assert.match(out, /\[资源2\] image：下载失败。/);
+});
+
+// ── ingestBuffer（panel 上传共用路径）──
+
+test("ingestBuffer：图片带 name 用安全化原名落盘并出描述", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	const { saved, part } = await ingestBuffer(PNG, { kind: "image", index: 1, tag: "abcd1234-", name: "屏幕/截图:1.png" }, dir, async () => "一张红色测试图");
+	assert.equal(saved, "uploads/abcd1234-屏幕_截图_1.png");
+	assert.equal(part, "[图片1 uploads/abcd1234-屏幕_截图_1.png]\n一张红色测试图");
+	assert.ok(PNG.equals(await readFile(join(dir, "uploads", "abcd1234-屏幕_截图_1.png"), null)));
+});
+
+test("ingestBuffer：无 name 图片保持序号名，无 describer 降级留档", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	const { saved, part } = await ingestBuffer(JPEG, { kind: "image", index: 2, tag: "x-" }, dir, null);
+	assert.equal(saved, "uploads/x-image-2.jpeg");
+	assert.equal(part, "[图片2] 已存 uploads/x-image-2.jpeg（当前未配置视觉模型，仅留档）。");
+});
+
+test("ingestBuffer：文件落盘 sanitize 并提示 read 路径", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	const { saved, part } = await ingestBuffer(Buffer.from("hello"), { kind: "file", index: 3, tag: "x-", name: "data/report.txt" }, dir, null);
+	assert.equal(saved, "uploads/x-report.txt");
+	assert.equal(part, "[文件3] x-report.txt（0.0KB）已保存到 uploads/x-report.txt，可用 read 工具读取。");
+	assert.equal(await readFile(join(dir, "uploads", "x-report.txt"), "utf8"), "hello");
 });

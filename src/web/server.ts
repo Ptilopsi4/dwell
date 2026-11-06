@@ -5,9 +5,11 @@ import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
-import { MODEL } from "../harness.ts";
+import { MODEL, type ImageDescriber } from "../harness.ts";
+import { ingestBuffer, sniffImageMime } from "../media.ts";
 import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
@@ -21,6 +23,8 @@ interface PanelOptions {
 	directory: Directory;
 	feishu: FeishuBridge;
 	port: number;
+	/** 视觉描述器（启动装配；无 ZAI key 时为 null，上传图片降级为落盘+提示） */
+	describer: () => ImageDescriber | null;
 }
 
 /** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
@@ -29,8 +33,8 @@ export interface FeishuBridge {
 	operator(): string;
 	/** 飞书长连接状态（"off" = panel-only 未连接；其余为 SDK WSConnectionState，"failed" 时 /healthz 返回 503） */
 	status(): string;
-	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复 */
-	relay(conversation: Conversation, text: string): Promise<void>;
+	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复；附件先以图片/文件消息可见转发到原 chat */
+	relay(conversation: Conversation, text: string, attachments?: { path: string; part: string }[]): Promise<void>;
 	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
 	notice(conversationId: number, text: string): Promise<void>;
 	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
@@ -120,11 +124,28 @@ export function downloadHeaders(name: string, size: number): Record<string, stri
 	};
 }
 
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+/** POST /api/upload 判定：base64 解码后非空且 ≤10MB，魔数嗅探分流；落盘该会话 cwd 的 uploads/（随机 8 位前缀防同 cwd 覆盖），图片当场走视觉描述（发送不再阻塞）。 */
+export async function ingestUpload(
+	cwd: string | undefined,
+	name: unknown,
+	data: unknown,
+	describer: ImageDescriber | null,
+): Promise<{ status: 200; path: string; kind: "image" | "file"; size: number; part: string } | { status: 400 | 404 | 413; error: string }> {
+	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
+	if (typeof name !== "string" || name === "" || typeof data !== "string") return { status: 400, error: "name 与 data(base64) 必填" };
+	const buffer = Buffer.from(data, "base64");
+	if (buffer.length === 0) return { status: 400, error: "空文件" };
+	if (buffer.length > 10 * 1024 * 1024) return { status: 413, error: "超过 10MB 上限" };
+	const kind = sniffImageMime(buffer) !== null ? "image" : "file";
+	const { saved, part } = await ingestBuffer(buffer, { kind, index: 1, tag: `${randomBytes(4).toString("hex")}-`, name }, cwd, describer);
+	return { status: 200, path: saved, kind, size: buffer.length, part };
+}
+
+async function readBody(req: IncomingMessage, maxBytes = 100_000): Promise<Record<string, unknown> | undefined> {
 	let body = "";
 	for await (const chunk of req) {
 		body += chunk;
-		if (body.length > 100_000) throw new HttpError(413, "body too large");
+		if (body.length > maxBytes) throw new HttpError(413, "body too large");
 	}
 	if (body === "") return undefined;
 	let parsed: unknown;
@@ -150,7 +171,7 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, port }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, port, describer }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -356,6 +377,18 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 				.pipe(res);
 			return;
 		}
+		if (req.method === "POST" && url.pathname === "/api/upload") {
+			// body 上限 15MB：10MB 附件的 base64（≈13.4MB）够用
+			const body = await readBody(req, 15_000_000);
+			const conv = Number(body?.conv);
+			const conversation = Number.isFinite(conv) ? await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT) : undefined;
+			if (conversation === undefined) { json(res, 404, { error: "conversation not found" }); return; }
+			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
+			const result = await ingestUpload(cwd, body?.name, body?.data, describer());
+			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
+			json(res, 200, { path: result.path, kind: result.kind, size: result.size, part: result.part });
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/api/events") {
 			await handleEvents(url, res);
 			return;
@@ -433,17 +466,36 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		const body = await readBody(req);
 		const conv = Number(body?.conv);
 		const content = body?.content;
-		if (!Number.isFinite(conv) || typeof content !== "string" || content.trim() === "") throw new HttpError(400, "bad request");
+		if (!Number.isFinite(conv) || typeof content !== "string") throw new HttpError(400, "bad request");
+		// 附件 = 上传接口返回的 {path, part} 回传：part 是进入上下文的描述文本，path 仍过路径治理
+		const rawAttachments: unknown[] = Array.isArray(body?.attachments) ? (body.attachments as unknown[]) : [];
+		if (rawAttachments.length > 5) throw new HttpError(400, "最多 5 个附件");
+		const attachments: { path: string; part: string }[] = [];
+		for (const raw of rawAttachments) {
+			const att = (raw ?? {}) as { path?: unknown; part?: unknown };
+			if (typeof att.path !== "string" || typeof att.part !== "string") throw new HttpError(400, "bad attachments");
+			attachments.push({ path: att.path, part: att.part });
+		}
+		if (content.trim() === "" && attachments.length === 0) throw new HttpError(400, "bad request");
 		const conversation = await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) {
 			json(res, 404, { error: "conversation not found" });
 			return;
 		}
+		if (attachments.length > 0) {
+			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
+			if (cwd === undefined) { json(res, 404, { error: "该会话没有工作目录" }); return; }
+			for (const a of attachments) {
+				if ((await sendPathViolation(a.path, cwd)) !== undefined) { json(res, 403, { error: "只能使用本会话工作目录内的附件" }); return; }
+			}
+		}
+		// 模型输入与飞书 relay 同规则：文本 + 各附件 part 合并
+		const input = [content.trim(), ...attachments.map((a) => a.part)].filter((s) => s !== "").join("\n\n");
 		sessions.touchActivity(conversation.id);
 		const id = conversation.id as number;
 		// 飞书会话：一律以操作者名义转发到原 chat 并由 bot 流式回复；不提供仅进上下文的隐藏通道
 		if (sessions.chatOf(id) !== undefined) {
-			await feishu.relay(conversation, content);
+			await feishu.relay(conversation, content, attachments);
 			json(res, 200, { ok: true, via: "feishu" });
 			return;
 		}
@@ -451,7 +503,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		runVia.set(id, "panel");
 		void persistApprovals();
 		const submission = await conversation.submit(
-			{ type: "input", content, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
+			{ type: "input", content: input, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});

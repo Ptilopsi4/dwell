@@ -241,6 +241,33 @@ details.tc[open] summary { background: var(--hover); }
 #send.busy { width: auto; padding: 0 .7rem; gap: 5px; display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 500; }
 #composer .hint { display: flex; gap: .9rem; font-size: 11px; color: var(--faint); }
 #composer .hint.busy { color: var(--primary); }
+#composer.drag { border-style: dashed; border-color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--raised)); }
+#atts { display: flex; flex-wrap: wrap; gap: 6px; margin: -.1rem 0 .5rem -.3rem; }
+#atts:empty { display: none; }
+.att { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; height: 30px; padding: 0 4px 0 5px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); font-size: 12px; }
+.att .th { width: 20px; height: 20px; flex: none; border-radius: 4px; object-fit: cover; background: var(--secondary); display: grid; place-items: center; color: var(--muted-foreground); }
+.att .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--secondary-foreground); }
+.att .ss { flex: none; display: inline-flex; align-items: center; gap: 4px; color: var(--faint); font-size: 11px; }
+.att .ss .spin { width: 10px; height: 10px; }
+.att.bad { border-color: color-mix(in srgb, var(--destructive) 50%, var(--border)); }
+.att.bad .ss { color: var(--destructive); }
+.att button { flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--faint); cursor: pointer; display: grid; place-items: center; }
+.att button:hover { color: var(--foreground); background: var(--hover); }
+#attach { width: 32px; height: 32px; padding: 0; border-radius: 8px; display: inline-grid; place-items: center; background: none; color: var(--muted-foreground); border: 0; cursor: pointer; }
+#attach:hover:not(:disabled) { color: var(--foreground); background: var(--hover); }
+#attach:disabled { color: var(--faint); cursor: default; }
+.uas { display: flex; flex-direction: column; gap: 4px; margin-top: .45rem; }
+.uas:first-child { margin-top: 0; }
+details.ua, div.ua { border: 1px solid var(--border); border-radius: 8px; background: var(--raised); font-size: 12.5px; max-width: 560px; }
+.ua .uh { display: flex; align-items: center; gap: .5rem; min-height: 30px; padding: 0 .4rem 0 .65rem; list-style: none; color: var(--secondary-foreground); }
+details.ua > summary { cursor: pointer; }
+details.ua > summary::-webkit-details-marker { display: none; }
+details.ua > summary svg.chev { transition: transform .12s; color: var(--faint); }
+details.ua[open] > summary svg.chev { transform: rotate(90deg); }
+.ua .uh .ul { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); }
+.ua a.dl { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 7px; border-radius: 5px; font-size: 11.5px; color: var(--muted-foreground); text-decoration: none; }
+.ua a.dl:hover { color: var(--foreground); background: var(--hover); }
+.ua .ub { padding: .15rem .75rem .6rem; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.65; color: var(--muted-foreground); border-top: 1px solid var(--border); padding-top: .5rem; }
 .m .hd .tag { font-size: 10.5px; font-weight: 500; padding: 0 6px; line-height: 17px; border-radius: 4px; background: var(--secondary); color: var(--muted-foreground); }
 
 #scrim { display: none; position: fixed; inset: 0; z-index: 55; background: rgb(0 0 0 / .45); }
@@ -344,8 +371,11 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 		<div id="runbar"><span class="spin"></span><span class="t" id="runText">运行中</span><button class="btn" data-variant="ghost" data-size="xs" id="stopRun">停止</button></div>
 		<div id="archBanner"><span>该会话已归档，仍可继续对话。</span><button class="btn" data-variant="ghost" data-size="xs" id="unarchive">取消归档</button></div>
 		<div id="composer">
+			<div id="atts"></div>
 			<div class="row">
 				<textarea id="input" rows="1" placeholder="输入消息" disabled></textarea>
+				<button id="attach" disabled title="添加图片或文件（也可粘贴、拖入）"><span data-ic="clip" data-cls="sm"></span></button>
+				<input type="file" id="fileIn" multiple hidden>
 				<button id="send" disabled title="发送（Enter）"><span data-ic="send" data-cls="sm"></span><span id="sendLabel" hidden>插入</span></button>
 			</div>
 			<div class="hint" id="hint"><span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span></div>
@@ -393,6 +423,9 @@ const ICONS = {
 	shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/>',
 	download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
 	bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+	clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+	file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+	image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
 	direct: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
 	group: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
 	thread: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
@@ -713,7 +746,8 @@ function switchConv(id) {
 	$("metaChip").textContent = "";
 	setRunning(null);
 	markActive();
-	for (const el of [$("input"), $("send"), $("menuBtn")]) el.disabled = false;
+	for (const el of [$("input"), $("send"), $("menuBtn"), $("attach")]) el.disabled = false;
+	clearAtts();
 	apprSig = "";
 	loadApprovals();
 	es = new EventSource(`/api/events?conv=${encodeURIComponent(id)}`);
@@ -826,7 +860,10 @@ function appendEntry(entry) {
 			tag.textContent = entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
 			el.querySelector(".hd time").before(tag);
 		}
-		el.querySelector(".bd").textContent = contentText(model?.content);
+		const body = el.querySelector(".bd");
+		const { text, blocks } = splitAttachments(contentText(model?.content));
+		body.textContent = text;
+		if (blocks.length > 0) body.appendChild(attachmentList(blocks));
 		log.appendChild(el);
 		T.lastKind = "user";
 		return;
@@ -901,6 +938,54 @@ function addDownload(row) {
 	row.querySelector("summary").appendChild(a);
 	// 多调用折叠时只露最后一行；带下载的行是交付物，折叠状态下也保持可见
 	row.classList.add("has-dl");
+}
+/* ── 附件展示：图片描述/文件落盘说明由 media.ts 拼进模型输入（飞书与 panel 同一格式），在这里拆成可折叠卡片 ── */
+// 非捕获组：要拼进 split 的正则，捕获组会把类型名当成拆分结果插进数组
+const ATT_HEAD = /\[(?:图片|文件|媒体|表情|资源)\d+[\] ]/;
+function splitAttachments(all) {
+	const m = new RegExp(`(^|\\n\\n)(?=${ATT_HEAD.source})`).exec(all);
+	if (m === null) return { text: all, blocks: [] };
+	const text = all.slice(0, m.index);
+	const rest = all.slice(m.index + m[1].length);
+	return { text, blocks: rest.split(new RegExp(`\\n\\n(?=${ATT_HEAD.source})`)) };
+}
+function attachmentList(blocks) {
+	const box = document.createElement("div");
+	box.className = "uas";
+	for (const b of blocks) {
+		const [head, ...rest] = b.split("\n");
+		const desc = rest.join("\n").trim();
+		const kind = /^\[(图片|文件|媒体|表情|资源)/.exec(head)?.[1] ?? "文件";
+		const path = /uploads\/[^\s\]（）()，,]+/.exec(head)?.[0];
+		const el = document.createElement(desc !== "" ? "details" : "div");
+		el.className = "ua";
+		const h = document.createElement(desc !== "" ? "summary" : "div");
+		h.className = "uh";
+		h.innerHTML = `${desc !== "" ? ic("chev", "sm chev") : ""}${ic(kind === "图片" ? "image" : "file", "sm")}<span class="ul"></span>`;
+		// 图片头形如「[图片1 uploads/x.png]」、文件头是一句完整说明；无独立描述段时直接显示整句说明
+		const plain = desc === "" ? head.replace(/^[^\]]*\]\s*/, "") : "";
+		h.querySelector(".ul").textContent = plain || head.replace(/^\[[^\]\s]+\s?/, "").replace(/\]$/, "") || head;
+		h.querySelector(".ul").title = head;
+		if (path !== undefined && convId !== null) {
+			const a = document.createElement("a");
+			a.className = "dl";
+			a.href = `/api/file?conv=${encodeURIComponent(convId)}&path=${encodeURIComponent(path)}`;
+			a.download = path.split("/").pop();
+			a.title = `下载 ${path}`;
+			a.innerHTML = ic("download", "sm");
+			a.addEventListener("click", (e) => e.stopPropagation());
+			h.appendChild(a);
+		}
+		el.appendChild(h);
+		if (desc !== "") {
+			const d = document.createElement("div");
+			d.className = "ub";
+			d.textContent = desc;
+			el.appendChild(d);
+		}
+		box.appendChild(el);
+	}
+	return box;
 }
 function thinkEl(text) {
 	const d = document.createElement("details");
@@ -1009,15 +1094,90 @@ setInterval(() => {
 /* ── 发送 ── */
 async function send() {
 	const text = $("input").value.trim();
-	if (!text || sending || convId === null) return;
+	if ((!text && atts.length === 0) || sending || convId === null) return;
+	if (atts.some((a) => a.status === "busy")) { toast("附件还在处理，稍等再发送", true); return; }
+	if (atts.some((a) => a.status === "bad")) { toast("有附件上传失败，移除后再发送", true); return; }
 	sending = true; $("send").disabled = true;
 	try {
-		const r = await api("send", { conv: Number(convId), content: text });
+		const attachments = atts.map((a) => ({ path: a.path, part: a.part }));
+		await api("send", { conv: Number(convId), content: text, ...(attachments.length > 0 ? { attachments } : {}) });
 		$("input").value = ""; autosize();
+		clearAtts();
 		$("main").scrollTop = $("main").scrollHeight;
 	} catch (err) { toast("发送失败，内容已保留：" + err.message, true); }
 	sending = false; $("send").disabled = false; $("input").focus();
 }
+
+/* ── 附件：选中/粘贴/拖入即上传（图片当场识别），发送时只回传 path + part ── */
+const ATT_MAX = 5, ATT_BYTES = 10 * 1024 * 1024;
+let atts = [];
+function clearAtts() {
+	for (const a of atts) if (a.url) URL.revokeObjectURL(a.url);
+	atts = [];
+	$("atts").replaceChildren();
+}
+function paintAtt(a) {
+	const st = a.el.querySelector(".ss");
+	a.el.classList.toggle("bad", a.status === "bad");
+	st.innerHTML = a.status === "busy" ? `<span class="spin"></span>${a.image ? "识别中" : "上传中"}` : a.status === "bad" ? "失败" : "";
+	a.el.title = a.status === "bad" ? `${a.name}：${a.error}` : a.status === "ready" ? `${a.name} → ${a.path}` : a.name;
+}
+const readBase64 = (file) => new Promise((ok, fail) => {
+	const r = new FileReader();
+	r.onload = () => ok(String(r.result).replace(/^data:[^,]*,/, ""));
+	r.onerror = () => fail(r.error ?? new Error("读取失败"));
+	r.readAsDataURL(file);
+});
+function addFiles(files) {
+	if (convId === null || $("attach").disabled) return;
+	for (const file of files) {
+		if (atts.length >= ATT_MAX) { toast(`一次最多 ${ATT_MAX} 个附件`, true); break; }
+		if (/^(audio|video)\//.test(file.type)) { toast(`${file.name}：暂不支持音视频`, true); continue; }
+		if (file.size === 0) { toast(`${file.name}：空文件`, true); continue; }
+		if (file.size > ATT_BYTES) { toast(`${file.name}：超过 10MB`, true); continue; }
+		const image = file.type.startsWith("image/");
+		const a = { conv: convId, name: file.name || (image ? "image.png" : "file"), image, status: "busy", url: image ? URL.createObjectURL(file) : null };
+		a.el = document.createElement("div");
+		a.el.className = "att";
+		a.el.innerHTML = `${a.url ? '<img class="th" alt="">' : `<span class="th">${ic("file", "sm")}</span>`}<span class="nm"></span><span class="ss"></span><button type="button" title="移除">${ic("x", "sm")}</button>`;
+		if (a.url) a.el.querySelector("img").src = a.url;
+		a.el.querySelector(".nm").textContent = a.name;
+		a.el.querySelector("button").onclick = () => {
+			atts = atts.filter((x) => x !== a);
+			if (a.url) URL.revokeObjectURL(a.url);
+			a.el.remove();
+			$("input").focus();
+		};
+		atts.push(a);
+		$("atts").appendChild(a.el);
+		paintAtt(a);
+		readBase64(file)
+			.then((data) => api("upload", { conv: Number(a.conv), name: a.name, data }))
+			.then((r) => { a.status = "ready"; a.path = r.path; a.part = r.part; })
+			.catch((err) => { a.status = "bad"; a.error = err.message; })
+			// 上传期间切走会话或移除了该附件：结果丢弃（已落盘的文件留在原会话工作目录）
+			.finally(() => { if (atts.includes(a)) paintAtt(a); });
+	}
+}
+$("attach").onclick = () => $("fileIn").click();
+$("fileIn").onchange = () => { addFiles([...$("fileIn").files]); $("fileIn").value = ""; };
+$("input").addEventListener("paste", (e) => {
+	const files = [...(e.clipboardData?.files ?? [])];
+	if (files.length === 0) return;
+	e.preventDefault();
+	addFiles(files);
+});
+const composer = $("composer");
+let dragDepth = 0;
+composer.addEventListener("dragenter", (e) => { if (!e.dataTransfer?.types.includes("Files") || $("attach").disabled) return; e.preventDefault(); dragDepth++; composer.classList.add("drag"); });
+composer.addEventListener("dragover", (e) => { if (composer.classList.contains("drag")) e.preventDefault(); });
+composer.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; composer.classList.remove("drag"); } });
+composer.addEventListener("drop", (e) => {
+	if (!composer.classList.contains("drag")) return;
+	e.preventDefault();
+	dragDepth = 0; composer.classList.remove("drag");
+	addFiles([...(e.dataTransfer?.files ?? [])]);
+});
 const currentConv = () => convs.find((c) => String(c.id) === String(convId));
 function refreshComposer() {
 	const c = currentConv();
