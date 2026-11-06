@@ -1,5 +1,5 @@
 // 一次性探针（不在 npm test 内）：Linux 服务器上验证 bash 沙箱的真实行为（挂载视图、pid namespace、DNS、环境擦除）。
-// 用法：node test/probe-bwrap.ts（DWELL_DATA/DWELL_STATE 缺省 ./data ./state，与 src/state.ts 一致）。
+// 用法：node test/probe-bwrap.ts（DWELL_DATA/DWELL_STATE 缺省 ./data ./state，与 src/state.ts 一致；传 DWELL_PANEL_PORT/HOST 时加测 panel 本机来源拒绝）。
 // 需要先 apt install bubblewrap；本机（非 Linux）跑会直接 skip。每条断言打 PASS/FAIL，任一 FAIL exit 1。
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
@@ -68,6 +68,19 @@ try {
 	// 断言用肯定式：cmdline 含 bwrap。否定式正则会踩坑——bwrap 参数里的 /run/systemd/resolve 含字面 "systemd"
 	const pid1 = run(`tr "\\0" " " < /proc/1/cmdline`);
 	check("/proc/1 是沙箱 init（bwrap）", pid1.status === 0 && pid1.out.includes("bwrap"), pid1.out.slice(0, 80));
+
+	// 沙箱不隔离网络：panel 必须拒绝本机来源（否则 agent 可自批审批），/healthz 豁免。需 dwell 服务在跑，并把服务的
+	// DWELL_PANEL_PORT/DWELL_PANEL_HOST 传给探针；未传则跳过
+	const port = process.env.DWELL_PANEL_PORT;
+	if (port === undefined || port === "") console.log("SKIP：panel 本机来源拒绝（未设 DWELL_PANEL_PORT）");
+	else {
+		const base = `http://${process.env.DWELL_PANEL_HOST ?? "127.0.0.1"}:${port}`;
+		const code = (path: string): string => run(`curl -s -m 5 -o /dev/null -w "%{http_code}" ${q(base + path)}`).out;
+		const approvals = code("/api/approvals");
+		check("沙箱内访问 panel /api/approvals → 403", approvals === "403", approvals);
+		const health = code("/healthz");
+		check("沙箱内访问 panel /healthz → 200", health === "200", health);
+	}
 } finally {
 	rmSync(workDir, { recursive: true, force: true });
 	rmSync(sibling, { recursive: true, force: true });

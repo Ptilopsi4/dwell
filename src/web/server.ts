@@ -6,6 +6,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
@@ -96,6 +97,27 @@ export function checkPanelRequest(
 export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean } } {
 	const ok = feishu !== "failed";
 	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox } };
+}
+
+/** 地址归一：IPv4-mapped IPv6（双栈 socket 上的 IPv4 连接）去 `::ffff:`，链路本地地址去 `%scope`。 */
+const normalizeAddr = (addr: string): string => {
+	const a = addr.toLowerCase().split("%")[0];
+	return a.startsWith("::ffff:") && a.includes(".") ? a.slice("::ffff:".length) : a;
+};
+
+/** 本机全部接口地址（归一后）。每请求取：wg/DHCP 地址会变。 */
+export function localAddresses(): Set<string> {
+	return new Set(Object.values(networkInterfaces()).flatMap((list) => (list ?? []).map((i) => normalizeAddr(i.address))));
+}
+
+/**
+ * 连接源是否本机：本机发起的 TCP 连接源地址必为本机地址，bash（含沙箱）与 panel 同机且无 CAP_NET_RAW 伪造源地址，
+ * 所以拒绝本机来源 = 拒绝 agent 自己调 panel（自批审批、加管理员、读全部会话）。remote 缺失（socket 已断）按本机处理。
+ */
+export function isLocalSource(remote: string | undefined, localAddrs: ReadonlySet<string>): boolean {
+	if (remote === undefined || remote === "") return true;
+	const a = normalizeAddr(remote);
+	return a.startsWith("127.") || a === "::1" || localAddrs.has(a);
 }
 
 /** GET /api/file 判定：限本会话 cwd 内的普通文件。cwd 缺失（root 会话不设 cwd）绝不能退回 process.cwd()——那是应用根。 */
@@ -220,6 +242,9 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 	}
 
+	// 本地开发（panel-only）浏览器走 localhost；同机反代/ssh -L 部署只能显式信任本机（此时 bash 可直连 panel）
+	const denyLocal = process.env.DWELL_PANEL_ONLY !== "1" && process.env.DWELL_PANEL_TRUST_LOCAL !== "1";
+
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -228,6 +253,8 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			json(res, code, body);
 			return;
 		}
+		// /healthz 之后：本机探活可用，其余接口（含静态页与 SSE）不对本机进程开放
+		if (denyLocal && isLocalSource(req.socket.remoteAddress, localAddresses())) throw new HttpError(403, "local source denied");
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
 			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }

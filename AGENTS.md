@@ -39,7 +39,7 @@ test/probe-bwrap.ts  bash 沙箱服务器探针（需先 apt install bubblewrap�
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 113 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 115 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -58,7 +58,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 
 - **凭证不进 bash 可读面**：启动读取后 `scrubSecretEnv()` 删除 `process.env` 并（Linux）覆写 `/proc/self/environ` 原始环境区的密钥值，自检失败拒绝启动；续跑任务（`harness.resume()`）在擦除后才开跑。新增密钥 env 要加进 `harness.ts` 的 `SECRET_ENV`，并在清理前读进闭包；凭证一律参数传递（Directory/connectChannel），不事后读 env
 - **文件工具限可写域**：`write`/`edit` 限会话 cwd 与系统临时目录，`read` 禁状态目录/应用根/sqlite/`/proc`（`ext/approval.ts` 的 `fileToolViolation`，挂 `dwell-path-guard` 扩展）。软链与 `..` 逃逸按 `realpath` 后的真实路径判；bash 仍可绕过（减速带，硬边界是部署隔离）
-- **panel 请求准入**：POST 强制 JSON Content-Type + Origin 同源 + Host 白名单（IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置名），见 `server.ts` 的 `checkPanelRequest`
+- **panel 请求准入**：POST 强制 JSON Content-Type + Origin 同源 + Host 白名单（IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置名），见 `server.ts` 的 `checkPanelRequest`；本机来源除 `/healthz` 外 403（`isLocalSource`，防 bash 自调 panel 自批），仅 `DWELL_PANEL_ONLY=1` / `DWELL_PANEL_TRUST_LOCAL=1` 时关闭
 - **状态文件在 agent 可写域之外**：`DWELL_STATE` 与 `DWELL_DATA` 分开（目录权限），STATE_FILES 正则与文件工具路径治理双重拦截（含 approvals.json；均为减速带，bash 可绕，硬边界是部署隔离）。不要把 users/sessions/message-map/approvals 挪进 `data/`
 - **`NodeExecutionEnv` 的 cwd 必须是绝对路径**，否则 bash 工具会双拼路径（见 gotchas）
 - **幂等**：飞书输入以 `requestId = message_id` 提交，重推不会产生第二次 run。handler 里只做 submit，`wait`/流式放到 handler 之外（飞书 3 秒 ack）

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload, resolveDownload } from "../src/web/server.ts";
+import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload, isLocalSource, localAddresses, resolveDownload } from "../src/web/server.ts";
 
 const HOSTS = new Set(["localhost", "10.0.0.5"]);
 
@@ -52,6 +52,23 @@ test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting�
 	assert.deepEqual(healthOf("connected", 42, false), { code: 200, body: { ok: true, uptimeSec: 42, feishu: "connected", sandbox: false } });
 	assert.deepEqual(healthOf("reconnecting", 7, true), { code: 200, body: { ok: true, uptimeSec: 7, feishu: "reconnecting", sandbox: true } });
 	assert.deepEqual(healthOf("off", 0, false), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false } });
+});
+
+// ── 本机来源拒绝：bash 与 panel 同机，本机源地址 = agent 自己发的请求 ──
+
+test("isLocalSource：回环、接口地址（含映射/scope 形态）、缺失地址均算本机；peer 地址放行", () => {
+	const local = new Set(["10.8.0.1", "fe80::1"]);
+	for (const a of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "10.8.0.1", "::ffff:10.8.0.1", "fe80::1%wg0", "FE80::1", undefined, ""]) {
+		assert.equal(isLocalSource(a, local), true, `应算本机：${a}`);
+	}
+	for (const a of ["10.8.0.2", "::ffff:10.8.0.2", "10.0.0.5", "fe80::2%wg0"]) {
+		assert.equal(isLocalSource(a, local), false, `应放行：${a}`);
+	}
+});
+
+test("localAddresses：含本机回环接口地址", () => {
+	const addrs = localAddresses();
+	assert.ok(addrs.has("127.0.0.1") || addrs.has("::1"), [...addrs].join(","));
 });
 
 // ── GET /api/file：会话 cwd 内文件下载 ──
