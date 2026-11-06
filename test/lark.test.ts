@@ -269,11 +269,11 @@ test("send：越界路径拒且不调 sendToChat", async (t) => {
 	assert.equal(inputs.length, 0);
 });
 
-test("send：sendToChat 返回 undefined（panel 任务）与缺 env.cwd 各给提示", async (t) => {
+test("send：sendToChat 返回 undefined（飞书未连接）与缺 env.cwd 各给提示", async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "x");
 	let r = await sendToolOf(sendDeps(true).deps).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /panel 任务.*没有对应的飞书聊天/);
+	assert.match(out(r as never), /飞书未连接，发送失败/);
 	r = await sendToolOf(sendDeps().deps).execute({ path: "a.txt" }, { conversationId: 42 } as never, context);
 	assert.match(out(r as never), /没有配置工作目录/);
 });
@@ -303,11 +303,19 @@ test("send：超过 10MB 的图片改走文件消息", async (t) => {
 	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "huge.png");
 });
 
-test("send：当前会话无飞书 chat 时不读文件直接拒", async (t) => {
+test("send：panel 任务返回 panel 下载提示且不调 sendToChat", async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "x");
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /没有对应的飞书聊天/);
+	assert.match(out(r as never), /已在 panel 提供下载：a\.txt/);
+	assert.equal(inputs.length, 0);
+});
+
+test("send：panel 任务越界路径仍被拒", async (t) => {
+	const cwd = await tempCwd(t);
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "../outside.txt" }, sendApi(cwd), context);
+	assert.match(out(r as never), /已拒绝/);
 	assert.equal(inputs.length, 0);
 });

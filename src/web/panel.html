@@ -162,7 +162,7 @@ details.think .tx { white-space: pre-wrap; border-left: 2px solid var(--border);
 .tools-sum .mono { color: var(--faint); font-size: 11.5px; }
 .tools-sum svg { transition: transform .12s; }
 .tools:not(.fold) .tools-sum svg { transform: rotate(90deg); }
-.tools.fold.many details.tc:not(:last-child) { display: none; }
+.tools.fold.many details.tc:not(:last-child):not(.has-dl) { display: none; }
 details.tc + details.tc { border-top: 1px solid var(--border); }
 details.tc summary { display: flex; align-items: center; gap: .6rem; height: 32px; padding: 0 .75rem; cursor: pointer; list-style: none; font-size: 12.5px; min-width: 0; }
 details.tc summary::-webkit-details-marker { display: none; }
@@ -174,6 +174,8 @@ details.tc[open] summary { background: var(--hover); }
 .tc .tn { font: 500 12px var(--mono); color: var(--foreground); }
 .tc .ta { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tc .tm { font-size: 11px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tc a.dl { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 7px; margin: 0 -4px 0 -2px; border-radius: 5px; font-size: 11.5px; color: var(--muted-foreground); text-decoration: none; }
+.tc a.dl:hover { color: var(--foreground); background: var(--raised); box-shadow: inset 0 0 0 1px var(--border); }
 .tc .tb { padding: .2rem .7rem .7rem 2.15rem; border-top: 1px solid var(--border); background: var(--background); }
 .tc .tb .lbl { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); margin: .55rem 0 .25rem; }
 .tc pre { margin: 0; font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; padding: .5rem .65rem; background: var(--raised); border: 1px solid var(--border); border-radius: 6px; color: var(--secondary-foreground); }
@@ -377,6 +379,7 @@ const ICONS = {
 	send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
 	search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
 	shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/>',
+	download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
 	direct: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
 	group: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
 	thread: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
@@ -856,8 +859,26 @@ function appendEntry(entry) {
 		const lines = out === "" ? 0 : out.replace(/\n$/, "").split("\n").length;
 		const meta = [lines > 0 ? `${lines} 行` : "无输出", model?.durationMs >= 1000 ? `${(model.durationMs / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
 		row.querySelector(".tm").textContent = meta;
+		if (!err) addDownload(row);
 		if (row.open) fillToolBody(row);
 	}
+}
+/** 产物下载：dwell.lark.send / write 成功后工具行加下载链接（服务端限本会话工作目录，强制 attachment）。 */
+const DOWNLOAD_TOOLS = new Set(["dwell.lark.send", "write"]);
+function addDownload(row) {
+	const path = row._call?.arguments?.path;
+	if (!DOWNLOAD_TOOLS.has(row._call?.name) || typeof path !== "string" || path === "" || convId === null || row.querySelector("a.dl")) return;
+	const a = document.createElement("a");
+	a.className = "dl";
+	a.href = `/api/file?conv=${encodeURIComponent(convId)}&path=${encodeURIComponent(path)}`;
+	a.download = path.split(/[\\/]/).pop() || "download";
+	a.title = `下载 ${path}`;
+	a.innerHTML = `${ic("download", "sm")}<span>下载</span>`;
+	// 在 <summary> 内：点击只下载，不展开/收起工具详情
+	a.addEventListener("click", (e) => e.stopPropagation());
+	row.querySelector("summary").appendChild(a);
+	// 多调用折叠时只露最后一行；带下载的行是交付物，折叠状态下也保持可见
+	row.classList.add("has-dl");
 }
 function thinkEl(text) {
 	const d = document.createElement("details");

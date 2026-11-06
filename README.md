@@ -111,7 +111,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 | `dwell.web.search` / `dwell.web.fetch` | 全网搜索、读取网页正文。走智谱 Coding Plan Remote MCP，计入套餐额度。设置了 `ZAI_CODING_CN_API_KEY` 就会启用，与 `DWELL_PROVIDER` 无关 | 免审 |
 | `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内；读当前会话之外的会话仅管理员触发的任务可用 | 免审 |
 | `dwell.lark.image` | 按消息 id 拉取图片描述：群里不 @ 发的图不进上下文，模型读历史看到 `[图片]` 占位后按需回看（回复用户提问时自动用） | 免审 |
-| `dwell.lark.send` | 把会话工作目录内的文件发到当前会话的飞书聊天：图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。只发当前会话，来源限本会话工作目录；panel 任务（无飞书聊天）不可用 | 免审 |
+| `dwell.lark.send` | 把会话工作目录内的文件发到当前会话的飞书聊天：图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。只发当前会话，来源限本会话工作目录；panel 任务（无飞书聊天）在 panel 提供下载 | 免审 |
 
 图片和文件：
 
@@ -127,6 +127,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 **panel 没有内置鉴权。** 必须由部署侧保证只有可信网络能访问（私网、防火墙、隧道，或用 `DWELL_PANEL_HOST` 绑定到内网接口），不要暴露到公网。服务端做了请求准入：POST 强制 JSON Content-Type、Origin 同源、Host 限 IP 或配置名（用域名访问需配 `DWELL_PANEL_URL`）。
 
 - 侧栏按「我的任务 / 私聊 / 群聊 / 已归档」分组，实时显示 transcript（流式文本、工具调用、思考过程可折叠）
+- 工具行可下载 `dwell.lark.send` / `write` 产出的文件（限该会话工作目录内，强制附件下载不内联执行）
 - 可以新建 panel 任务、重命名、归档、清空上下文、中止、审批、管理用户
 - 向飞书会话发消息时，消息先以「From admin」形式出现在原聊天里，再由 bot 回复，群成员都看得到
 - 在 panel 里中止或清空飞书会话，原聊天会收到通知

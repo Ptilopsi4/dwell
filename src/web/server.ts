@@ -1,13 +1,14 @@
 // Panel HTTP 服务：无内置鉴权（部署侧自行保证网络边界，可用 DWELL_PANEL_HOST 绑定内网接口），SSE 推流（transcript + live 状态），静态页面。
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { createReadStream } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
 import { MODEL } from "../harness.ts";
-import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, type PendingApproval } from "../ext/approval.ts";
+import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
@@ -88,6 +89,34 @@ export function checkPanelRequest(
 export function healthOf(feishu: string, uptimeSec: number): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string } } {
 	const ok = feishu !== "failed";
 	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu } };
+}
+
+/** GET /api/file 判定：限本会话 cwd 内的普通文件。cwd 缺失（root 会话不设 cwd）绝不能退回 process.cwd()——那是应用根。 */
+export async function resolveDownload(cwd: string | undefined, path: string): Promise<{ status: 200; real: string; size: number; name: string } | { status: 400 | 403 | 404; error: string }> {
+	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
+	if (path === "") return { status: 400, error: "path required" };
+	if ((await sendPathViolation(path, cwd)) !== undefined) return { status: 403, error: "只能下载本会话工作目录内的文件" };
+	try {
+		// 判定过的真实路径再 stat，缩小「判定后换软链」的窗口（与 dwell.lark.send 同一纪律）
+		const real = await realpath(resolve(cwd, path));
+		const st = await stat(real);
+		if (!st.isFile()) return { status: 404, error: "不是普通文件" };
+		return { status: 200, real, size: st.size, name: basename(real) };
+	} catch {
+		return { status: 404, error: "文件不存在" };
+	}
+}
+
+/** 下载响应头：一律 attachment + nosniff——工作目录里的 html/svg 若被浏览器在 panel 同源下当页面执行，就能带会话上下文打 /api/*。 */
+export function downloadHeaders(name: string, size: number): Record<string, string> {
+	const ascii = name.replace(/[^\w.\-]/g, "_");
+	return {
+		"content-type": "application/octet-stream",
+		"content-length": String(size),
+		"content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+		"x-content-type-options": "nosniff",
+		"cache-control": "no-store",
+	};
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
@@ -307,6 +336,19 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			if (!Number.isFinite(id)) throw new HttpError(400, "bad request");
 			sessions.setNotify(id, body?.on === true);
 			json(res, 200, { ok: true, on: body?.on === true });
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/file") {
+			const convId = Number(url.searchParams.get("conv"));
+			const conversation = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
+			if (conversation === undefined) { json(res, 404, { error: "conversation not found" }); return; }
+			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
+			const result = await resolveDownload(cwd, url.searchParams.get("path") ?? "");
+			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
+			res.writeHead(200, downloadHeaders(result.name, result.size));
+			createReadStream(result.real)
+				.on("error", (err) => res.destroy(err))
+				.pipe(res);
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/events") {

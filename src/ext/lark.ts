@@ -284,7 +284,7 @@ function makeSendTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.send",
 		description:
-			"把工作目录里的文件发到当前会话的飞书聊天。典型场景：用户要你生成的报告、图表、导出数据，或任何你落盘的产物。限制：只能发本会话工作目录内的文件（路径治理拦截 .. 与软链逃逸）；只发到当前会话，不能发到其他会话或外部联系人；图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。用户要拿到你生成的文件时用本工具发送，不要只回复服务器路径。",
+			"把工作目录里的文件发到当前会话的飞书聊天。典型场景：用户要你生成的报告、图表、导出数据，或任何你落盘的产物。限制：只能发本会话工作目录内的文件（路径治理拦截 .. 与软链逃逸）；只发到当前会话，不能发到其他会话或外部联系人；图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。panel 任务里文件会在 panel 提供下载。用户要拿到你生成的文件时用本工具发送，不要只回复服务器路径。",
 		parameters: Type.Object({
 			path: Type.String({ description: "要发送的文件路径（相对会话工作目录或绝对路径）" }),
 		}),
@@ -292,9 +292,10 @@ function makeSendTool(deps: LarkDeps) {
 		async execute(args, api) {
 			const cwd = api.env?.cwd;
 			if (cwd === undefined) return text("当前会话没有配置工作目录，无法定位文件。", true);
-			const noChat = "当前会话（panel 任务）没有对应的飞书聊天，无法发送。";
 			const send = deps.sendToChat;
-			if (send === undefined || deps.chatOf(api.conversationId as number) === undefined) return text(noChat, true);
+			if (send === undefined) return text("发送链路未装配，无法发送。", true);
+			// panel 任务（无对应 chat）不发飞书，文件由 panel 工具行下载；与飞书发送共用同一套校验
+			const panelTask = deps.chatOf(api.conversationId as number) === undefined;
 			// 路径治理先于 stat：越界路径一律同一拒绝，不暴露 cwd 外文件是否存在
 			const violation = await sendPathViolation(args.path, cwd);
 			if (violation !== undefined) return text(violation, true);
@@ -306,13 +307,14 @@ function makeSendTool(deps: LarkDeps) {
 				if (!st.isFile()) return text(`不是普通文件：${args.path}`, true);
 				if (st.size === 0) return text(`文件 ${fileName} 为空（0 字节），飞书不允许发送空文件。`, true);
 				if (st.size > SEND_FILE_MAX) return text(`文件 ${fileName} 超过 30MB 上限（${(st.size / 1024 / 1024).toFixed(1)}MB），无法发送。`, true);
+				if (panelTask) return text(`已在 panel 提供下载：${fileName}（用户在 panel 的工具行点击下载）`);
 				const buffer = await readFile(target);
 				const isImage = sniffImageMime(buffer) !== null && buffer.length <= SEND_IMAGE_MAX;
 				const input: SendInput = isImage
 					? { image: { source: buffer } }
 					: { file: { source: buffer, fileName } };
 				const sent = await send(api.conversationId as number, input);
-				if (sent === undefined) return text(noChat, true);
+				if (sent === undefined) return text("飞书未连接，发送失败。", true);
 				return text(`已发送${isImage ? "图片" : "文件"} ${fileName} 到当前会话。`);
 			} catch (err) {
 				// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
