@@ -23,6 +23,17 @@ export function formatReport(error: unknown, info: ReportInfo, nameOf: (conversa
 	return lines.join("\n");
 }
 
+export type ReportRecord = { ts: number; type: string; text: string };
+
+/** 环形缓冲上限（条）：panel 只看最近告警，内存保留、重启即清，无需持久化。 */
+const REPORT_LIMIT = 50;
+const reportRecords: ReportRecord[] = [];
+
+/** 最近告警副本，新的在前（panel `GET /api/reports`）。 */
+export function recentReports(): ReportRecord[] {
+	return [...reportRecords].reverse();
+}
+
 export interface ReporterOptions {
 	/** 私发管理员文本（飞书未连接时由实现方空操作，日志已记）。 */
 	notify: (text: string) => void | Promise<void>;
@@ -58,6 +69,10 @@ export function makeReporter({ notify, onSessionFailed, nameOf, now = Date.now, 
 	const suppressed = new Map<string, number>();
 	return (error, info) => {
 		const text = formatReport(error, info, nameOf);
+		const at = now();
+		// 记入缓冲不受节流影响：panel 要看到全部告警，私聊才需要防刷屏
+		reportRecords.push({ ts: at, type: info.type, text });
+		if (reportRecords.length > REPORT_LIMIT) reportRecords.splice(0, reportRecords.length - REPORT_LIMIT);
 		// 日志带全字段（task/会话/extension），原始 error 单列保留堆栈
 		console.error("[dwell] report", text.replace(/\n- /g, " | "), error);
 		if (info.type === "session_failed") {
@@ -65,7 +80,6 @@ export function makeReporter({ notify, onSessionFailed, nameOf, now = Date.now, 
 			return;
 		}
 		const key = throttleKey(info);
-		const at = now();
 		const last = lastSent.get(key);
 		if (last !== undefined && at - last < windowMs) {
 			suppressed.set(key, (suppressed.get(key) ?? 0) + 1);

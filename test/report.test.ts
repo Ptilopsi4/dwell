@@ -1,9 +1,9 @@
 // node --test "test/report.test.ts"
-// 运行告警：formatReport 字段与截断；节流窗口与抑制计数（注入时钟）；session_failed 旁路；notify 失败不抛。
+// 运行告警：formatReport 字段与截断；节流窗口与抑制计数（注入时钟）；session_failed 旁路；notify 失败不抛；环形缓冲（模块级，测试间共享，断言用相对关系）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ConversationId, ReportInfo, ReportTask } from "@earendil-works/pi-durable";
-import { formatReport, makeReporter } from "../src/report.ts";
+import { formatReport, makeReporter, recentReports } from "../src/report.ts";
 
 const task = { id: 7, kind: "pi.generation", conversationId: 5 } as ReportTask;
 
@@ -91,6 +91,46 @@ test("session_failed 绕过节流直达 onSessionFailed", () => {
 	assert.equal(sent.length, 0);
 	assert.match(failed[0]!, /session_failed/);
 	assert.match(failed[0]!, /s1/);
+});
+
+test("环形缓冲：被节流抑制与 session_failed 的条目也记录，新的在前（模块级缓冲，用前后长度差断言）", () => {
+	let t = 1000;
+	const sent: string[] = [];
+	const failed: string[] = [];
+	const before = recentReports().length;
+	const onReport = makeReporter({
+		notify: (text) => { sent.push(text); },
+		onSessionFailed: (text) => { failed.push(text); },
+		nameOf: () => undefined,
+		now: () => t,
+	});
+	onReport(new Error("first"), { type: "task_faulted", task, reason: "threw" });
+	onReport(new Error("suppressed"), { type: "task_faulted", task, reason: "threw" }); // 窗口内被抑制，不私聊
+	t += 5;
+	onReport(new Error("failed"), { type: "session_failed" }); // 旁路节流直达 onSessionFailed
+	const recs = recentReports();
+	assert.equal(recs.length, before + 3);
+	assert.equal(recs[0]!.type, "session_failed"); // 新的在前
+	assert.equal(recs[0]!.ts, 1005); // ts 用注入的 now()
+	assert.match(recs[0]!.text, /failed/);
+	assert.match(recs[1]!.text, /suppressed/); // 被抑制的也记录
+	assert.match(recs[2]!.text, /first/);
+	assert.equal(sent.length, 1); // 私聊仍只发第一条
+	assert.equal(failed.length, 1);
+});
+
+test("环形缓冲：上限 50 条，写 60 条后长度仍 50 且首条为最后写入", () => {
+	const onReport = makeReporter({
+		notify: () => {},
+		onSessionFailed: () => {},
+		nameOf: () => undefined,
+		now: () => 0,
+	});
+	for (let i = 0; i < 60; i++) onReport(new Error(`e${i}`), { type: "extension_error", extension: `x${i}` });
+	const recs = recentReports();
+	assert.equal(recs.length, 50);
+	assert.match(recs[0]!.text, /e59/); // 新的在前：首条是最后写入的那条
+	assert.match(recs[49]!.text, /e10/); // e0–e9 已被丢
 });
 
 test("notify / onSessionFailed 同步抛错与 reject 都不让 onReport 抛", async () => {

@@ -64,6 +64,7 @@ svg.i.sm { width: 14px; height: 14px; }
 .side-head .conn { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted-foreground); }
 .side-head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .side-head .dot.off { background: var(--destructive); box-shadow: 0 0 0 3px color-mix(in srgb, var(--destructive) 18%, transparent); }
+.side-head .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 .side-search { position: relative; padding: 0 .65rem .55rem; }
 .side-search svg { position: absolute; left: 1.25rem; top: 50%; transform: translateY(-62%); color: var(--faint); pointer-events: none; }
 .side-search input { width: 100%; height: 30px; padding: 0 3rem 0 1.95rem; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--background); color: inherit; box-shadow: none; }
@@ -97,6 +98,8 @@ svg.i.sm { width: 14px; height: 14px; }
 .ops { display: flex; flex-wrap: wrap; gap: .35rem; }
 .side-foot { display: flex; gap: .3rem; padding: .55rem .6rem; border-top: 1px solid var(--border); }
 .side-foot .grow { flex: 1; justify-content: flex-start; color: var(--secondary-foreground); }
+#alertsBtn { position: relative; }
+#alertBadge { position: absolute; top: 1px; right: 0; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--destructive); color: #fff; font: 600 9.5px/15px system-ui; text-align: center; font-variant-numeric: tabular-nums; pointer-events: none; }
 
 /* ── 主区：顶栏与内容共用同一列宽，标题/元信息与正文对齐 ── */
 #mainArea { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
@@ -270,6 +273,14 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 .urow .who { flex: 1; min-width: 0; }
 .urow .who div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; }
 .urow .who small { font: 11px var(--mono); color: var(--faint); }
+.rrow { padding: .6rem 0; border-top: 1px solid var(--border); }
+.rrow .rh { display: flex; align-items: center; gap: .5rem; font-size: 12.5px; }
+.rrow .rt { font: 500 12px var(--mono); color: var(--destructive); }
+.rrow .rh small { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+.rrow .rh .new { width: 6px; height: 6px; border-radius: 50%; background: var(--destructive); flex: none; }
+.rrow .rb { margin-top: .3rem; font: 12px/1.6 var(--mono); color: var(--secondary-foreground); white-space: pre-wrap; word-break: break-word; }
+#rList { max-height: min(60vh, 520px); overflow: auto; }
+.rnote { margin: 0 0 .5rem; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
 .role { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 5px; background: var(--secondary); color: var(--muted-foreground); }
 .role.admin { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary); }
 </style>
@@ -293,6 +304,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 	</div>
 	<div class="side-foot">
 		<button class="btn grow" data-variant="ghost" data-size="sm" id="newConv"><span data-ic="plus" data-cls="sm"></span>新会话</button>
+		<button class="btn" data-variant="ghost" data-size="icon-sm" id="alertsBtn" title="运行告警"><span data-ic="bell"></span><span id="alertBadge" hidden></span></button>
 		<button class="btn" data-variant="ghost" data-size="icon-sm" id="usersBtn" title="用户管理"><span data-ic="users"></span></button>
 		<button class="btn" data-variant="ghost" data-size="icon-sm" id="theme" title="切换主题"></button>
 	</div>
@@ -380,6 +392,7 @@ const ICONS = {
 	search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
 	shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/>',
 	download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+	bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
 	direct: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
 	group: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
 	thread: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
@@ -708,9 +721,18 @@ function switchConv(id) {
 	es.onerror = () => setStatus(false);
 	if (matchMedia("(hover: hover)").matches) $("input").focus();
 }
-function setStatus(on) {
-	$("status").textContent = on ? "已连接" : "重连中…";
-	$("statusDot").classList.toggle("off", !on);
+/* ── 运行状态：panel SSE + 飞书长连接（/healthz）合成一个状态点 ── */
+// sseOn：null = 尚未打开任何会话流（不算断开）；feishu：/healthz 的 WSConnectionState，"off" = panel-only
+let sseOn = null, feishuState = null;
+const FEISHU_LABEL = { connected: "已连接", off: "panel-only", idle: "飞书未启动", connecting: "飞书连接中", reconnecting: "飞书重连中", failed: "飞书断开" };
+function setStatus(on) { sseOn = on; paintStatus(); }
+function paintStatus() {
+	const f = feishuState;
+	const level = sseOn === false || f === "failed" || f === "unreachable" ? "off" : f === "idle" || f === "connecting" || f === "reconnecting" ? "warn" : "ok";
+	$("status").textContent = sseOn === false ? "重连中…" : f === "unreachable" ? "服务无响应" : (FEISHU_LABEL[f] ?? (f === null ? "连接中" : f));
+	$("statusDot").classList.toggle("off", level === "off");
+	$("statusDot").classList.toggle("warn", level === "warn");
+	$("status").parentElement.title = `panel 实时通道：${sseOn === false ? "重连中" : sseOn ? "正常" : "未打开会话"}\n飞书长连接：${f ?? "未知"}`;
 }
 
 /* ── transcript ── */
@@ -1169,6 +1191,49 @@ async function openUsers() {
 }
 $("usersBtn").onclick = openUsers;
 
+/* ── 运行告警：服务端保留最近 50 条（重启即清），已读位置只存本浏览器 ── */
+let reports = [];
+const SEEN_KEY = "dwell-alerts-seen";
+const seenTs = () => Number(localStorage.getItem(SEEN_KEY) ?? 0);
+function paintAlerts() {
+	const unread = reports.filter((r) => r.ts > seenTs()).length;
+	const badge = $("alertBadge");
+	badge.hidden = unread === 0;
+	badge.textContent = unread > 99 ? "99+" : String(unread);
+	$("alertsBtn").title = unread > 0 ? `运行告警（${unread} 条未读）` : "运行告警";
+}
+async function loadHealth() {
+	// /healthz 在飞书 failed 时是 503 但仍带 JSON；请求本身失败才算服务无响应
+	const health = await fetch("/healthz").then((r) => r.json()).catch(() => null);
+	feishuState = health?.feishu ?? "unreachable";
+	paintStatus();
+	const list = await api("reports").catch(() => null);
+	if (list !== null) { reports = list; paintAlerts(); }
+}
+function openAlerts() {
+	const seen = seenTs();
+	$("sheetTitle").textContent = "运行告警";
+	$("sheetBody").innerHTML = `<p class="rnote">任务故障、扩展报错等，最近 50 条；服务重启后清空。飞书已连接时同步私聊管理员（同类 10 分钟内只发一条）。</p>
+		<div id="rList"></div>
+		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
+	const box = $("rList");
+	if (reports.length === 0) box.innerHTML = `<div class="side-empty">暂无告警</div>`;
+	for (const r of reports) {
+		const [head = "", ...rest] = r.text.split("\n");
+		const row = document.createElement("div");
+		row.className = "rrow";
+		row.innerHTML = `<div class="rh">${r.ts > seen ? '<span class="new"></span>' : ""}<span class="rt"></span><small></small></div><div class="rb"></div>`;
+		row.querySelector(".rt").textContent = head.replace(/^\*\*dwell 告警\*\* · /, "");
+		row.querySelector("small").textContent = `${relTime(r.ts)} · ${new Date(r.ts).toLocaleString()}`;
+		row.querySelector(".rb").textContent = rest.map((l) => l.replace(/^- /, "")).join("\n");
+		box.appendChild(row);
+	}
+	if (reports.length > 0) localStorage.setItem(SEEN_KEY, String(reports[0].ts));
+	paintAlerts();
+	if (!$("sheet").open) $("sheet").showModal();
+}
+$("alertsBtn").onclick = openAlerts;
+
 /* ── 快捷键：Ctrl/⌘+K 搜索会话，Esc 关闭菜单/抽屉/清空搜索 ── */
 document.addEventListener("keydown", (e) => {
 	if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -1200,7 +1265,8 @@ $("tobottom").onclick = () => main.scrollTo({ top: main.scrollHeight, behavior: 
 const reflowFloat = () => { $("tobottom").style.bottom = (document.querySelector(".dock").offsetHeight + 14) + "px"; };
 new ResizeObserver(reflowFloat).observe(document.querySelector(".dock"));
 
-setInterval(() => { loadApprovals(); loadConvs(true).catch(() => {}); }, 5000);
+setInterval(() => { loadApprovals(); loadConvs(true).catch(() => {}); loadHealth(); }, 5000);
+loadHealth();
 loadConvs().then(loadApprovals).catch((e) => { setStatus(false); toast("加载会话失败 " + e.message, true); });
 </script>
 </body>

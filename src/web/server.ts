@@ -9,6 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
 import { MODEL } from "../harness.ts";
 import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
+import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
@@ -251,6 +252,10 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			// 待审队列（等人事项优先展示，借 dsh panel 哲学）
 			const list = [...pendingApprovals.entries()].map(([key, p]) => ({ key, ...p }));
 			json(res, 200, list);
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/reports") {
+			json(res, 200, recentReports());
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/users") {
