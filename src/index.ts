@@ -15,7 +15,7 @@ import { connectChannel, downloadMessageResource, matchMention, type CardActionE
 import { emptyReply, fallbackRoute, groupAdmits, messageAction } from "./pipeline.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
-import { approvals, clampMinutes, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
+import { approvals, clampMinutes, decisionInput, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
@@ -25,7 +25,7 @@ let sessions: Sessions;
 let channel: LarkChannel;
 const users = new Users();
 let directory: Directory;
-/** panel 操作者（pt）：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
+/** panel 操作者：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
 let panelUser = "";
 /** 图片理解 subagent（main 启动时装配，凭证读闭包；无 ZAI key 时为 null，图片降级为落盘+提示） */
 let imageDescriber: ImageDescriber | null = null;
@@ -599,7 +599,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, `已批准：本任务线 ${minutes} 分钟内危险命令免拦截，继续执行。`);
 				const s = await conversation.submit({
 					type: "input",
-					content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
+					content: decisionInput("approve", minutes),
 					whenBusy: "steer",
 					requestId: `${msg.messageId}-approve`,
 				}, context);
@@ -901,7 +901,7 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 		void persistApprovals();
 		const s = await conversation.submit({
 			type: "input",
-			content: `用户已批准危险命令窗口（${minutes} 分钟）。请继续之前的任务，重试被拦截的命令。`,
+			content: decisionInput("approve", minutes),
 			whenBusy: "steer",
 			requestId: `card-${evt.messageId}-approve`,
 		}, context);
@@ -912,7 +912,7 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 		void persistApprovals();
 		const s = await conversation.submit({
 			type: "input",
-			content: "用户拒绝了危险命令。请停止该操作并改用其他方案，或询问用户意图。",
+			content: decisionInput("deny", minutes),
 			whenBusy: "steer",
 			requestId: `card-${evt.messageId}-deny`,
 		}, context);

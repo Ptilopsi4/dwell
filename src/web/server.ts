@@ -68,7 +68,7 @@ const isIpv6 = (s: string): boolean => s.includes(":");
 
 /**
  * panel 请求准入：POST 强制 JSON Content-Type；有 Origin 时必须与 Host 同源；Host 限 IP 字面量或配置名。
- * 依据：text/plain 跨域 POST 不触发预检、攻击页可借 pt 浏览器打内网 panel（CSRF）；DNS rebinding 用任意域名作 Host 读 SSE。
+ * 依据：text/plain 跨域 POST 不触发预检、攻击页可借操作者浏览器打内网 panel（CSRF）；DNS rebinding 用任意域名作 Host 读 SSE。
  * IP 字面量放行是因为绑定地址不定（DWELL_PANEL_HOST 缺省监听全部接口），而 rebinding 域名不会是 IP。
  */
 export function checkPanelRequest(

@@ -7,7 +7,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi
 import { AssistantEntry } from "@earendil-works/pi-durable";
 import { MODEL, MODEL_KEY_ENV, openDwell } from "./harness.ts";
 
-const prompt = process.argv[2] ?? "用一句话介绍你自己，然后列出你当前工作目录里的文件。";
+const prompt = process.argv[2] ?? "Introduce yourself in one sentence, then list the files in your current working directory.";
 
 let harness;
 let model = MODEL;

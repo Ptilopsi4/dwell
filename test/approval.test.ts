@@ -62,11 +62,11 @@ const ROOT = resolve(fileURLToPath(new URL("../src/ext", import.meta.url)), ".."
 const CWD = join(resolve(DATA_DIR), "work", "oc_demo");
 
 test("read 禁状态/应用根/数据库/proc，其余放行", () => {
-	assert.match(fileToolViolation("read", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /不允许读取/);
-	assert.match(fileToolViolation("read", "../../../state/users.json", CWD) ?? "", /不允许读取/); // 相对路径 .. 逃逸归一化后命中
-	assert.match(fileToolViolation("read", join(ROOT, "src/index.ts"), CWD) ?? "", /不允许读取/);
-	assert.match(fileToolViolation("read", join(resolve(DATA_DIR), "dwell.sqlite-wal"), CWD) ?? "", /不允许读取/);
-	assert.match(fileToolViolation("read", "/proc/self/environ", CWD) ?? "", /不允许读取/);
+	assert.match(fileToolViolation("read", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /is not allowed/);
+	assert.match(fileToolViolation("read", "../../../state/users.json", CWD) ?? "", /is not allowed/); // 相对路径 .. 逃逸归一化后命中
+	assert.match(fileToolViolation("read", join(ROOT, "src/index.ts"), CWD) ?? "", /is not allowed/);
+	assert.match(fileToolViolation("read", join(resolve(DATA_DIR), "dwell.sqlite-wal"), CWD) ?? "", /is not allowed/);
+	assert.match(fileToolViolation("read", "/proc/self/environ", CWD) ?? "", /is not allowed/);
 	assert.equal(fileToolViolation("read", "/etc/os-release", CWD), undefined);
 	assert.equal(fileToolViolation("read", "uploads/a.png", CWD), undefined);
 });
@@ -74,9 +74,9 @@ test("read 禁状态/应用根/数据库/proc，其余放行", () => {
 test("write/edit 限本会话 cwd 与系统临时目录", () => {
 	assert.equal(fileToolViolation("write", "out/report.md", CWD), undefined);
 	assert.equal(fileToolViolation("edit", "src/a.ts", CWD), undefined);
-	assert.match(fileToolViolation("write", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /仅限/);
-	assert.match(fileToolViolation("write", "../../other/x.txt", CWD) ?? "", /仅限/); // 逃出 cwd 的相对路径
-	assert.match(fileToolViolation("edit", join(ROOT, "src/index.ts"), CWD) ?? "", /仅限/);
+	assert.match(fileToolViolation("write", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /limited to/);
+	assert.match(fileToolViolation("write", "../../other/x.txt", CWD) ?? "", /limited to/); // 逃出 cwd 的相对路径
+	assert.match(fileToolViolation("edit", join(ROOT, "src/index.ts"), CWD) ?? "", /limited to/);
 });
 
 test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦下", async (t) => {
@@ -95,9 +95,9 @@ test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦
 	}
 	if (linked) {
 		// write 走链接路径：按目标（state 目录）判，拦
-		assert.match((await fileToolViolationReal("write", "lnk/users.json", work)) ?? "", /仅限/);
+		assert.match((await fileToolViolationReal("write", "lnk/users.json", work)) ?? "", /limited to/);
 		// read 同理
-		assert.match((await fileToolViolationReal("read", "lnk/sessions.json", work)) ?? "", /不允许读取/);
+		assert.match((await fileToolViolationReal("read", "lnk/sessions.json", work)) ?? "", /is not allowed/);
 	} else {
 		t.skip("当前环境无法创建符号链接");
 	}
@@ -105,7 +105,7 @@ test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦
 	assert.equal(await fileToolViolationReal("write", "new-sub/dir/file.txt", work), undefined);
 	// 相对路径 .. 逃逸到 /proc（Linux：tmpdir 在 /tmp，上溯三级到根；Windows 归一化成盘符路径，由原始路径检查兼顾不到，不测）
 	if (process.platform === "linux") {
-		assert.match((await fileToolViolationReal("read", "../../../proc/self/environ", work)) ?? "", /不允许读取/);
+		assert.match((await fileToolViolationReal("read", "../../../proc/self/environ", work)) ?? "", /is not allowed/);
 	}
 });
 
@@ -143,8 +143,8 @@ test("sendPathViolation：cwd 内相对/绝对路径放行，.. 越界与 tmp �
 	assert.equal(await sendPathViolation("a.txt", work), undefined);
 	assert.equal(await sendPathViolation(join(work, "a.txt"), work), undefined);
 	assert.equal(await sendPathViolation("sub/../a.txt", work), undefined);
-	assert.match((await sendPathViolation("../evil.txt", work)) ?? "", /已拒绝/);
-	assert.match((await sendPathViolation(join(tmpdir(), "x.txt"), work)) ?? "", /已拒绝/);
+	assert.match((await sendPathViolation("../evil.txt", work)) ?? "", /denied:/);
+	assert.match((await sendPathViolation(join(tmpdir(), "x.txt"), work)) ?? "", /denied:/);
 });
 
 test("sendPathViolation：cwd 内软链指向外部目录拒（realpath 后判定）", async (t) => {
@@ -165,5 +165,5 @@ test("sendPathViolation：cwd 内软链指向外部目录拒（realpath 后判�
 		t.skip("当前环境无法创建符号链接");
 		return;
 	}
-	assert.match((await sendPathViolation("lnk/secret.txt", work)) ?? "", /已拒绝/);
+	assert.match((await sendPathViolation("lnk/secret.txt", work)) ?? "", /denied:/);
 });

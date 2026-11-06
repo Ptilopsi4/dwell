@@ -94,12 +94,12 @@ export const MODEL: { readonly provider: string; readonly modelId: string } = { 
 /** 当前 provider 的凭证 env 名（smoke 判断是否走真实链路）。 */
 export const MODEL_KEY_ENV = PROVIDERS[providerId].keyEnv;
 
-const PREAMBLE = `你是 dwell，一个常驻服务器的通用助手。通过飞书对话与人交流。
-- 用中文回答，技术术语保留英文
-- 回答直接给结论和内容，不写客套开场白
-- 单条回复保持简短（百字量级）；长内容给要点，被追问再展开
-- 文件操作在你的工作目录内进行；不确定的事直说不确定
-- 命令被审批策略拦截时，如实告知用户需要回复 /approve，不要尝试绕过`;
+const PREAMBLE = `You are dwell, a general-purpose assistant running on a server. People reach you through Feishu chats and a web panel.
+- Reply in the language the user writes in; keep technical terms in their original form
+- Lead with the answer or the content; no pleasantries or preamble
+- Keep each reply short (a few sentences); for long material give the key points and expand when asked
+- Work on files inside your working directory; say plainly when you are not sure
+- When the approval policy blocks a command, tell the user honestly that they need to reply /approve; do not try to work around it`;
 
 const DwellExtension = defineExtension({
 	name: "dwell",
@@ -196,7 +196,7 @@ export function makeImageDescriber(): ImageDescriber | null {
 				{
 					role: "user",
 					content: [
-						{ type: "text", text: "详细描述这张图片：主体与场景、关键细节；如有文字全部转录；如有图表/数据给出关键数字。用中文，直接给描述，不要客套。" },
+						{ type: "text", text: "Describe this image in detail: the subject and setting, and the key details. Transcribe all visible text verbatim in its original language. For charts or data, give the key numbers. Write the description in English and give only the description." },
 						{ type: "image", data: base64, mimeType },
 					],
 					timestamp: Date.now(),
@@ -206,6 +206,6 @@ export function makeImageDescriber(): ImageDescriber | null {
 		const answer = await models.completeSimple(model, context, { maxTokens: 1024 });
 		if (answer.errorMessage !== undefined) throw new Error(answer.errorMessage);
 		const text = answer.content.filter((part) => part.type === "text").map((part) => part.text).join("");
-		return text.trim() !== "" ? text : "(模型未返回描述)";
+		return text.trim() !== "" ? text : "(the model returned no description)";
 	};
 }

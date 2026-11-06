@@ -33,13 +33,13 @@ export function parseSseFrame(body: string): McpFrame {
 			// 跳过非 JSON 帧（如注释行）
 		}
 	}
-	throw new McpError("MCP 响应中没有 JSON-RPC 帧");
+	throw new McpError("MCP response contains no JSON-RPC frame");
 }
 
 /** content[0].text 实测包了两层：传输层 text 值是 JSON 字符串编码，parse 一次后往往还是字符串，需再 parse。 */
 export function unwrapToolText(content: { type: string; text?: string }[] | undefined): unknown {
 	let value: unknown = content?.find((part) => part.type === "text")?.text;
-	if (value === undefined) throw new McpError("MCP 响应缺少文本内容");
+	if (value === undefined) throw new McpError("MCP response has no text content");
 	for (let depth = 0; depth < 2 && typeof value === "string"; depth++) {
 		try {
 			value = JSON.parse(value);
@@ -74,7 +74,7 @@ export class McpClient {
 	private async request(tool: string, args: Record<string, unknown>): Promise<unknown> {
 		const sessionId = await (this.ready ??= this.handshake());
 		const body = await this.post({ jsonrpc: "2.0", id: this.nextId++, method: "tools/call", params: { name: tool, arguments: args } }, sessionId);
-		if (body.error !== undefined) throw new McpError(body.error.message ?? "MCP 调用失败", body.error.code);
+		if (body.error !== undefined) throw new McpError(body.error.message ?? "MCP call failed", body.error.code);
 		const frame: McpFrame = body;
 		return unwrapToolText(frame.result?.content);
 	}
@@ -89,9 +89,9 @@ export class McpClient {
 			},
 			null,
 		);
-		if (init.error !== undefined) throw new McpError(init.error.message ?? "MCP 握手失败", init.error.code);
+		if (init.error !== undefined) throw new McpError(init.error.message ?? "MCP handshake failed", init.error.code);
 		const sessionId = init.sessionId;
-		if (sessionId === undefined) throw new McpError("MCP 握手响应缺少 Mcp-Session-Id");
+		if (sessionId === undefined) throw new McpError("MCP handshake response is missing Mcp-Session-Id");
 		await this.post({ jsonrpc: "2.0", method: "notifications/initialized" }, sessionId, true);
 		return sessionId;
 	}
@@ -112,7 +112,7 @@ export class McpClient {
 				signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
 			});
 		} catch (err) {
-			throw new McpError(err instanceof Error ? err.message : "网络请求失败");
+			throw new McpError(err instanceof Error ? err.message : "network request failed");
 		}
 		if (!response.ok) throw new McpError(`HTTP ${response.status}`);
 		if (notification || response.body === null) return {};
@@ -131,13 +131,13 @@ function makeTools(apiKey: string): ToolRegistration[] {
 	const searchTool = defineTool({
 		name: "dwell.web.search",
 		description:
-			"全网搜索（智谱引擎），返回带摘要的来源列表。用于时效性信息（版本/新闻/价格）、事实查证、不熟悉领域的调研。回答时附来源 URL。查询无果时先换关键词再考虑 dwell.web.fetch。",
+			"Web search (Zhipu engine); returns a list of sources with summaries. Use it for time-sensitive information (versions, news, prices), fact checks, and research in unfamiliar areas. Cite source URLs in your answer. If a query returns nothing, try other keywords before falling back to dwell.web.fetch.",
 		parameters: Type.Object({
-			query: Type.String({ description: "搜索词（≤70 字效果最佳）" }),
-			recency: Type.Optional(Type.Union(RECENCY.map((value) => Type.Literal(value)), { description: "时间范围：oneDay/oneWeek/oneMonth/oneYear" })),
-			location: Type.Optional(Type.Union([Type.Literal("cn"), Type.Literal("us")], { description: "结果地区偏好，默认 cn" })),
-			contentSize: Type.Optional(Type.Union([Type.Literal("medium"), Type.Literal("high")], { description: "摘要详尽度，medium 400-600 字（默认）/ high 2500 字" })),
-			domain: Type.Optional(Type.String({ description: "限定域名，如 docs.example.com" })),
+			query: Type.String({ description: "Search query (works best at 70 characters or fewer)" }),
+			recency: Type.Optional(Type.Union(RECENCY.map((value) => Type.Literal(value)), { description: "Time range: oneDay/oneWeek/oneMonth/oneYear" })),
+			location: Type.Optional(Type.Union([Type.Literal("cn"), Type.Literal("us")], { description: "Preferred result region, default cn" })),
+			contentSize: Type.Optional(Type.Union([Type.Literal("medium"), Type.Literal("high")], { description: "Summary length: medium is 400-600 characters (default), high is about 2500" })),
+			domain: Type.Optional(Type.String({ description: "Restrict to a domain, e.g. docs.example.com" })),
 		}),
 		replay: "safe",
 		async execute(args) {
@@ -152,15 +152,15 @@ function makeTools(apiKey: string): ToolRegistration[] {
 				});
 			} catch (err) {
 				const details: SearchDetails = { query: args.query, count: 0, error: true };
-				return { output: [{ type: "text", text: `搜索失败：${err instanceof Error ? err.message : String(err)}` }], isError: true, details };
+				return { output: [{ type: "text", text: `Search failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true, details };
 			}
 			if (!Array.isArray(results) || results.length === 0) {
 				const details: SearchDetails = { query: args.query, count: 0, error: false };
-				return { output: [{ type: "text", text: `「${args.query}」无搜索结果，建议更换关键词。` }], details };
+				return { output: [{ type: "text", text: `No results for "${args.query}"; try different keywords.` }], details };
 			}
 			const lines = results.map((item, index) => {
 				const r = item as { title?: string; link?: string; content?: string };
-				return `${index + 1}. ${r.title ?? "(无标题)"}\n   ${r.link ?? ""}\n   ${r.content ?? ""}`;
+				return `${index + 1}. ${r.title ?? "(untitled)"}\n   ${r.link ?? ""}\n   ${r.content ?? ""}`;
 			});
 			const details: SearchDetails = { query: args.query, count: results.length, error: false };
 			return { output: [{ type: "text", text: lines.join("\n\n") }], details };
@@ -169,10 +169,10 @@ function makeTools(apiKey: string): ToolRegistration[] {
 
 	const fetchTool = defineTool({
 		name: "dwell.web.fetch",
-		description: "读取网页 URL 的正文（服务端抓取并转为 markdown）。用于细读搜索结果、用户发来的链接。",
+		description: "Read the main text of a web page URL (fetched server-side and converted to markdown). Use it to read search results closely or links the user sends.",
 		parameters: Type.Object({
-			url: Type.String({ description: "要读取的 URL（http/https）" }),
-			format: Type.Optional(Type.Union([Type.Literal("markdown"), Type.Literal("text")], { description: "返回格式，默认 markdown" })),
+			url: Type.String({ description: "URL to read (http/https)" }),
+			format: Type.Optional(Type.Union([Type.Literal("markdown"), Type.Literal("text")], { description: "Output format, default markdown" })),
 		}),
 		replay: "safe",
 		outputLimits: { retain: "head", maxBytes: 48 * 1024 },
@@ -186,12 +186,12 @@ function makeTools(apiKey: string): ToolRegistration[] {
 				});
 			} catch (err) {
 				const details: FetchDetails = { url: args.url, title: "", bytes: 0, error: true, empty: false };
-				return { output: [{ type: "text", text: `读取失败：${err instanceof Error ? err.message : String(err)}` }], isError: true, details };
+				return { output: [{ type: "text", text: `Read failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true, details };
 			}
 			const p = page as { title?: string; description?: string; url?: string; content?: string };
 			if (typeof p.content !== "string" || p.content === "") {
 				const details: FetchDetails = { url: args.url, title: "", bytes: 0, error: false, empty: true };
-				return { output: [{ type: "text", text: "该 URL 没有可读正文（可能是纯交互页/二进制），可尝试 dwell.web.search 站内检索。" }], details };
+				return { output: [{ type: "text", text: "This URL has no readable main text (it may be an interactive page or a binary); try dwell.web.search with a site restriction." }], details };
 			}
 			const head = `# ${p.title ?? p.url ?? args.url}\n${p.url ?? args.url}\n\n`;
 			const details: FetchDetails = { url: args.url, title: p.title ?? "", bytes: p.content.length, error: false, empty: false };
@@ -210,7 +210,7 @@ export function makeWebExtension(apiKey: string) {
 		sections: [
 			section(
 				"web",
-				() => "可联网：dwell.web.search 全网搜索，dwell.web.fetch 读网页正文。时效性/不确定的事实先查证再回答，附来源 URL；用户发链接时用 fetch 读原文。",
+				() => "You can go online: dwell.web.search searches the web and dwell.web.fetch reads a page's main text. Check time-sensitive or uncertain facts before answering, and cite source URLs. When the user sends a link, read the original with fetch.",
 				{ tag: false },
 			),
 		],

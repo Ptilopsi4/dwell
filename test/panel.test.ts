@@ -34,7 +34,7 @@ test("合法请求放行：IP 直连 / 配置名 / 同源 POST", () => {
 });
 
 test("CSRF：跨站 Origin 拒绝，text/plain POST 拒绝", () => {
-	// 攻击页从 evil.com 借 pt 浏览器向内网 panel 发 POST（text/plain 免预检）
+	// 攻击页从 evil.com 借操作者浏览器向内网 panel 发 POST（text/plain 免预检）
 	assert.equal(ok({ method: "POST", host: "10.0.0.5:7788", origin: "https://evil.com", contentType: "text/plain" }), false);
 	assert.equal(ok({ method: "POST", host: "10.0.0.5:7788", contentType: "text/plain" }), false); // 无 Origin 但 CT 不对
 	assert.equal(ok({ method: "POST", host: "10.0.0.5:7788", origin: "null", contentType: "application/json" }), false); // 沙箱 iframe

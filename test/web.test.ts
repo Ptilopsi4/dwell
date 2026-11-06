@@ -19,7 +19,7 @@ test("parseSseFrame 取 error 帧", () => {
 });
 
 test("parseSseFrame 无 JSON-RPC 帧则抛错", () => {
-	assert.throws(() => parseSseFrame("data: not json\ndata:{\"x\":1}\n"), /没有 JSON-RPC 帧/);
+	assert.throws(() => parseSseFrame("data: not json\ndata:{\"x\":1}\n"), /no JSON-RPC frame/);
 });
 
 test("unwrapToolText 解包双层 JSON（智谱实测格式）", () => {
@@ -41,7 +41,7 @@ test("unwrapToolText 纯文本原样返回", () => {
 });
 
 test("unwrapToolText 缺内容抛错", () => {
-	assert.throws(() => unwrapToolText(undefined), /缺少文本内容/);
+	assert.throws(() => unwrapToolText(undefined), /no text content/);
 });
 
 test("McpClient 失败后重建会话并重试成功", async () => {

@@ -54,7 +54,7 @@ test("默认读当前会话，按时间正序，带消息 id 与发送者", asyn
 	]);
 	const r = await toolOf(deps).execute({}, api, context);
 	const text = out(r as never);
-	assert.match(text, /最近消息（正序/);
+	assert.match(text, /Recent messages in .*\(oldest first/);
 	assert.ok(text.indexOf("张三 (om_a): 第一条") < text.indexOf("李四 (om_b): 第二条"), "正序排列");
 });
 
@@ -66,7 +66,7 @@ test("媒体与富文本占位/截断", async () => {
 	]);
 	const r = await toolOf(deps).execute({ count: 2 }, api, context);
 	const text = out(r as never);
-	assert.match(text, /\[图片\]/);
+	assert.match(text, /\[image\]/);
 	assert.match(text, new RegExp(`x{200}…`)); // 单条截 200 字
 });
 
@@ -81,7 +81,7 @@ test("around：get 定位后前后拼装去重（同会话）", async () => {
 	// Asc + start_time 必须显式带 end_time，否则飞书默认 end=0 报 230001（历史假修复，回归断言）
 	const after = calls.find((c) => c.startsWith("list:oc_current:ByCreateTimeAsc:1500:"));
 	assert.ok(after !== undefined && after.split(":")[4] !== "", "后半段必须携带 end_time");
-	assert.ok(out(r as never).includes("最近消息"));
+	assert.ok(out(r as never).includes("Recent messages"));
 });
 
 test("跨会话读取（chat/around 指向别的会话）仅管理员放行", async () => {
@@ -89,25 +89,25 @@ test("跨会话读取（chat/around 指向别的会话）仅管理员放行", as
 	// 普通成员：chat 参数直指他群 → 拒绝
 	let deps: LarkDeps = fakeDeps([], anchorOther).deps;
 	let r = await toolOf(deps).execute({ chat: "oc_other" }, api, context);
-	assert.match(out(r as never), /仅管理员可用/);
+	assert.match(out(r as never), /admin-only/);
 	// 普通成员：around 锚点落在他群 → 拒绝（list 不应发出）
 	deps = fakeDeps([], anchorOther).deps;
 	r = await toolOf({ ...deps, senderOf: () => "ou_member", isAdmin: () => false }).execute({ around: "om_2" }, api, context);
-	assert.match(out(r as never), /仅管理员可用/);
+	assert.match(out(r as never), /admin-only/);
 	// 管理员：around 跨群放行
 	deps = fakeDeps([{ message_id: "om_1" }], anchorOther).deps;
 	r = await toolOf({ ...deps, senderOf: () => "ou_admin", isAdmin: (id: string) => id === "ou_admin" }).execute({ around: "om_2" }, api, context);
-	assert.match(out(r as never), /最近消息/);
+	assert.match(out(r as never), /Recent messages/);
 	// 无发起者信息（重启后归属缺失）：从严拒绝
 	deps = fakeDeps([], anchorOther).deps;
 	r = await toolOf({ ...deps, isAdmin: () => true }).execute({ chat: "oc_other" }, api, context);
-	assert.match(out(r as never), /仅管理员可用/);
+	assert.match(out(r as never), /admin-only/);
 });
 
 test("panel 会话（无对应 chat）给明确提示", async () => {
 	const { deps } = fakeDeps([]);
 	const r = await toolOf(deps).execute({}, { conversationId: 99 } as never, context);
-	assert.match(out(r as never), /panel 任务.*没有对应的飞书聊天/);
+	assert.match(out(r as never), /panel task.*no Feishu chat/);
 });
 
 test("API 错误返回 isError", async () => {
@@ -130,7 +130,7 @@ test("卡片消息：app 发的卡（含降级文案）直接标注，用户卡�
 	]);
 	const r = await toolOf(deps).execute({ count: 2 }, api, context);
 	const text = out(r as never);
-	assert.match(text, /\[dwell 的回复卡片，正文见会话上下文\]/); // app 卡不提取（降级文案不污染）
+	assert.match(text, /\[dwell reply card; its content is in the conversation context\]/); // app 卡不提取（降级文案不污染）
 	assert.doesNotMatch(text, /请升级至最新版本/);
 	assert.match(text, /值班日报/); // 用户卡提取 lark_md
 });
@@ -138,7 +138,7 @@ test("卡片消息：app 发的卡（含降级文案）直接标注，用户卡�
 test("空结果提示", async () => {
 	const { deps } = fakeDeps([]);
 	const r = await toolOf(deps).execute({}, api, context);
-	assert.match(out(r as never), /没有可读消息/);
+	assert.match(out(r as never), /No readable messages/);
 });
 
 // ── dwell.lark.image：按消息 id 按需识图 ──
@@ -192,10 +192,10 @@ test("image：表情包/非图片/无描述器/消息不存在各给诚实提示
 		const r = await imageToolOf(imageDeps(item, describer).deps).execute({ message: "om_x" }, api, context);
 		assert.match(out(r as never), re);
 	};
-	await run({ message_id: "om_x", msg_type: "sticker" }, async () => "", /表情包，暂不支持/);
-	await run({ message_id: "om_x", msg_type: "text" }, async () => "", /不是图片/);
-	await run({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "k" }) } }, null, /未配置视觉模型/);
-	await run(undefined, async () => "", /不存在或 bot 无权读取/);
+	await run({ message_id: "om_x", msg_type: "sticker" }, async () => "", /sticker, which cannot be recognized/);
+	await run({ message_id: "om_x", msg_type: "text" }, async () => "", /not an image/);
+	await run({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "k" }) } }, null, /No vision model is configured/);
+	await run(undefined, async () => "", /does not exist or the bot cannot read it/);
 });
 
 // ── dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话 ──
@@ -237,7 +237,7 @@ test("send：PNG 魔数走图片消息", async (t) => {
 	await writeFile(join(cwd, "chart.png"), PNG);
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: "chart.png" }, sendApi(cwd), context);
-	assert.match(out(r as never), /已发送图片 chart\.png/);
+	assert.match(out(r as never), /Sent image chart\.png/);
 	assert.equal(inputs.length, 1);
 	assert.equal(inputs[0].id, 42);
 	assert.ok("image" in inputs[0].input && Buffer.isBuffer(inputs[0].input.image.source));
@@ -248,7 +248,7 @@ test("send：普通文本走文件消息且 fileName 正确（绝对路径入参
 	await writeFile(join(cwd, "report.md"), "# 报告");
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: join(cwd, "report.md") }, sendApi(cwd), context);
-	assert.match(out(r as never), /已发送文件 report\.md/);
+	assert.match(out(r as never), /Sent file report\.md/);
 	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "report.md" && Buffer.isBuffer(inputs[0].input.file.source));
 });
 
@@ -257,7 +257,7 @@ test("send：空文件拒", async (t) => {
 	await writeFile(join(cwd, "empty.bin"), "");
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: "empty.bin" }, sendApi(cwd), context);
-	assert.match(out(r as never), /不允许发送空文件/);
+	assert.match(out(r as never), /does not allow sending empty files/);
 	assert.equal(inputs.length, 0);
 });
 
@@ -265,7 +265,7 @@ test("send：越界路径拒且不调 sendToChat", async (t) => {
 	const cwd = await tempCwd(t);
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: "../outside.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /已拒绝/);
+	assert.match(out(r as never), /denied:/);
 	assert.equal(inputs.length, 0);
 });
 
@@ -273,9 +273,9 @@ test("send：sendToChat 返回 undefined（飞书未连接）与缺 env.cwd 各�
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "x");
 	let r = await sendToolOf(sendDeps(true).deps).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /飞书未连接，发送失败/);
+	assert.match(out(r as never), /Feishu is not connected; send failed/);
 	r = await sendToolOf(sendDeps().deps).execute({ path: "a.txt" }, { conversationId: 42 } as never, context);
-	assert.match(out(r as never), /没有配置工作目录/);
+	assert.match(out(r as never), /has no working directory/);
 });
 
 test("send：超过 30MB 拒（稀疏文件，stat 阶段拦截不读入内存）", async (t) => {
@@ -286,7 +286,7 @@ test("send：超过 30MB 拒（稀疏文件，stat 阶段拦截不读入内存�
 	await handle.close();
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: "big.bin" }, sendApi(cwd), context);
-	assert.match(out(r as never), /超过 30MB/);
+	assert.match(out(r as never), /exceeds the 30MB limit/);
 	assert.equal(inputs.length, 0);
 });
 
@@ -299,7 +299,7 @@ test("send：超过 10MB 的图片改走文件消息", async (t) => {
 	await handle.close();
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf(deps).execute({ path: "huge.png" }, sendApi(cwd), context);
-	assert.match(out(r as never), /已发送文件 huge\.png/);
+	assert.match(out(r as never), /Sent file huge\.png/);
 	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "huge.png");
 });
 
@@ -308,7 +308,7 @@ test("send：panel 任务返回 panel 下载提示且不调 sendToChat", async (
 	await writeFile(join(cwd, "a.txt"), "x");
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /已在 panel 提供下载：a\.txt/);
+	assert.match(out(r as never), /Offered as a download in the panel: a\.txt/);
 	assert.equal(inputs.length, 0);
 });
 
@@ -316,6 +316,6 @@ test("send：panel 任务越界路径仍被拒", async (t) => {
 	const cwd = await tempCwd(t);
 	const { deps, inputs } = sendDeps();
 	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "../outside.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /已拒绝/);
+	assert.match(out(r as never), /denied:/);
 	assert.equal(inputs.length, 0);
 });

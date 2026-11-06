@@ -80,14 +80,14 @@ function messageText(item: MessageItem): string {
 	else if (item.msg_type === "post") text = JSON.stringify(parsed).match(/"text":"[^"]*"/g)?.map((s) => s.slice(8, -1)).join(" ") ?? "";
 	else if (item.msg_type === "interactive") {
 		// bot 自己的卡（流式回复/审批）不走提取：cardkit 降级文案会污染内容，且正文就在会话上下文里
-		if (item.sender?.sender_type === "app") text = "[dwell 的回复卡片，正文见会话上下文]";
+		if (item.sender?.sender_type === "app") text = "[dwell reply card; its content is in the conversation context]";
 		else {
 			text = interactiveText(parsed);
-			if (text === "") text = "[卡片消息，内容不可读]";
+			if (text === "") text = "[card message, content not readable]";
 		}
 	} else {
-		const kinds: Record<string, string> = { image: "[图片]", file: "[文件]", audio: "[语音]", media: "[视频]", sticker: "[表情]", share_chat: "[群名片]", share_user: "[名片]", system: "[系统消息]" };
-		text = kinds[item.msg_type ?? ""] ?? `[${item.msg_type ?? "未知类型"}]`;
+		const kinds: Record<string, string> = { image: "[image]", file: "[file]", audio: "[voice]", media: "[video]", sticker: "[sticker]", share_chat: "[group card]", share_user: "[contact card]", system: "[system message]" };
+		text = kinds[item.msg_type ?? ""] ?? `[${item.msg_type ?? "unknown type"}]`;
 	}
 	text = text.replace(/\s+/g, " ").trim();
 	return text.length > 200 ? `${text.slice(0, 200)}…` : text;
@@ -110,25 +110,25 @@ async function formatItems(items: MessageItem[], chatName: string | undefined, d
 		const name = item.senderName || (senderId in names ? names[senderId] : undefined) || (senderId === "" ? "?" : senderId.slice(-6));
 		return `[${formatTime(item.create_time)}] ${name} (${item.message_id ?? "?"}): ${messageText(item)}`;
 	});
-	return `${chatName ?? "会话"} 最近消息（正序，括号内为消息 id，可用于 around 定位或 dwell.lark.image 识图）：\n${lines.join("\n")}`;
+	return `Recent messages in ${chatName ?? "this chat"} (oldest first; the id in parentheses works as \`around\` or as input to dwell.lark.image):\n${lines.join("\n")}`;
 }
 
 /** 拉取一页消息（list 只取第一页，page_size 上限 50）。 */
 async function listMessages(deps: LarkDeps, params: ListParams): Promise<MessageItem[]> {
 	const client = deps.getClient();
-	if (client === undefined) throw new Error("飞书通道未就绪");
+	if (client === undefined) throw new Error("Feishu channel is not ready");
 	const message = client.im.v1.message as {
 		list: (payload: { params: ListParams }) => Promise<ListResult>;
 		get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
 	};
 	try {
 		const result = await message.list({ params });
-		if (result.code !== undefined && result.code !== 0) throw new Error(`飞书 API ${result.code}: ${result.msg ?? ""}`);
+		if (result.code !== undefined && result.code !== 0) throw new Error(`Feishu API ${result.code}: ${result.msg ?? ""}`);
 		return result.data?.items ?? [];
 	} catch (err) {
 		// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
 		const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
-		if (data?.code !== undefined) throw new Error(`飞书 API ${data.code}: ${data.msg ?? ""}`);
+		if (data?.code !== undefined) throw new Error(`Feishu API ${data.code}: ${data.msg ?? ""}`);
 		throw err;
 	}
 }
@@ -144,12 +144,12 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"读飞书聊天记录（当前会话默认）。场景：用户说「上面那个问题/之前聊的」但上下文里没有时；回顾群聊；了解其他任务线。返回按时间正序的消息（含发送者与消息 id）。需要展开某条消息的前后文时：先用无参数调用拿到列表，再用返回的 om_ id 作 around 定位（id 仅存在于本工具的返回中，用户侧不可见）。卡片消息（bot 回复）只显示占位，正文在会话上下文里，看前后的用户消息即可。读当前会话之外的其他会话（chat/around 指向别处）仅管理员可用。",
+			"Read Feishu chat history (the current chat by default). Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages sent by the bot show only a placeholder; their content is in the conversation context, so read the surrounding user messages. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
 		parameters: Type.Object({
-			count: Type.Optional(Type.Number({ description: "读取条数（默认 20，上限 50）" })),
-			around: Type.Optional(Type.String({ description: "消息 id（om_ 开头）：读该消息前后各一半；取自本工具上一次返回" })),
-			chat: Type.Optional(Type.String({ description: "会话 id（oc_ 开头）：读其他会话（bot 需在该会话内）。默认当前会话" })),
-			sinceHours: Type.Optional(Type.Number({ description: "只读最近 N 小时内的消息（与 chat 搭配）" })),
+			count: Type.Optional(Type.Number({ description: "Number of messages to read (default 20, max 50)" })),
+			around: Type.Optional(Type.String({ description: "Message id (starts with om_): read half before and half after it; take it from this tool's previous output" })),
+			chat: Type.Optional(Type.String({ description: "Chat id (starts with oc_): read another chat (the bot must be a member). Defaults to the current chat" })),
+			sinceHours: Type.Optional(Type.Number({ description: "Only read messages from the last N hours (use with chat)" })),
 		}),
 		replay: "safe",
 		executionMode: "sequential",
@@ -159,12 +159,12 @@ function makeReadTool(deps: LarkDeps) {
 			// 跨会话读取门槛：bot 在内的任意会话都能列消息，但非本人所在的会话等于越权窥探，仅管理员放行
 			let chatId = args.chat;
 			if (chatId !== undefined && chatId !== current && crossChatDenied(deps, api.conversationId as number)) {
-				return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
+				return { output: [{ type: "text", text: "Reading chats other than the current one is admin-only." }] };
 			}
 			if (chatId === undefined) {
 				if (current === undefined) {
 					// panel 会话无对应 chat：让模型转告用户该能力限飞书会话
-					return { output: [{ type: "text", text: "当前会话（panel 任务）没有对应的飞书聊天，无法读取记录。" }] };
+					return { output: [{ type: "text", text: "This conversation (a panel task) has no Feishu chat, so there is no history to read." }] };
 				}
 				chatId = current;
 			}
@@ -174,17 +174,17 @@ function makeReadTool(deps: LarkDeps) {
 				let items: MessageItem[];
 				if (args.around !== undefined) {
 					const client = deps.getClient();
-					if (client === undefined) throw new Error("飞书通道未就绪");
+					if (client === undefined) throw new Error("Feishu channel is not ready");
 					const message = client.im.v1.message as {
 						list: (payload: { params: ListParams }) => Promise<ListResult>;
 						get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
 					};
 					const got = await message.get({ params: { with_sender_name: true }, path: { message_id: args.around } });
 					const anchor = got.data?.items?.[0];
-					if (anchor === undefined) throw new Error(`消息 ${args.around} 不存在或 bot 无权读取`);
+					if (anchor === undefined) throw new Error(`Message ${args.around} does not exist or the bot cannot read it`);
 					const targetChat: string = anchor.chat_id ?? chatId; // 锚点消息所在会话优先（chatId 已收窄非空）
 					if (targetChat !== current && crossChatDenied(deps, api.conversationId as number)) {
-						return { output: [{ type: "text", text: "无权读取当前会话之外的聊天记录（仅管理员可用）。" }] };
+						return { output: [{ type: "text", text: "Reading chats other than the current one is admin-only." }] };
 					}
 					nameChat = targetChat;
 					const half = Math.ceil(count / 2);
@@ -210,11 +210,11 @@ function makeReadTool(deps: LarkDeps) {
 					});
 					items = raw.filter((item) => item.deleted !== true).reverse();
 				}
-				if (items.length === 0) return { output: [{ type: "text", text: "该会话没有可读消息（时间范围内为空或 bot 无权限）。" }] };
+				if (items.length === 0) return { output: [{ type: "text", text: "No readable messages in this chat (none in the time range, or the bot lacks permission)." }] };
 				const chatName = directory !== undefined ? await directory.chatName(nameChat) : undefined;
 				return { output: [{ type: "text", text: await formatItems(items, chatName, directory) }] };
 			} catch (err) {
-				return { output: [{ type: "text", text: `读取失败：${err instanceof Error ? err.message : String(err)}` }], isError: true };
+				return { output: [{ type: "text", text: `Read failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
 			}
 		},
 	});
@@ -226,33 +226,33 @@ function makeImageTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.image",
 		description:
-			"看懂某条飞书图片消息的内容。输入消息 id（om_ 开头，取自 dwell.lark.read 返回）：下载图片并返回内容描述（主体、文字转录、图表数据）。典型场景：用户问「这是什么/这题怎么写」但上下文里没有图——先 dwell.lark.read 拿历史，找到 [图片] 占位的消息 id，再调本工具。仅支持图片消息，表情包不支持。",
+			"Understand the content of a Feishu image message. Input a message id (starts with om_, from dwell.lark.read output); the tool downloads the image and returns a description (subject, transcribed text, chart data). Typical case: the user asks what something is or how to solve it, but the image is not in your context. Call dwell.lark.read first, find the message id of the [image] placeholder, then call this tool. Only image messages are supported; stickers are not.",
 		parameters: Type.Object({
-			message: Type.String({ description: "图片消息 id（om_ 开头），取自 dwell.lark.read 的返回" }),
+			message: Type.String({ description: "Image message id (starts with om_), from dwell.lark.read output" }),
 		}),
 		replay: "safe",
 		executionMode: "sequential",
 		async execute(args, api) {
 			const client = deps.getClient();
-			if (client === undefined) return text("飞书通道未就绪", true);
+			if (client === undefined) return text("Feishu channel is not ready", true);
 			const describer = deps.getDescriber?.() ?? null;
-			if (describer === null) return text("未配置视觉模型（需要 ZAI_CODING_CN_API_KEY），无法识别图片。", true);
+			if (describer === null) return text("No vision model is configured (ZAI_CODING_CN_API_KEY is required), so the image cannot be recognized.", true);
 			try {
 				const message = client.im.v1.message as {
 					get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
 				};
 				const got = await message.get({ path: { message_id: args.message } });
 				const item = got.data?.items?.[0];
-				if (item === undefined) return text(`消息 ${args.message} 不存在或 bot 无权读取`, true);
+				if (item === undefined) return text(`Message ${args.message} does not exist or the bot cannot read it`, true);
 				// 跨会话识图门槛：消息所在会话不是当前会话时仅管理员放行（与 dwell.lark.read 同一门槛，防拿别的群/私聊的消息 id 窥探图片）
 				const current = deps.chatOf(api.conversationId as number);
 				if ((item.chat_id ?? current) !== current && crossChatDenied(deps, api.conversationId as number)) {
-					return text("无权查看当前会话之外的图片（仅管理员可用）。", true);
+					return text("Viewing images from chats other than the current one is admin-only.", true);
 				}
-				if (item.msg_type === "sticker") return text("这是表情包，暂不支持识别；请让用户改发图片消息。", true);
-				if (item.msg_type !== "image") return text(`该消息不是图片（类型 ${item.msg_type ?? "?"}），无法识图。`, true);
+				if (item.msg_type === "sticker") return text("This is a sticker, which cannot be recognized; ask the user to send it as an image message.", true);
+				if (item.msg_type !== "image") return text(`This message is not an image (type ${item.msg_type ?? "?"}), so it cannot be recognized.`, true);
 				const imageKey = (JSON.parse(item.body?.content ?? "{}") as { image_key?: string }).image_key;
-				if (imageKey === undefined) return text("消息内容缺少 image_key，无法下载。", true);
+				if (imageKey === undefined) return text("The message content has no image_key, so the image cannot be downloaded.", true);
 				const resource = client.im.v1.messageResource as {
 					get: (payload: { path: { message_id: string; file_key: string }; params: { type: "image" } }) => Promise<{ getReadableStream: () => AsyncIterable<Uint8Array | Buffer> }>;
 				};
@@ -261,14 +261,14 @@ function makeImageTool(deps: LarkDeps) {
 				for await (const chunk of response.getReadableStream()) chunks.push(Buffer.from(chunk));
 				const buffer = Buffer.concat(chunks);
 				const mime = sniffImageMime(buffer);
-				if (mime === null) return text("图片格式无法识别（非 png/jpeg/gif/webp）。", true);
-				if (buffer.length > 10 * 1024 * 1024) return text("图片超过 10MB，无法识别。", true);
+				if (mime === null) return text("Unrecognized image format (not png/jpeg/gif/webp).", true);
+				if (buffer.length > 10 * 1024 * 1024) return text("The image is larger than 10MB and cannot be recognized.", true);
 				const description = await describer(buffer.toString("base64"), mime);
-				return text(`图片 ${args.message} 的内容：\n${description}`);
+				return text(`Content of image ${args.message}:\n${description}`);
 			} catch (err) {
 				const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
-				if (data?.code !== undefined) return text(`下载失败：飞书 API ${data.code}: ${data.msg ?? ""}`, true);
-				return text(`下载失败：${err instanceof Error ? err.message : String(err)}`, true);
+				if (data?.code !== undefined) return text(`Download failed: Feishu API ${data.code}: ${data.msg ?? ""}`, true);
+				return text(`Download failed: ${err instanceof Error ? err.message : String(err)}`, true);
 			}
 		},
 	});
@@ -284,16 +284,16 @@ function makeSendTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.send",
 		description:
-			"把工作目录里的文件发到当前会话的飞书聊天。典型场景：用户要你生成的报告、图表、导出数据，或任何你落盘的产物。限制：只能发本会话工作目录内的文件（路径治理拦截 .. 与软链逃逸）；只发到当前会话，不能发到其他会话或外部联系人；图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。panel 任务里文件会在 panel 提供下载。用户要拿到你生成的文件时用本工具发送，不要只回复服务器路径。",
+			"Send a file from your working directory to the current Feishu chat. Typical case: the user wants a report, chart, data export, or anything else you saved to disk. Limits: only files inside this session's working directory (path checks block .. and symlink escapes); only to the current chat, never to other chats or outside contacts; images (png/jpeg/gif/webp) up to 10MB, other files up to 30MB, no empty files. In panel tasks the file is offered as a download in the panel. When the user wants a file you produced, send it with this tool instead of replying with a server path.",
 		parameters: Type.Object({
-			path: Type.String({ description: "要发送的文件路径（相对会话工作目录或绝对路径）" }),
+			path: Type.String({ description: "Path of the file to send (relative to the working directory, or absolute)" }),
 		}),
 		executionMode: "sequential",
 		async execute(args, api) {
 			const cwd = api.env?.cwd;
-			if (cwd === undefined) return text("当前会话没有配置工作目录，无法定位文件。", true);
+			if (cwd === undefined) return text("This conversation has no working directory, so the file cannot be located.", true);
 			const send = deps.sendToChat;
-			if (send === undefined) return text("发送链路未装配，无法发送。", true);
+			if (send === undefined) return text("The send path is not wired up, so the file cannot be sent.", true);
 			// panel 任务（无对应 chat）不发飞书，文件由 panel 工具行下载；与飞书发送共用同一套校验
 			const panelTask = deps.chatOf(api.conversationId as number) === undefined;
 			// 路径治理先于 stat：越界路径一律同一拒绝，不暴露 cwd 外文件是否存在
@@ -304,23 +304,23 @@ function makeSendTool(deps: LarkDeps) {
 				// 读判定过的真实路径而非字面路径，缩小「判定后换软链」的窗口
 				const target = await realpath(resolve(cwd, args.path));
 				const st = await stat(target);
-				if (!st.isFile()) return text(`不是普通文件：${args.path}`, true);
-				if (st.size === 0) return text(`文件 ${fileName} 为空（0 字节），飞书不允许发送空文件。`, true);
-				if (st.size > SEND_FILE_MAX) return text(`文件 ${fileName} 超过 30MB 上限（${(st.size / 1024 / 1024).toFixed(1)}MB），无法发送。`, true);
-				if (panelTask) return text(`已在 panel 提供下载：${fileName}（用户在 panel 的工具行点击下载）`);
+				if (!st.isFile()) return text(`Not a regular file: ${args.path}`, true);
+				if (st.size === 0) return text(`File ${fileName} is empty (0 bytes); Feishu does not allow sending empty files.`, true);
+				if (st.size > SEND_FILE_MAX) return text(`File ${fileName} exceeds the 30MB limit (${(st.size / 1024 / 1024).toFixed(1)}MB) and cannot be sent.`, true);
+				if (panelTask) return text(`Offered as a download in the panel: ${fileName} (the user clicks download on the tool row)`);
 				const buffer = await readFile(target);
 				const isImage = sniffImageMime(buffer) !== null && buffer.length <= SEND_IMAGE_MAX;
 				const input: SendInput = isImage
 					? { image: { source: buffer } }
 					: { file: { source: buffer, fileName } };
 				const sent = await send(api.conversationId as number, input);
-				if (sent === undefined) return text("飞书未连接，发送失败。", true);
-				return text(`已发送${isImage ? "图片" : "文件"} ${fileName} 到当前会话。`);
+				if (sent === undefined) return text("Feishu is not connected; send failed.", true);
+				return text(`Sent ${isImage ? "image" : "file"} ${fileName} to the current chat.`);
 			} catch (err) {
 				// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
 				const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
-				if (data?.code !== undefined) return text(`发送失败：飞书 API ${data.code}: ${data.msg ?? ""}`, true);
-				return text(`发送失败：${err instanceof Error ? err.message : String(err)}`, true);
+				if (data?.code !== undefined) return text(`Send failed: Feishu API ${data.code}: ${data.msg ?? ""}`, true);
+				return text(`Send failed: ${err instanceof Error ? err.message : String(err)}`, true);
 			}
 		},
 	});
@@ -334,7 +334,7 @@ export function makeLarkExtension(deps: LarkDeps) {
 		sections: [
 			section(
 				"lark",
-				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id，可作 around 参数二次展开前后文）。历史里的 [图片] 占位可展开：用户问及图中内容而上下文没有图时，把该条消息 id 传给 dwell.lark.image 获取图片描述。用户要拿到你生成的文件（报告/图表/导出数据）时，用 dwell.lark.send 直接发送，不要只回复服务器路径。",
+				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. When the user wants a file you produced (report, chart, data export), send it with dwell.lark.send instead of replying with a server path.",
 				{ tag: false },
 			),
 		],

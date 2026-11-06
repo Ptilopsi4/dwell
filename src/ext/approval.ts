@@ -137,6 +137,13 @@ export function windowOpen(conversationId: number, sender: string): boolean {
 	return true;
 }
 
+/** 审批决定后交给模型的续跑输入（卡片、/approve、panel 三条路径共用）。 */
+export function decisionInput(action: "approve" | "deny", minutes: number): string {
+	return action === "approve"
+		? `The user approved a ${minutes}-minute window for dangerous commands. Continue the previous task and retry the blocked command.`
+		: "The user denied the dangerous command. Stop that operation and take another approach, or ask the user what they intend.";
+}
+
 /** 面板/卡片共用的审批决策：开/关窗口并唤醒（或通知）模型。返回已处理的待审与续跑 submission，调用方决定回复发到哪里。 */
 export async function approvalDecision(
 	conversation: Conversation,
@@ -152,9 +159,7 @@ export async function approvalDecision(
 	void persistApprovals();
 	const submission = await conversation.submit({
 		type: "input",
-		content: action === "approve"
-			? `用户已批准危险命令窗口（${clampMinutes(minutes)} 分钟）。请继续之前的任务，重试被拦截的命令。`
-			: "用户拒绝了危险命令。请停止该操作并改用其他方案，或询问用户意图。",
+		content: decisionInput(action, clampMinutes(minutes)),
 		whenBusy: "steer",
 		requestId: `decision-${key}-${Date.now()}`,
 	}, BACKGROUND_CONTEXT);
@@ -183,11 +188,11 @@ const literalBases = (cwd: string): PathBases => ({ cwd: resolve(cwd), tmp: tmpd
 /** 判定核心：`abs` 与 `bases` 同形态。`rawPath` 用于 /proc 的原始路径检查（Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径）。 */
 function violationOf(tool: string, rawPath: string, abs: string, bases: PathBases): string | undefined {
 	if (tool === "read") {
-		if (rawPath.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs, bases)) return `不允许读取 ${abs}（状态文件、应用目录、数据库、/proc 不在可读域）。`;
+		if (rawPath.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs, bases)) return `Reading ${abs} is not allowed (state files, the application directory, the database, and /proc are outside the readable area).`;
 		return undefined;
 	}
 	if (abs === bases.cwd || abs.startsWith(bases.cwd + sep) || abs.startsWith(bases.tmp + sep)) return undefined;
-	return `写入仅限本会话工作目录与系统临时目录（已拒绝 ${abs}）。`;
+	return `Writes are limited to this session's working directory and the system temp directory (denied: ${abs}).`;
 }
 
 /**
@@ -231,7 +236,7 @@ export async function sendPathViolation(path: string, cwd: string): Promise<stri
 	const real = await resolveReal(resolve(cwd, path));
 	const realCwd = await resolveReal(resolve(cwd));
 	if (real === realCwd || real.startsWith(realCwd + sep)) return undefined;
-	return `只能发送本会话工作目录内的文件（已拒绝 ${real}）。`;
+	return `Only files inside this session's working directory can be sent (denied: ${real}).`;
 }
 
 /** cwd 访问器：按 conversationId 查 agent cwd（conversation.agent().cwd）。 */
@@ -267,11 +272,11 @@ export function makeApprovalExtension() {
 					if (call.name !== "bash") return undefined;
 					const command = (call.arguments as { command?: string }).command ?? "";
 					if (stateFileBlocked(command)) {
-						return { block: "不允许访问服务状态文件或进程环境。" };
+						return { block: "Access to service state files or the process environment is not allowed." };
 					}
 					// sudo 在本环境永不可能成功（NoNewPrivileges + dwell 无 sudo 组），直接说明，不走审批
 					if (/\bsudo\b/.test(command)) {
-						return { block: "dwell 用户无 sudo 权限（服务以非 root 运行），此命令无法执行。向用户说明并改用不需要提权的方案。" };
+						return { block: "The service runs as a non-root user without sudo, so this command cannot run. Tell the user and use an approach that does not need elevated privileges." };
 					}
 					const match = dangerMatch(command);
 					if (match === null) return undefined;
@@ -284,8 +289,8 @@ export function makeApprovalExtension() {
 					// 面板入口的审批只在面板处理（飞书成员 /approve 开的是自己的窗口，帮不上忙）
 					const viaPanel = runVia.get(convId) === "panel";
 					return { block: viaPanel
-						? `该命令被审批策略拦截（${match}）。已通知管理员在面板审批，请告知用户稍候。批准后继续原任务；不要尝试其他方式绕过。`
-						: `该命令被审批策略拦截（${match}）。请告知用户：点击审批卡片按钮，或回复 /approve 批准（默认 10 分钟窗口）。批准后继续原任务；不要尝试其他方式绕过。` };
+						? `The approval policy blocked this command (${match}). An admin has been notified to approve it in the panel; tell the user to wait. Continue the original task after approval, and do not try to work around the block.`
+						: `The approval policy blocked this command (${match}). Tell the user to tap the button on the approval card or reply /approve (10-minute window by default). Continue the original task after approval, and do not try to work around the block.` };
 				},
 			}),
 		],
