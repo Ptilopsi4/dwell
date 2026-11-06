@@ -4,10 +4,11 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
-/** roDirs 默认值（调用方给定）：/etc 与两个 DNS 解析目录在 exec 行里另有固定项，重复时按目标去重。 */
-const DEFAULT_RO_DIRS = ["/etc", "/opt/node24", "/run/resolvconf", "/run/systemd/resolve"];
+/** 只读挂载的额外目录：node 安装前缀（execPath 的 bin/ 上级，沙箱内 node/npm 可用）与两个 DNS 解析目录；
+ *  前缀落在 /usr 下时与固定项重叠，冗余挂载无害。/etc 与 DNS 目录在 exec 行里另有固定项，重复时按目标去重。 */
+const DEFAULT_RO_DIRS = ["/etc", dirname(dirname(process.execPath)), "/run/resolvconf", "/run/systemd/resolve"];
 
 /** sh 引号：常规路径原样嵌入（脚本可读、探针可 grep），含特殊字符时退回单引号转义。 */
 const shWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`);
@@ -82,9 +83,9 @@ export async function probeSandbox(opts: { dataDir: string; stateDir: string; ap
 	const dataDir = resolve(opts.dataDir);
 	const selftestDir = join(dataDir, "work", ".selftest");
 	const sibling = join(dataDir, "work", ".selftest-sibling");
-	await mkdir(selftestDir, { recursive: true });
-	await mkdir(sibling, { recursive: true }); // 兄弟会话目录要真实存在，断言才有意义
 	try {
+		await mkdir(selftestDir, { recursive: true });
+		await mkdir(sibling, { recursive: true }); // 兄弟会话目录要真实存在，断言才有意义
 		// wrapper 落盘：tmp 写 + chmod + rename 原子替换，回读校验内容一致
 		const script = wrapperScript(bwrap, DEFAULT_RO_DIRS);
 		const wrapperPath = join(dataDir, "bin", "sandbox-bash");
@@ -105,6 +106,9 @@ export async function probeSandbox(opts: { dataDir: string; stateDir: string; ap
 		// stderr 摘要截 300 字；wrapper 本身起不来时 stderr 为空，补 spawn 错误信息
 		const detail = [(result.stderr ?? "").trim(), result.error === undefined ? "" : result.error.message].filter((s) => s !== "").join("; ").replaceAll("\n", "; ").slice(0, 300);
 		return { enabled: false, reason: `自检失败（exit ${result.status}）：${detail}` };
+	} catch (e) {
+		// 目录/wrapper 落盘失败也只是不启用，不阻断启动
+		return { enabled: false, reason: `探测出错：${e instanceof Error ? e.message : String(e)}` };
 	} finally {
 		await rm(selftestDir, { recursive: true, force: true });
 		await rm(sibling, { recursive: true, force: true });

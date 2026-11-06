@@ -52,8 +52,7 @@ test("selfTestScript：断言失败时非 0 退出", { skip: process.platform ==
 	assert.match(r.stderr, /state 目录可见/);
 });
 
-test("probeSandbox：非 Linux 平台不启用（Windows 开发机即本验证；Linux 上真实探测由 probe-bwrap.ts 覆盖）", async () => {
-	if (process.platform === "linux") return;
+test("probeSandbox：非 Linux 平台不启用", { skip: process.platform === "linux" ? "Linux 上真实探测由 probe-bwrap.ts 覆盖" : false }, async () => {
 	const s = await probeSandbox({ dataDir: "./data", stateDir: "./state", appRoot: ".", forceOff: false });
 	assert.equal(s.enabled, false);
 	assert.ok(s.reason?.includes("非 Linux"));

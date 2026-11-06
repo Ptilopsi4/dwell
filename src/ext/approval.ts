@@ -4,10 +4,9 @@
 import { readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { defineExtension, hook, ToolTask, type Conversation, type Submission } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { DATA_DIR, STATE_DIR, stateFile, writeStateJson } from "../state.ts";
+import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, stateFile, writeStateJson } from "../state.ts";
 
 /** conversationId → 当前 run 的发起者（submit 前设置，run 归属判定用）。 */
 export const runSender = new Map<number, string>();
@@ -164,8 +163,6 @@ export async function approvalDecision(
 
 // ── S2 文件工具路径治理 ──
 
-/** 应用根（src/ 的上级）：dwell 自身源码与部署配置所在，agent 不可读写。 */
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // 目录常量可能是相对路径（本地开发默认 ./data ./state）：比较前统一归一为绝对路径
 const STATE_PATH = resolve(STATE_DIR);
 const DATA_PATH = resolve(DATA_DIR);
@@ -250,7 +247,7 @@ export function makePathGuardExtension(cwdOf: CwdOf) {
 					if (call.name !== "read" && call.name !== "write" && call.name !== "edit") return undefined;
 					const path = (call.arguments as { path?: string }).path;
 					if (typeof path !== "string" || path === "") return undefined;
-					const cwd = (await cwdOf(api.conversationId as number, context)) ?? join(DATA_DIR, "work");
+					const cwd = (await cwdOf(api.conversationId as number, context)) ?? DEFAULT_CWD;
 					const violation = await fileToolViolationReal(call.name, path, resolve(cwd));
 					if (violation === undefined) return undefined;
 					return { block: violation };

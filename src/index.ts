@@ -1,7 +1,6 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
 import { readFile, realpath } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
@@ -9,7 +8,7 @@ import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversatio
 import { makeReporter } from "./report.ts";
 import { describeResources, sniffImageMime } from "./media.ts";
 import { probeSandbox } from "./sandbox.ts";
-import { DATA_DIR, STATE_DIR, initStateDir, stateFile } from "./state.ts";
+import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage, type SendInput } from "./feishu/channel.ts";
@@ -20,9 +19,6 @@ import { approvals, clampMinutes, loadApprovalState, makePathGuardExtension, per
 import { makeLarkExtension } from "./ext/lark.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
-
-/** 应用根（src/ 的上级，与 ext/approval.ts 的 APP_ROOT 同一算法）：沙箱自检断言它不可见；各自计算避免 approval→index 循环依赖 */
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 let harness: Harness;
 let sessions: Sessions;
@@ -235,7 +231,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		// 多模态：媒体消息走独立流式流程（先占位再接主模型流，避免预处理 10s 黑盒）
 		if (action === "media") {
 			const agent = await conversation.agent(BACKGROUND_CONTEXT);
-			void mediaStreamAndReply(conversation, msg, agent.cwd ?? process.cwd(), target);
+			void mediaStreamAndReply(conversation, msg, agent.cwd ?? DEFAULT_CWD, target);
 			return;
 		}
 

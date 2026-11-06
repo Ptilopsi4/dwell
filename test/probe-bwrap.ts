@@ -3,9 +3,8 @@
 // 需要先 apt install bubblewrap；本机（非 Linux）跑会直接 skip。每条断言打 PASS/FAIL，任一 FAIL exit 1。
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { DATA_DIR, STATE_DIR } from "../src/state.ts";
+import { join, resolve } from "node:path";
+import { APP_ROOT, DATA_DIR, STATE_DIR } from "../src/state.ts";
 import { probeSandbox } from "../src/sandbox.ts";
 
 if (process.platform !== "linux") {
@@ -13,11 +12,12 @@ if (process.platform !== "linux") {
 	process.exit(0);
 }
 
-// 应用根与 src/index.ts 同算法（src/ 上级）；探针在 test/ 下再退一级
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// 断言路径一律绝对：相对路径在沙箱内按 workDir 解析，"不可见"会假通过
 const DATA = resolve(DATA_DIR);
+const STATE = resolve(STATE_DIR);
+const q = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 
-const state = await probeSandbox({ dataDir: DATA, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: false });
+const state = await probeSandbox({ dataDir: DATA, stateDir: STATE, appRoot: APP_ROOT, forceOff: false });
 if (!state.enabled) {
 	console.error(`FAIL：沙箱未启用：${state.reason}`);
 	process.exit(1);
@@ -47,9 +47,9 @@ const run = (cmd: string): { status: number | null; out: string; err: string } =
 
 try {
 	// 禁区不可见（白名单挂载表之外整个不存在）
-	check("state 目录不可见", run(`test -e ${STATE_DIR}`).status !== 0);
-	check("应用根不可见", run(`test -e ${APP_ROOT}`).status !== 0);
-	check("兄弟会话目录不可见", run(`test -e ${sibling}`).status !== 0);
+	check("state 目录不可见", run(`test -e ${q(STATE)}`).status !== 0);
+	check("应用根不可见", run(`test -e ${q(APP_ROOT)}`).status !== 0);
+	check("兄弟会话目录不可见", run(`test -e ${q(sibling)}`).status !== 0);
 
 	// cwd 可写 / /usr 只读
 	const write = run("touch .probe-write && rm .probe-write");

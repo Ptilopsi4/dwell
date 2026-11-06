@@ -14,7 +14,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import type { SandboxState } from "./sandbox.ts";
-import { DATA_DIR } from "./state.ts";
+import { DATA_DIR, DEFAULT_CWD } from "./state.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
 const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
@@ -140,13 +140,15 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 
 	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
 	// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
-	const env = ({ cwd }: { cwd?: string }) =>
-		new NodeExecutionEnv({
-			cwd: resolve(cwd ?? process.cwd()),
+	const env = async ({ cwd }: { cwd?: string }) => {
+		if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
+		return new NodeExecutionEnv({
+			cwd: resolve(cwd ?? DEFAULT_CWD),
 			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
 			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
 			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
 		});
+	};
 	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
 	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥
 	return harness;
