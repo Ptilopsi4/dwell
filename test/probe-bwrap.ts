@@ -64,9 +64,10 @@ try {
 	const dns = run("getent hosts deb.debian.org");
 	check("getent hosts deb.debian.org 通", dns.status === 0, dns.err);
 
-	// unshare-pid：沙箱内 /proc/1 是自己的 bash，不是宿主 init
+	// unshare-pid：沙箱内 /proc/1 是 namespace 的 init（bwrap 本体），不是宿主 systemd。
+	// 断言用肯定式：cmdline 含 bwrap。否定式正则会踩坑——bwrap 参数里的 /run/systemd/resolve 含字面 "systemd"
 	const pid1 = run(`tr "\\0" " " < /proc/1/cmdline`);
-	check("/proc/1 不是宿主 init（systemd）", pid1.status === 0 && !/systemd|sbin\/init/.test(pid1.out), pid1.out);
+	check("/proc/1 是沙箱 init（bwrap）", pid1.status === 0 && pid1.out.includes("bwrap"), pid1.out.slice(0, 80));
 } finally {
 	rmSync(workDir, { recursive: true, force: true });
 	rmSync(sibling, { recursive: true, force: true });
