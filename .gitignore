@@ -3,5 +3,4 @@ data/
 .env
 state/
 data-local/
-.pi/DEPLOYMENT.md
 .pi/

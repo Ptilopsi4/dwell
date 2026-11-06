@@ -1,6 +1,6 @@
 # AGENTS.md — dwell
 
-服务器常驻通用 agent：飞书 bot 与 Web panel 两个入口，底层 pi-durable 每步 checkpoint，进程重启后续跑。用户文档见 `README.md`，方案与决策记录见 `.pi/PLAN.md`。
+服务器常驻通用 agent：飞书 bot 与 Web panel 两个入口，底层 pi-durable 每步 checkpoint，进程重启后续跑。用户文档见 `README.md`，方案与决策记录见本地 `.pi/PLAN.md`（不入库）。
 
 ## 技术栈
 
@@ -20,7 +20,7 @@ src/
   pipeline.ts       消息管线判定（群准入/空内容/降级路由/命令识别，无副作用，可单测）
   sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
   users.ts          角色（env 播种，state/users.json 为运行时真相）
-  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR 常量（放这里避免 approval→harness 循环依赖）
+  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR/APP_ROOT/DEFAULT_CWD 常量（放这里避免 approval→harness 循环依赖）
   media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
   report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
   sandbox.ts        bash 沙箱：bwrap wrapper 生成 + 启动探测（失败不启用，回退路径治理；真实行为由 probe-bwrap.ts 服务器验证）
@@ -85,12 +85,12 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - SDK 报错是 axios 外壳，真实 code/msg 在 `e.response.data`
 - `message.list` 用 Asc 排序加 `start_time` 时必须显式传 `end_time`
 
-## 工作流文件（`.pi/`）
+## 工作流文件（`.pi/`，整体 gitignored，仅本地）
 
 - `PLAN.md`：架构决策。涉及公共接口、路由/权限模型、新模块、新工具时先写一节，pt 确认后再落地，并在"决策记录"追加一条
 - `TODO.md`：多步任务进度，完成即勾选
 - `gotchas.md`：项目踩坑库。构建或运行报错先 grep 这里；同类问题返工 ≥2 次解决后补一条（症状 → 根因 → 解法）
-- `DEPLOYMENT.md`：部署档案，gitignored，仅 pt 本机有。服务器地址等部署细节只写这里，不写进代码注释、README 或本文件
+- `DEPLOYMENT.md`：部署档案。服务器地址等部署细节只写这里，不写进代码注释、README 或本文件
 
 ## 部署
 

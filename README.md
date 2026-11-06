@@ -144,7 +144,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 - **文件工具**：`write`/`edit` 只能写本会话工作目录与系统临时目录；`read` 不能读状态目录、应用目录、数据库和 `/proc`（其余系统路径可读）。相对路径 `..` 逃逸与符号链接都按归一化后的真实路径判定
 - **panel 请求准入**：POST 强制 `Content-Type: application/json`；有 `Origin` 时必须与 `Host` 同源；`Host` 只接受 IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置的主机名。防跨站 CSRF 借浏览器打内网 panel，也防 DNS rebinding 读 SSE
 - **状态文件在 agent 可写域之外**：`users.json`/`sessions.json`/`message-map.json`/`approvals.json` 由文件工具路径治理与 bash 正则双重拦截。注意 bash 仍可用通配符、软链、重定向等变体绕过这些检查——沙箱未启用时它们是减速带，硬边界是部署隔离（容器/系统加固）
-- **bash 沙箱**（bubblewrap mount namespace）：Linux 服务器上探测到 bwrap 且自检通过时启用（`/healthz` 的 `sandbox` 字段可见）。启用时 bash 只能看到白名单挂载：`/usr`、`/etc`、node 所在目录与 DNS 解析目录只读，会话工作目录与 `/tmp` 可写，`/proc` 为沙箱私有实例；环境变量清空后仅保留 `PATH` 与 `HOME=<工作目录>`。状态目录、应用目录（含 `.env`）、其他会话的工作目录、`/home`、`/root`、docker/systemd socket 在沙箱内不存在，内核级强制。`DWELL_SANDBOX=off` 可强制关闭；未启用（非 Linux、未装 bwrap 或自检失败）时回退到路径治理 + 危险命令正则减速带。已知残留：`/tmp` 跨会话共享（与现状一致，非回归）
+- **bash 沙箱**（bubblewrap mount namespace）：Linux 服务器上探测到 bwrap 且自检通过时启用（`/healthz` 的 `sandbox` 字段可见）。启用时 bash 只能看到白名单挂载：`/usr`、`/etc`、node 所在目录与 DNS 解析目录只读，会话工作目录与 `/tmp` 可写，`/proc` 为沙箱私有实例；环境变量清空后仅保留 `PATH` 与 `HOME=<工作目录>`。状态目录、应用目录（含 `.env`）、其他会话的工作目录、`/home`、`/root`、docker/systemd socket 在沙箱内不存在，内核级强制。`DWELL_SANDBOX=off` 可强制关闭；未启用（非 Linux、未装 bwrap 或自检失败）时回退到路径治理 + 危险命令正则减速带。仓库的 Docker 镜像未装 bwrap（默认 seccomp 也通常禁止 userns），容器形态下沙箱不启用。已知残留：`/tmp` 是宿主的 `/tmp`，跨会话共享且可见 dwell 用户放在里面的文件与 socket（systemd 部署建议开 `PrivateTmp=yes`）；沙箱不隔离网络，bash 能访问 panel，而 panel 无鉴权（含审批与用户管理接口），所以 panel 是信任本机进程的控制面，不构成对 agent 的硬边界
 - bash 危险命令正则是减速带而非硬墙（变体无限）：命中危险模式需审批，访问状态文件、`.env`、`/proc/*/environ` 直接拒绝；`sudo` 直接拒绝。沙箱启用后它们仍保留（纵深防御），角色从事后封堵变为行为确认闸
 - 进程应以非 root 运行（Dockerfile 已创建 `dwell` 用户），容器是最终隔离边界；工作目录只是路径约定，沙箱未启用时 bash 能 `cd` 出去
 - **群聊是互信域**：同群成员共享工作目录，且能通过回复加入他人的任务线，看到该线处理过的内容。敏感内容请用私聊
@@ -168,4 +168,4 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start    # 本地只起 panel
 
 同一个飞书应用的长连接会在多个客户端之间随机分流消息，本机调试不要和线上实例同时连同一个应用。
 
-贡献约定和代码结构见 `AGENTS.md`，设计与决策记录见 `.pi/PLAN.md`。
+贡献约定和代码结构见 `AGENTS.md`。
