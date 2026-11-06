@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { probeSandbox, selfTestScript, wrapperScript } from "../src/sandbox.ts";
 
 test("wrapperScript：exec 前缀与关键挂载参数", () => {
-	const script = wrapperScript("/usr/bin/bwrap", ["/etc", "/opt/node24"]);
+	const script = wrapperScript("/usr/bin/bwrap", ["/etc", "/opt/node"]);
 	assert.ok(script.startsWith("#!/bin/sh"));
 	assert.ok(script.includes("exec "));
 	assert.ok(script.includes("pwd -P"));
@@ -29,11 +29,11 @@ test("wrapperScript：--clearenv 先于两个 --setenv（bwrap 按序应用，�
 });
 
 test("wrapperScript：roDirs 去重且保持首次出现顺序（固定项 /etc 与 DNS 解析目录不重复拼）", () => {
-	const script = wrapperScript("/usr/bin/bwrap", ["/opt/node24", "/etc", "/srv/extra", "/opt/node24", "/run/resolvconf"]);
+	const script = wrapperScript("/usr/bin/bwrap", ["/opt/node", "/etc", "/srv/extra", "/opt/node", "/run/resolvconf"]);
 	assert.equal(script.split("--ro-bind-try /etc").length - 1, 1, "/etc 只出现一次（固定项已含）");
 	assert.equal(script.split("--ro-bind-try /run/resolvconf").length - 1, 1, "/run/resolvconf 只出现一次");
 	assert.equal(script.split("--ro-bind-try /srv/extra").length - 1, 1, "列表内重复项去重");
-	assert.ok(script.indexOf("--ro-bind-try /opt/node24") < script.indexOf("--ro-bind-try /srv/extra"), "保持首次出现顺序");
+	assert.ok(script.indexOf("--ro-bind-try /opt/node ") < script.indexOf("--ro-bind-try /srv/extra"), "保持首次出现顺序");
 	assert.ok(script.indexOf("--ro-bind /usr /usr") >= 0, "/usr 固定 ro-bind");
 });
 
