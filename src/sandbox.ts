@@ -67,7 +67,7 @@ export type SandboxState = { enabled: boolean; reason?: string; wrapperPath?: st
 
 /** 启动探测：Linux + bwrap 存在 + 在 $dataDir/work/.selftest 里跑 wrapper 自检通过 → 启用；
  *  任一步失败返回 disabled（不算错误，调用方记日志后照常运行）。 */
-export async function probeSandbox(opts: { dataDir: string; stateDir: string; appRoot: string; forceOff: boolean; now?: () => number }): Promise<SandboxState> {
+export async function probeSandbox(opts: { dataDir: string; stateDir: string; appRoot: string; forceOff: boolean }): Promise<SandboxState> {
 	// 平台检查在前：非 Linux（本地开发机）直接短路，不触碰文件系统
 	if (process.platform !== "linux") return { enabled: false, reason: `非 Linux 平台（${process.platform}）` };
 	if (opts.forceOff) return { enabled: false, reason: "DWELL_SANDBOX=off" };
