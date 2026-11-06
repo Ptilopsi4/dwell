@@ -158,7 +158,7 @@ sudo systemctl restart dwell
 curl -s http://<panel host>:<port>/healthz    # from the server: {"ok":true,...,"sandbox":true}
 ```
 
-Run `npm ci --omit=dev` again when `package-lock.json` changed. Before deploying, make sure `npm run check` and `npm test` pass on their own; piping them into `tail` hides their exit codes. To roll back, copy the backup over `src/` and restart. Running tasks resume from their checkpoints after the restart.
+Run `npm ci --omit=dev` again when `package-lock.json` changed. Before deploying, make sure `npm run check` and `npm test` pass. To roll back, copy the backup over `src/` and restart. Running tasks resume from their checkpoints after the restart.
 
 For backups, `data/dwell.sqlite` (with its `-wal`/`-shm` files) holds all conversations and `state/` holds routing and users. Copy both while the service is stopped, or use `sqlite3 .backup` for the database.
 

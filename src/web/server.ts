@@ -26,7 +26,7 @@ interface PanelOptions {
 	port: number;
 	/** 视觉描述器（启动装配；无 ZAI key 时为 null，上传图片降级为落盘+提示） */
 	describer: () => ImageDescriber | null;
-	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 与 describer 同风格） */
+	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 延迟读取探测结果） */
 	sandbox: () => boolean;
 }
 

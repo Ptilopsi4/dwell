@@ -158,7 +158,7 @@ sudo systemctl restart dwell
 curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true,...,"sandbox":true}
 ```
 
-`package-lock.json` 有变化时重新执行 `npm ci --omit=dev`。部署前确认 `npm run check` 和 `npm test` 单独执行能通过；把它们接到 `tail` 之类的管道里会吞掉退出码。回滚就把备份复制回 `src/` 再重启。重启后运行中的任务会从 checkpoint 续跑。
+`package-lock.json` 有变化时重新执行 `npm ci --omit=dev`。部署前确认 `npm run check` 和 `npm test` 通过。回滚就把备份复制回 `src/` 再重启。重启后运行中的任务会从 checkpoint 续跑。
 
 备份数据：`data/dwell.sqlite`（连同 `-wal`/`-shm` 文件）保存全部会话，`state/` 保存路由和用户。在服务停止时复制两者，或用 `sqlite3 .backup` 备份数据库。
 
