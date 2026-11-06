@@ -1,6 +1,6 @@
 # AGENTS.md — dwell
 
-服务器常驻通用 agent：飞书 bot 与 Web panel 两个入口，底层 pi-durable 每步 checkpoint，进程重启后续跑。用户文档见 `README.md`，方案与决策记录见本地 `.pi/PLAN.md`（不入库）。
+服务器常驻通用 agent：飞书 bot 与 Web panel 两个入口，底层 pi-durable 每步 checkpoint，进程重启后续跑。用户文档见 `README.md`（英）/ `README.zh-CN.md`（中），部署见 `docs/deployment.md` / `docs/deployment.zh-CN.md`。
 
 ## 技术栈
 
@@ -33,6 +33,7 @@ src/
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
 test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探针，不在 npm test 内
 test/probe-bwrap.ts  bash 沙箱服务器探针（需先 apt install bubblewrap；非 Linux 自动 skip）
+docs/               部署文档（中英双语）
 ```
 
 ## 命令
@@ -52,7 +53,9 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - 不过度设计：不做配置层次、plugin 系统、provider 注册表；后续阶段的功能不留插桩、hook 点或 TODO 占位
 - 不过度防御：schema 已校验的参数不再判型；错误处理只包真实会失败的边界（网络、文件 IO、飞书 API）
 - 注释只写"为什么"和约束，不写对话过程或决策摇摆
-- 新依赖顺序：标准库 > 已有依赖 > 先和 pt 确认
+- 新依赖顺序：标准库 > 已有依赖 > 先和维护者确认
+- 语言：模型面向的文本（系统提示、section、工具/参数描述、工具返回、hook block、审批续跑输入、视觉 prompt）用英文，回复语言跟随用户；飞书/panel 上直接给用户看的文案和运维日志用中文。审批后的续跑输入统一经 `decisionInput()`
+- 用户文档中英双语（`README.md`/`README.zh-CN.md`、`docs/*.md`/`docs/*.zh-CN.md`），改一份就同步另一份
 
 ## 必须守住的不变量
 
@@ -85,16 +88,18 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - SDK 报错是 axios 外壳，真实 code/msg 在 `e.response.data`
 - `message.list` 用 Asc 排序加 `start_time` 时必须显式传 `end_time`
 
-## 工作流文件（`.pi/`，整体 gitignored，仅本地）
+## 本地工作文件（`.pi/`，整体 gitignored）
 
-- `PLAN.md`：架构决策。涉及公共接口、路由/权限模型、新模块、新工具时先写一节，pt 确认后再落地，并在"决策记录"追加一条
+维护者本地的方案、进度与部署记录放在 `.pi/`，不进仓库。存在时按以下约定使用：
+
+- `PLAN.md`：架构决策。涉及公共接口、路由/权限模型、新模块、新工具时先写一节，维护者确认后再落地，并在"决策记录"追加一条
 - `TODO.md`：多步任务进度，完成即勾选
-- `gotchas.md`：项目踩坑库。构建或运行报错先 grep 这里；同类问题返工 ≥2 次解决后补一条（症状 → 根因 → 解法）
-- `DEPLOYMENT.md`：部署档案。服务器地址等部署细节只写这里，不写进代码注释、README 或本文件
+- `gotchas.md`：踩坑库。构建或运行报错先 grep 这里；同类问题返工 ≥2 次解决后补一条（症状 → 根因 → 解法）
+- `DEPLOYMENT.md`：实际生产环境的档案。服务器地址等部署细节只写这里，不写进代码注释、测试、README、`docs/` 或本文件
 
 ## 部署
 
-仓库里的 `Dockerfile` / `docker-compose.yml` 是通用容器形态。实际生产环境的部署方式和 SOP 见 `.pi/DEPLOYMENT.md`。部署前先备份，SSH 操作需要 pt 显式同意。
+通用部署步骤见 `docs/deployment.md`；仓库里的 `Dockerfile` / `docker-compose.yml` 是通用容器形态。具体生产环境的 SOP 见本地 `.pi/DEPLOYMENT.md`。部署前先备份；SSH 到生产服务器需要维护者显式同意。
 
 ## Git
 
