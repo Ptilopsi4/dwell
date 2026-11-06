@@ -17,6 +17,7 @@
 src/
   index.ts          主程序：装配、飞书消息管线、会话路由、命令（/new /status /cancel /approve /deny /allow /disallow /help /whoami）、审批卡、FeishuBridge
   harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer
+  pipeline.ts       消息管线判定（群准入/空内容/降级路由/命令识别，无副作用，可单测）
   sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
   users.ts          角色（env 播种，state/users.json 为运行时真相）
   state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR 常量（放这里避免 approval→harness 循环依赖）
@@ -36,7 +37,7 @@ test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探�
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 66 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 83 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```

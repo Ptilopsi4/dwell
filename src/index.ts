@@ -9,6 +9,7 @@ import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
+import { emptyReply, fallbackRoute, groupAdmits, messageAction } from "./pipeline.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvals, clampMinutes, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
@@ -161,30 +162,28 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 		}
 		// 未命中（未记录或已被上限淘汰）——降级到自己的线，由调用方显式提示
 	}
-	if (msg.chatType === "p2p") {
-		return { conversation: await sessions.forDirect(msg.chatId, msg.senderId), degraded: msg.replyToMessageId !== undefined };
+	const fb = fallbackRoute(msg);
+	switch (fb.kind) {
+		case "direct":
+			return { conversation: await sessions.forDirect(msg.chatId, msg.senderId), degraded: fb.degraded };
+		case "thread":
+			return { conversation: await sessions.forThread(msg.chatId, fb.threadId, msg.senderId), degraded: fb.degraded };
+		default:
+			return { conversation: await sessions.forGroup(msg.chatId, msg.senderId), degraded: fb.degraded };
 	}
-	if (msg.threadId !== undefined) {
-		return { conversation: await sessions.forThread(msg.chatId, msg.threadId, msg.senderId), degraded: false };
-	}
-	return { conversation: await sessions.forGroup(msg.chatId, msg.senderId), degraded: msg.replyToMessageId !== undefined };
 }
 
 async function handleMessage(msg: NormalizedMessage): Promise<void> {
 	try {
 		// 群聊准入（SDK policy 已放开 mention 门，由这里细化）：话题内消息与回复已锚定消息视为显式指向，平消息仍需 @bot
-		if (msg.chatType === "group" && !msg.mentionedBot) {
-			const inThread = msg.threadId !== undefined;
-			const repliesAnchored = msg.replyToMessageId !== undefined && sessions.follow(msg.replyToMessageId) !== undefined;
-			if (!inThread && !repliesAnchored) return;
-		}
+		if (!groupAdmits(msg, (messageId) => sessions.follow(messageId) !== undefined)) return;
 		if (!users.isAllowed(msg.senderId)) {
 			await channel.send(msg.chatId, { text: "未授权使用，请联系管理员开通。" }, { replyTo: msg.messageId });
 			return;
 		}
-		const text = msg.content.trim();
-		if ((msg.resources?.length ?? 0) === 0 && text === "") {
-			if (msg.rawContentType !== "text") {
+		const empty = emptyReply(msg);
+		if (empty !== null) {
+			if (empty === "unsupported") {
 				await channel.send(msg.chatId, { text: "目前支持文本、图片和文件消息。" }, { replyTo: msg.messageId });
 			}
 			return;
@@ -209,14 +208,13 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		await setRunAttributionIfIdle(conversation.id as number, msg.senderId, sessions.chatOf(conversation.id as number) === undefined ? "panel" : "feishu");
 
 		const content = msg.content.trim();
-		// 命令表精确匹配：未知斜杠文本（如路径「/usr/bin 下有什么」）当普通输入交模型，不再回「未知命令」
-		const KNOWN_COMMANDS = new Set(["/help", "/whoami", "/new", "/status", "/cancel", "/approve", "/deny", "/allow", "/disallow"]);
-		if (KNOWN_COMMANDS.has(content.split(/\s+/)[0] ?? "")) {
+		const action = messageAction(content, (msg.resources?.length ?? 0) > 0);
+		if (action === "command") {
 			await runCommand(content, conversation, msg, target);
 			return;
 		}
 		// 多模态：媒体消息走独立流式流程（先占位再接主模型流，避免预处理 10s 黑盒）
-		if ((msg.resources?.length ?? 0) > 0) {
+		if (action === "media") {
 			const agent = await conversation.agent(BACKGROUND_CONTEXT);
 			void mediaStreamAndReply(conversation, msg, agent.cwd ?? process.cwd(), target);
 			return;
