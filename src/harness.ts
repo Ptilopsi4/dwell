@@ -9,7 +9,7 @@ import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createRegistry, defineExtension, Harness, section, type Extension, type TaskGraph } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, Harness, section, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
@@ -116,7 +116,7 @@ function providerModels() {
 	return models;
 }
 
-export async function openDwell(models = providerModels(), extraExtensions: Extension[] = []): Promise<Harness> {
+export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
@@ -137,7 +137,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 			cwd: resolve(cwd ?? process.cwd()),
 			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
 		});
-	const harness = await Harness.open(storage, { models, registry, env }, context);
+	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
 	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥
 	return harness;
 }

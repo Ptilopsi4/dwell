@@ -25,6 +25,8 @@ interface PanelOptions {
 export interface FeishuBridge {
 	/** panel 操作者 open_id */
 	operator(): string;
+	/** 飞书长连接状态（"off" = panel-only 未连接；其余为 SDK WSConnectionState，"failed" 时 /healthz 返回 503） */
+	status(): string;
 	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复 */
 	relay(conversation: Conversation, text: string): Promise<void>;
 	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
@@ -80,6 +82,12 @@ export function checkPanelRequest(
 	}
 	const name = hostNameOf(req.host ?? "");
 	if (!isIpv4(name) && !isIpv6(name) && !allowedHosts.has(name)) throw new HttpError(403, "bad host");
+}
+
+/** /healthz 判定：feishu 连接 "failed" 时 503 ok=false（探活可据此告警），其余（含 off/reconnecting）进程仍算存活。 */
+export function healthOf(feishu: string, uptimeSec: number): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string } } {
+	const ok = feishu !== "failed";
+	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu } };
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
@@ -162,6 +170,11 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 	async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+		if (req.method === "GET" && url.pathname === "/healthz") {
+			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()));
+			json(res, code, body);
+			return;
+		}
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
 			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }

@@ -3,6 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
 import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, scrubSecretEnv, type ImageDescriber } from "./harness.ts";
+import { makeReporter } from "./report.ts";
 import { describeResources } from "./media.ts";
 import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
@@ -34,6 +35,28 @@ async function main(): Promise<void> {
 	imageDescriber = makeImageDescriber();
 	await initStateDir();
 	await loadApprovalState();
+	// 运行告警：pi-durable 默认丢弃的故障（任务 faulted、hook 抛错、Session 失败）记日志并私发管理员；
+	// nameOf 延迟访问——sessions 在 openDwell 之后才初始化
+	const notifyAdmins = async (text: string): Promise<void> => {
+		if (!connected()) return;
+		for (const u of users.list()) {
+			if (u.role !== "admin") continue;
+			try {
+				await channel.send(u.id, { markdown: text });
+			} catch (err) {
+				console.error("[dwell] 告警私发失败:", u.id, err);
+			}
+		}
+	};
+	const onReport = makeReporter({
+		notify: notifyAdmins,
+		onSessionFailed: async (text) => {
+			// Session 关闭后进程留着只是僵尸：尽力通知（5s 截断，失败也不拦退出）后退出，交给 systemd/docker 重启
+			await Promise.race([notifyAdmins(text).catch(() => {}), new Promise((r) => setTimeout(r, 5000))]);
+			process.exit(1);
+		},
+		nameOf: (id) => sessions?.nameOf(id),
+	});
 	harness = await openDwell(undefined, [
 		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
 		makeLarkExtension({
@@ -49,7 +72,7 @@ async function main(): Promise<void> {
 			const conversation = await harness.conversation(id as ConversationId, context);
 			return conversation === undefined ? undefined : (await conversation.agent(context)).cwd ?? undefined;
 		}),
-	]);
+	], onReport);
 	sessions = new Sessions(harness);
 	await sessions.load();
 	const realigned = await sessions.alignModel();
@@ -750,6 +773,8 @@ const OPERATOR_LABEL = "管理员";
 
 const feishuBridge: FeishuBridge = {
 	operator: () => panelUser,
+	// 长连接状态供 /healthz：panel-only 未连接为 "off"；已连接但 WS 尚未就绪按 "connecting" 计
+	status: () => (connected() ? (channel.getConnectionStatus()?.state ?? "connecting") : "off"),
 	async relay(conversation, text) {
 		if (!connected()) throw new Error("飞书未连接，无法发到飞书");
 		const id = conversation.id as number;

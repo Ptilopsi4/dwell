@@ -2,7 +2,7 @@
 // panel 请求准入：POST Content-Type / Origin 同源 / Host 白名单（防 CSRF 与 DNS rebinding）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkPanelRequest, hostNameOf } from "../src/web/server.ts";
+import { checkPanelRequest, healthOf, hostNameOf } from "../src/web/server.ts";
 
 const HOSTS = new Set(["localhost", "10.0.0.5"]);
 
@@ -42,4 +42,11 @@ test("DNS rebinding：非 IP 非配置域名拒绝（含 SSE 读通道）", () =
 	assert.equal(ok({ method: "GET", host: "evil.com" }), false);
 	assert.equal(ok({ method: "GET", host: "panel.dwell.example" }), false);
 	assert.equal(ok({ method: "GET" }), false); // 无 Host
+});
+
+test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting）200 ok=true", () => {
+	assert.deepEqual(healthOf("failed", 42), { code: 503, body: { ok: false, uptimeSec: 42, feishu: "failed" } });
+	assert.deepEqual(healthOf("connected", 42), { code: 200, body: { ok: true, uptimeSec: 42, feishu: "connected" } });
+	assert.deepEqual(healthOf("reconnecting", 7), { code: 200, body: { ok: true, uptimeSec: 7, feishu: "reconnecting" } });
+	assert.deepEqual(healthOf("off", 0), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off" } });
 });

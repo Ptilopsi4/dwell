@@ -144,6 +144,12 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 - 进程应以非 root 运行（Dockerfile 已创建 `dwell` 用户），容器是最终隔离边界；工作目录只是路径约定，bash 能 `cd` 出去
 - **群聊是互信域**：同群成员共享工作目录，且能通过回复加入他人的任务线，看到该线处理过的内容。敏感内容请用私聊
 
+## 运行告警
+
+运行期故障（任务 faulted/parked、扩展 hook 抛错、Session 失败等）会记入日志并私聊全部管理员；同类告警（按类型 + 扩展 + 任务类型）10 分钟内只发第一条，被抑制的条数并入下一条。飞书未连接时只记日志。`session_failed`（存储层失败，进程已不可用）会在尽力通知管理员后退出进程，交给 systemd/docker 重启——部署时需确认配置了自动重启。
+
+外部探活用 `GET /healthz`（panel 端口）：返回 `{ ok, uptimeSec, feishu }`，`feishu` 为长连接状态（panel-only 时为 `off`）；状态 `failed` 时返回 503。
+
 ## 开发
 
 ```sh

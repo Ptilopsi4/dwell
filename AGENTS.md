@@ -21,6 +21,7 @@ src/
   users.ts          角色（env 播种，state/users.json 为运行时真相）
   state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR 常量（放这里避免 approval→harness 循环依赖）
   media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
+  report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
   ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
@@ -35,7 +36,7 @@ test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探�
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 53 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 66 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
