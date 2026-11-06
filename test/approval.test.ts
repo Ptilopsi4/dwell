@@ -3,9 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dangerMatch, fileToolViolation, fileToolViolationReal, stateFileBlocked } from "../src/ext/approval.ts";
+import { dangerMatch, fileToolViolation, fileToolViolationReal, sendPathViolation, stateFileBlocked } from "../src/ext/approval.ts";
 import { DATA_DIR, STATE_DIR } from "../src/state.ts";
 
 test("命中各危险模式并返回匹配片段", () => {
@@ -128,4 +128,42 @@ test("基准也走 realpath：cwd 自身位于软链之下时写自己的 cwd �
 	const cwd = join(base, "alias", "work"); // 字面路径含软链，realpath 后为 base/real/work
 	assert.equal(await fileToolViolationReal("write", "a.txt", cwd), undefined);
 	assert.equal(await fileToolViolationReal("edit", "sub/b.txt", cwd), undefined); // 不存在的新建子目录：最近已存在祖先（real/work）为 cwd 本身，仍在其内
+});
+
+// ── dwell.lark.send 来源判定（sendPathViolation：目标与 cwd 都 realpath 后判包含，不放行 tmp） ──
+
+test("sendPathViolation：cwd 内相对/绝对路径放行，.. 越界与 tmp 拒", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "dwell-send-"));
+	t.after(async () => {
+		await rm(base, { recursive: true, force: true });
+	});
+	const work = join(base, "work");
+	await mkdir(work, { recursive: true });
+	await writeFile(join(work, "a.txt"), "x");
+	assert.equal(await sendPathViolation("a.txt", work), undefined);
+	assert.equal(await sendPathViolation(join(work, "a.txt"), work), undefined);
+	assert.equal(await sendPathViolation("sub/../a.txt", work), undefined);
+	assert.match((await sendPathViolation("../evil.txt", work)) ?? "", /已拒绝/);
+	assert.match((await sendPathViolation(join(tmpdir(), "x.txt"), work)) ?? "", /已拒绝/);
+});
+
+test("sendPathViolation：cwd 内软链指向外部目录拒（realpath 后判定）", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "dwell-send-"));
+	t.after(async () => {
+		await rm(base, { recursive: true, force: true });
+	});
+	const work = join(base, "work");
+	await mkdir(work, { recursive: true });
+	await mkdir(join(base, "outside"), { recursive: true });
+	let linked = true;
+	try {
+		await symlink(join(base, "outside"), join(work, "lnk"), process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		linked = false;
+	}
+	if (!linked) {
+		t.skip("当前环境无法创建符号链接");
+		return;
+	}
+	assert.match((await sendPathViolation("lnk/secret.txt", work)) ?? "", /已拒绝/);
 });

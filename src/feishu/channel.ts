@@ -1,6 +1,6 @@
 // 飞书连接：官方 SDK Channel 模块（单 WebSocket 收事件+卡片回调，自动重连，消息归一化）。
 // 凭证由调用方传入（启动时读进闭包，scrubSecretEnv 之后环境里已没有密钥）。
-import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type MentionInfo, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
+import { createLarkChannel, LoggerLevel, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type MentionInfo, type NormalizedMessage, type SendInput } from "@larksuiteoapi/node-sdk";
 
 export function connectChannel(handlers: {
 	appId: string;
@@ -21,7 +21,7 @@ export function connectChannel(handlers: {
 	return channel.connect().then(() => channel);
 }
 
-export type { CardActionEvent, LarkChannel, MarkdownStreamController, MentionInfo, NormalizedMessage };
+export type { CardActionEvent, LarkChannel, MarkdownStreamController, MentionInfo, NormalizedMessage, SendInput };
 
 /** 命令参数里的 @提及 → openId+姓名。SDK 会把 content 里的占位符（@_user_N）二次替换成「@名字」
  *  （bot 提及默认剥离）；昵称≠本名的用户，飞书把提及渲染成「@昵称（本名）」，故除渲染名/占位 key

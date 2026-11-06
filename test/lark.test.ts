@@ -1,7 +1,11 @@
 // node --test "test/lark.test.ts"
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { makeLarkExtension, type LarkDeps } from "../src/ext/lark.ts";
+import type { SendInput } from "../src/feishu/channel.ts";
 
 type Item = { message_id: string; msg_type?: string; create_time?: string; chat_id?: string; deleted?: boolean; body?: { content?: string }; sender?: { id?: string; sender_type?: string }; senderName?: string };
 
@@ -192,4 +196,118 @@ test("image：表情包/非图片/无描述器/消息不存在各给诚实提示
 	await run({ message_id: "om_x", msg_type: "text" }, async () => "", /不是图片/);
 	await run({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "k" }) } }, null, /未配置视觉模型/);
 	await run(undefined, async () => "", /不存在或 bot 无权读取/);
+});
+
+// ── dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话 ──
+
+function sendDeps(noChat = false) {
+	const inputs: { id: number; input: SendInput }[] = [];
+	return {
+		inputs,
+		deps: {
+			getClient: () => undefined,
+			getDirectory: () => undefined,
+			chatOf: () => "oc_current",
+			sendToChat: async (id: number, input: SendInput) => {
+				inputs.push({ id, input });
+				return noChat ? undefined : { messageId: "om_new" };
+			},
+		} as LarkDeps,
+	};
+}
+
+function sendToolOf(deps: LarkDeps) {
+	const tool = makeLarkExtension(deps).tools?.find((t) => t.name === "dwell.lark.send");
+	if (tool === undefined) throw new Error("工具未注册");
+	return tool;
+}
+
+const sendApi = (cwd: string) => ({ conversationId: 42, env: { cwd } }) as never;
+
+async function tempCwd(t: import("node:test").TestContext): Promise<string> {
+	const cwd = await mkdtemp(join(tmpdir(), "dwell-lark-send-"));
+	t.after(async () => {
+		await rm(cwd, { recursive: true, force: true });
+	});
+	return cwd;
+}
+
+test("send：PNG 魔数走图片消息", async (t) => {
+	const cwd = await tempCwd(t);
+	await writeFile(join(cwd, "chart.png"), PNG);
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: "chart.png" }, sendApi(cwd), context);
+	assert.match(out(r as never), /已发送图片 chart\.png/);
+	assert.equal(inputs.length, 1);
+	assert.equal(inputs[0].id, 42);
+	assert.ok("image" in inputs[0].input && Buffer.isBuffer(inputs[0].input.image.source));
+});
+
+test("send：普通文本走文件消息且 fileName 正确（绝对路径入参）", async (t) => {
+	const cwd = await tempCwd(t);
+	await writeFile(join(cwd, "report.md"), "# 报告");
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: join(cwd, "report.md") }, sendApi(cwd), context);
+	assert.match(out(r as never), /已发送文件 report\.md/);
+	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "report.md" && Buffer.isBuffer(inputs[0].input.file.source));
+});
+
+test("send：空文件拒", async (t) => {
+	const cwd = await tempCwd(t);
+	await writeFile(join(cwd, "empty.bin"), "");
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: "empty.bin" }, sendApi(cwd), context);
+	assert.match(out(r as never), /不允许发送空文件/);
+	assert.equal(inputs.length, 0);
+});
+
+test("send：越界路径拒且不调 sendToChat", async (t) => {
+	const cwd = await tempCwd(t);
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: "../outside.txt" }, sendApi(cwd), context);
+	assert.match(out(r as never), /已拒绝/);
+	assert.equal(inputs.length, 0);
+});
+
+test("send：sendToChat 返回 undefined（panel 任务）与缺 env.cwd 各给提示", async (t) => {
+	const cwd = await tempCwd(t);
+	await writeFile(join(cwd, "a.txt"), "x");
+	let r = await sendToolOf(sendDeps(true).deps).execute({ path: "a.txt" }, sendApi(cwd), context);
+	assert.match(out(r as never), /panel 任务.*没有对应的飞书聊天/);
+	r = await sendToolOf(sendDeps().deps).execute({ path: "a.txt" }, { conversationId: 42 } as never, context);
+	assert.match(out(r as never), /没有配置工作目录/);
+});
+
+test("send：超过 30MB 拒（稀疏文件，stat 阶段拦截不读入内存）", async (t) => {
+	const cwd = await tempCwd(t);
+	const big = join(cwd, "big.bin");
+	const handle = await open(big, "w");
+	await handle.truncate(31 * 1024 * 1024);
+	await handle.close();
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: "big.bin" }, sendApi(cwd), context);
+	assert.match(out(r as never), /超过 30MB/);
+	assert.equal(inputs.length, 0);
+});
+
+test("send：超过 10MB 的图片改走文件消息", async (t) => {
+	const cwd = await tempCwd(t);
+	const big = join(cwd, "huge.png");
+	await writeFile(big, PNG);
+	const handle = await open(big, "r+");
+	await handle.truncate(11 * 1024 * 1024);
+	await handle.close();
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf(deps).execute({ path: "huge.png" }, sendApi(cwd), context);
+	assert.match(out(r as never), /已发送文件 huge\.png/);
+	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "huge.png");
+});
+
+test("send：当前会话无飞书 chat 时不读文件直接拒", async (t) => {
+	const cwd = await tempCwd(t);
+	await writeFile(join(cwd, "a.txt"), "x");
+	const { deps, inputs } = sendDeps();
+	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "a.txt" }, sendApi(cwd), context);
+	assert.match(out(r as never), /没有对应的飞书聊天/);
+	assert.equal(inputs.length, 0);
 });

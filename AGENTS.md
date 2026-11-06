@@ -26,7 +26,7 @@ src/
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
   ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
-  ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）
+  ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）/ dwell.lark.send（cwd 内文件发回当前会话）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
   feishu/directory.ts 用户名/群名查询与缓存
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
@@ -37,7 +37,7 @@ test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探�
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 83 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 93 个，<2s；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```

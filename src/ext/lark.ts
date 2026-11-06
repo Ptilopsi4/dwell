@@ -1,10 +1,14 @@
-// 飞书会话历史读取（dwell.lark.read）：SDK Client 直调，显式读取优于隐式污染。
+// 飞书会话工具（dwell.lark.read/image/send）：SDK Client 直调或复用 index 的发送链路，显式优于隐式。
 // 依赖运行时对象（channel/directory/sessions 在 main 中后于 harness 装配），用 getter 延迟绑定。
+import { readFile, realpath, stat } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Directory } from "../feishu/directory.ts";
+import type { SendInput } from "../feishu/channel.ts";
 import type { ImageDescriber } from "../harness.ts";
 import { sniffImageMime } from "../media.ts";
+import { sendPathViolation } from "./approval.ts";
 
 /** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。 */
 export type LarkDeps = {
@@ -17,6 +21,8 @@ export type LarkDeps = {
 	isAdmin?: (openId: string) => boolean;
 	/** 当前 run 发起者（审批归属同源；缺失视为非管理员） */
 	senderOf?: (conversationId: number) => string | undefined;
+	/** 发消息到会话所在 chat（复用 index 的锚点/话题规则）；返回 undefined = 当前会话没有飞书 chat（panel 任务） */
+	sendToChat?: (conversationId: number, input: SendInput) => Promise<{ messageId: string } | undefined>;
 };
 
 /** message.list/get 返回条目的最小形状。 */
@@ -268,15 +274,65 @@ function makeImageTool(deps: LarkDeps) {
 	});
 }
 
+// 飞书上传接口限额：图片 10MB、文件 30MB、不允许空文件
+const SEND_IMAGE_MAX = 10 * 1024 * 1024;
+const SEND_FILE_MAX = 30 * 1024 * 1024;
+
+/** dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话的飞书聊天（agent 生成物交给用户的唯一出口）。 */
+function makeSendTool(deps: LarkDeps) {
+	const text = (t: string, isError = false) => ({ output: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+	return defineTool({
+		name: "dwell.lark.send",
+		description:
+			"把工作目录里的文件发到当前会话的飞书聊天。典型场景：用户要你生成的报告、图表、导出数据，或任何你落盘的产物。限制：只能发本会话工作目录内的文件（路径治理拦截 .. 与软链逃逸）；只发到当前会话，不能发到其他会话或外部联系人；图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。用户要拿到你生成的文件时用本工具发送，不要只回复服务器路径。",
+		parameters: Type.Object({
+			path: Type.String({ description: "要发送的文件路径（相对会话工作目录或绝对路径）" }),
+		}),
+		executionMode: "sequential",
+		async execute(args, api) {
+			const cwd = api.env?.cwd;
+			if (cwd === undefined) return text("当前会话没有配置工作目录，无法定位文件。", true);
+			const noChat = "当前会话（panel 任务）没有对应的飞书聊天，无法发送。";
+			const send = deps.sendToChat;
+			if (send === undefined || deps.chatOf(api.conversationId as number) === undefined) return text(noChat, true);
+			// 路径治理先于 stat：越界路径一律同一拒绝，不暴露 cwd 外文件是否存在
+			const violation = await sendPathViolation(args.path, cwd);
+			if (violation !== undefined) return text(violation, true);
+			const fileName = basename(resolve(cwd, args.path));
+			try {
+				// 读判定过的真实路径而非字面路径，缩小「判定后换软链」的窗口
+				const target = await realpath(resolve(cwd, args.path));
+				const st = await stat(target);
+				if (!st.isFile()) return text(`不是普通文件：${args.path}`, true);
+				if (st.size === 0) return text(`文件 ${fileName} 为空（0 字节），飞书不允许发送空文件。`, true);
+				if (st.size > SEND_FILE_MAX) return text(`文件 ${fileName} 超过 30MB 上限（${(st.size / 1024 / 1024).toFixed(1)}MB），无法发送。`, true);
+				const buffer = await readFile(target);
+				const isImage = sniffImageMime(buffer) !== null && buffer.length <= SEND_IMAGE_MAX;
+				const input: SendInput = isImage
+					? { image: { source: buffer } }
+					: { file: { source: buffer, fileName } };
+				const sent = await send(api.conversationId as number, input);
+				if (sent === undefined) return text(noChat, true);
+				return text(`已发送${isImage ? "图片" : "文件"} ${fileName} 到当前会话。`);
+			} catch (err) {
+				// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
+				const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
+				if (data?.code !== undefined) return text(`发送失败：飞书 API ${data.code}: ${data.msg ?? ""}`, true);
+				return text(`发送失败：${err instanceof Error ? err.message : String(err)}`, true);
+			}
+		},
+	});
+}
+
 /** 装配：deps 为运行时访问器（channel/directory/sessions 后于 harness 初始化）。 */
 export function makeLarkExtension(deps: LarkDeps) {
 	return defineExtension({
 		name: "dwell-lark",
-		tools: [makeReadTool(deps), makeImageTool(deps)],
+		tools: [makeReadTool(deps), makeImageTool(deps), makeSendTool(deps)],
 		sections: [
 			section(
 				"lark",
-				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id，可作 around 参数二次展开前后文）。历史里的 [图片] 占位可展开：用户问及图中内容而上下文没有图时，把该条消息 id 传给 dwell.lark.image 获取图片描述。",
+				() => "用户提到「上面/之前/昨天聊的」等飞书历史内容而上下文缺失时，用 dwell.lark.read 读聊天记录（默认当前会话最近 20 条，返回自带消息 id，可作 around 参数二次展开前后文）。历史里的 [图片] 占位可展开：用户问及图中内容而上下文没有图时，把该条消息 id 传给 dwell.lark.image 获取图片描述。用户要拿到你生成的文件（报告/图表/导出数据）时，用 dwell.lark.send 直接发送，不要只回复服务器路径。",
 				{ tag: false },
 			),
 		],

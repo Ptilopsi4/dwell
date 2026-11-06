@@ -8,7 +8,7 @@ import { describeResources } from "./media.ts";
 import { initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
-import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage } from "./feishu/channel.ts";
+import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type NormalizedMessage, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction } from "./pipeline.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
@@ -67,6 +67,12 @@ async function main(): Promise<void> {
 			getDescriber: () => imageDescriber,
 			isAdmin: (id) => users.isAdmin(id),
 			senderOf: (id) => runSender.get(id),
+			// dwell.lark.send 的出口：发送复用 index 的锚点/话题规则，发出的文件消息即成为新锚点（回复它即续接任务线）
+			sendToChat: async (id, input) => {
+				const sent = await sendToConversationChat(id, input);
+				if (sent !== undefined) await sessions.anchor(sent.messageId, id as ConversationId);
+				return sent;
+			},
 		}),
 		// 文件工具路径治理：按会话解析 cwd（write/edit 限 cwd+tmp；read 禁 state/应用根/sqlite/proc）
 		makePathGuardExtension(async (id, context) => {
@@ -756,13 +762,13 @@ async function sendApprovalCard(chatId: string, conversationId: number, sender: 
 
 const connected = (): boolean => (channel as LarkChannel | undefined) !== undefined;
 
-/** 发到会话所在 chat；群聊线/话题线回复该线最近的消息，让群成员看出属于哪条任务（话题内发到话题里）。 */
-async function sendToConversationChat(conversationId: number, markdown: string): Promise<{ chatId: string; messageId: string } | undefined> {
+/** 发到会话所在 chat；群聊线/话题线回复该线最近的消息，让群成员看出属于哪条任务（话题内发到话题里）。input 为 SDK SendInput（markdown/图片/文件…）。 */
+async function sendToConversationChat(conversationId: number, input: SendInput): Promise<{ chatId: string; messageId: string } | undefined> {
 	const chatId = sessions.chatOf(conversationId);
 	if (chatId === undefined || !connected()) return undefined;
 	const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
 	const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
-	const sent = await channel.send(chatId, { markdown }, anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" });
+	const sent = await channel.send(chatId, input, anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" });
 	return { chatId, messageId: sent.messageId };
 }
 
@@ -778,7 +784,7 @@ const feishuBridge: FeishuBridge = {
 		const id = conversation.id as number;
 		// 飞书侧以「From admin:」前缀 + 整段斜体呈现，和成员自己的消息区分；逐段包斜体（markdown 强调不跨空行）
 		const ital = (t: string) => t.split(/\n{2,}/).map((p) => (p.trim() !== "" ? `*${p}*` : p)).join("\n\n");
-		const sent = await sendToConversationChat(id, ital(`From admin: ${text}`));
+		const sent = await sendToConversationChat(id, { markdown: ital(`From admin: ${text}`) });
 		if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);
@@ -797,7 +803,7 @@ const feishuBridge: FeishuBridge = {
 	async notice(conversationId, text) {
 		// 通知也锚定到任务线：回复通知即在原线上继续
 		try {
-			const sent = await sendToConversationChat(conversationId, text);
+			const sent = await sendToConversationChat(conversationId, { markdown: text });
 			if (sent !== undefined) await sessions.anchor(sent.messageId, conversationId as ConversationId);
 		} catch (err: unknown) {
 			console.error("[dwell] 飞书通知发送失败:", err);

@@ -5,7 +5,7 @@
 ```
 飞书 ⇄ SDK Channel（单 WebSocket）─┐
                                    ├→ 会话路由 / 权限 → pi-durable conversation → 模型（GLM / DeepSeek）
-浏览器 ⇄ Web panel（HTTP + SSE）───┘                         └→ 工具：bash/read/write/edit、dwell.web.*、dwell.lark.read
+浏览器 ⇄ Web panel（HTTP + SSE）───┘                         └→ 工具：bash/read/write/edit、dwell.web.*、dwell.lark.*
 ```
 
 基于 [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.4.0 和飞书官方 SDK [`@larksuiteoapi/node-sdk`](https://www.npmjs.com/package/@larksuiteoapi/node-sdk)。
@@ -111,6 +111,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 | `dwell.web.search` / `dwell.web.fetch` | 全网搜索、读取网页正文。走智谱 Coding Plan Remote MCP，计入套餐额度。设置了 `ZAI_CODING_CN_API_KEY` 就会启用，与 `DWELL_PROVIDER` 无关 | 免审 |
 | `dwell.lark.read` | 读飞书聊天记录：默认当前会话最近 20 条；`around` 读某条消息前后文；`chat` 读指定会话。bot 必须在目标会话内；读当前会话之外的会话仅管理员触发的任务可用 | 免审 |
 | `dwell.lark.image` | 按消息 id 拉取图片描述：群里不 @ 发的图不进上下文，模型读历史看到 `[图片]` 占位后按需回看（回复用户提问时自动用） | 免审 |
+| `dwell.lark.send` | 把会话工作目录内的文件发到当前会话的飞书聊天：图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。只发当前会话，来源限本会话工作目录；panel 任务（无飞书聊天）不可用 | 免审 |
 
 图片和文件：
 

@@ -229,6 +229,14 @@ export async function fileToolViolationReal(tool: string, path: string, cwd: str
 	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite });
 }
 
+/** dwell.lark.send 的来源判定：目标与 cwd 都 realpath 后判包含，不放行系统临时目录（外发比写盘更严）。 */
+export async function sendPathViolation(path: string, cwd: string): Promise<string | undefined> {
+	const real = await resolveReal(resolve(cwd, path));
+	const realCwd = await resolveReal(resolve(cwd));
+	if (real === realCwd || real.startsWith(realCwd + sep)) return undefined;
+	return `只能发送本会话工作目录内的文件（已拒绝 ${real}）。`;
+}
+
 /** cwd 访问器：按 conversationId 查 agent cwd（conversation.agent().cwd）。 */
 export type CwdOf = (conversationId: number, context: typeof BACKGROUND_CONTEXT) => Promise<string | undefined>;
 
