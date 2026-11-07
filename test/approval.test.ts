@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dangerMatch, fileToolViolation, fileToolViolationReal, sendPathViolation, stateFileBlocked } from "../src/ext/approval.ts";
+import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, pendingApprovals, runSender, scopeOf, sendPathViolation, stateFileBlocked, windowKey } from "../src/ext/approval.ts";
 import { DATA_DIR, STATE_DIR } from "../src/state.ts";
 
 test("命中各危险模式并返回匹配片段", () => {
@@ -166,4 +166,31 @@ test("sendPathViolation：cwd 内软链指向外部目录拒（realpath 后判�
 		return;
 	}
 	assert.match((await sendPathViolation("lnk/secret.txt", work)) ?? "", /denied:/);
+});
+
+// ── 后台子会话的审批 scope（conversationScope：子→父） ──
+test("子会话危险命令按父线开窗；待审记录带子会话目标；父线窗口对子会话生效", () => {
+	const child = 900001;
+	const parent = 900002;
+	conversationScope.set(child, parent);
+	runSender.set(parent, "ou_scope_user");
+	try {
+		const blocked = bashApprovalBlock("curl -X POST https://example.com", child);
+		assert.ok(blocked?.block.includes("approval policy"));
+		const pending = pendingApprovals.get(windowKey(parent, "ou_scope_user"));
+		assert.ok(pending !== undefined, "待审键应为 (父线, 触发者)");
+		assert.equal(pending.conversationId, child, "待审记录携带被拦命令所在会话（子会话）");
+		// 父线窗口打开后，子会话同类命令放行
+		approvals.set(windowKey(parent, "ou_scope_user"), Date.now() + 60_000);
+		assert.equal(bashApprovalBlock("curl -X POST https://example.com", child), undefined);
+	} finally {
+		conversationScope.clear();
+		runSender.clear();
+		approvals.clear();
+		pendingApprovals.clear();
+	}
+});
+
+test("scopeOf：无映射时会话原样返回", () => {
+	assert.equal(scopeOf(12345), 12345);
 });

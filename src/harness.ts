@@ -14,7 +14,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { makeApprovalExtension } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import type { SandboxState } from "./sandbox.ts";
-import { DATA_DIR, DEFAULT_CWD } from "./state.ts";
+import { DATA_DIR, DEFAULT_CWD, DWELL_TZ } from "./state.ts";
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
 const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
@@ -103,8 +103,24 @@ const PREAMBLE = `You are dwell, a general-purpose assistant running on a server
 
 const DwellExtension = defineExtension({
 	name: "dwell",
-	sections: [section("preamble", () => PREAMBLE, { tag: false })],
+	sections: [
+		section("preamble", () => PREAMBLE, { tag: false }),
+		// 时间感知：粒度到天，一天只变一次，避免每轮重写 pi.system 打掉 prompt cache；相对时间交给 dwell.schedule 的 delayMinutes
+		section("date", () => `Current date: ${currentDateLine(DWELL_TZ)}.`, { tag: false }),
+	],
 });
+
+/** 「周几 YYYY-MM-DD (时区, UTC±hh:mm)」，如 Friday 2026-11-07 (Asia/Shanghai, UTC+08:00)。 */
+export function currentDateLine(tz: string, at: Date = new Date()): string {
+	const date = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", weekday: "long" }).format(at);
+	let offset = "";
+	try {
+		offset = `, ${new Intl.DateTimeFormat("en", { timeZone: tz, timeZoneName: "longOffset" }).format(at).split(", ").pop() ?? ""}`;
+	} catch {
+		// longOffset 不支持时省略偏移，日期本身不受影响
+	}
+	return `${date} (${tz}${offset})`;
+}
 
 function providerModels() {
 	const { keyEnv, make } = PROVIDERS[providerId];

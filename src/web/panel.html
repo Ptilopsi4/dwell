@@ -332,6 +332,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 	<div class="side-foot">
 		<button class="btn grow" data-variant="ghost" data-size="sm" id="newConv"><span data-ic="plus" data-cls="sm"></span>新会话</button>
 		<button class="btn" data-variant="ghost" data-size="icon-sm" id="alertsBtn" title="运行告警"><span data-ic="bell"></span><span id="alertBadge" hidden></span></button>
+		<button class="btn" data-variant="ghost" data-size="icon-sm" id="schedBtn" title="定时任务"><span data-ic="clock"></span></button>
 		<button class="btn" data-variant="ghost" data-size="icon-sm" id="usersBtn" title="用户管理"><span data-ic="users"></span></button>
 		<button class="btn" data-variant="ghost" data-size="icon-sm" id="theme" title="切换主题"></button>
 	</div>
@@ -351,6 +352,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="archiveBtn">归档</button>
 				<button id="notifyBtn" hidden>飞书通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
+				<button id="stopTaskBtn" hidden>停止后台任务</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -430,13 +432,15 @@ const ICONS = {
 	group: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
 	thread: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
 	panel: '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/>',
+	task: '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/>',
+	clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
 };
 const ic = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;
 for (const el of document.querySelectorAll("[data-ic]")) el.outerHTML = ic(el.dataset.ic, el.dataset.cls ?? "");
 if (/Mac|iPhone|iPad/.test(navigator.platform)) $("qKbd").textContent = "⌘K";
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-const TYPE_ZH = { direct: "私聊", group: "群聊", thread: "话题", panel: "panel" };
+const TYPE_ZH = { direct: "私聊", group: "群聊", thread: "话题", panel: "panel", task: "后台任务" };
 
 /* ── 主题：未手动选择时跟随系统 ── */
 const sysTheme = matchMedia("(prefers-color-scheme: light)");
@@ -678,6 +682,8 @@ async function loadConvs(keep) {
 			if (mine.length > 0) { sec("我的任务"); for (const c of mine) box.appendChild(item(c)); }
 			if (directs.length > 0) { sec("私聊"); for (const c of directs) box.appendChild(item(c)); }
 			for (const g of chats.values()) { sec(g.name); for (const c of g.items) box.appendChild(item(c)); }
+			const bgtasks = active.filter((c) => c.type === "task");
+			if (bgtasks.length > 0) { sec("后台任务"); for (const c of bgtasks) box.appendChild(item(c)); }
 			if (active.length === 0 && !(q !== "" && archived.length > 0)) box.insertAdjacentHTML("beforeend", `<div class="side-empty">没有进行中的会话</div>`);
 		} else {
 			for (const c of active) box.appendChild(item(c));
@@ -729,6 +735,7 @@ function markActive() {
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 	$("notifyBtn").hidden = c?.type !== "panel";
 	$("notifyBtn").textContent = c?.notify ? "飞书通知：开" : "飞书通知：关";
+	$("stopTaskBtn").hidden = c?.type !== "task";
 	$("archBanner").classList.toggle("on", Boolean(c?.archived));
 	refreshComposer();
 }
@@ -1207,6 +1214,12 @@ $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 }, "确认停止?");
+// 后台任务子会话：停止 = 中止该子会话的当前 run（与停止主会话不同，不影响父线）
+$("stopTaskBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
+	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
+	toast("已停止后台任务");
+	loadConvs(true);
+}, "停止后台任务?");
 async function setArchived(archived) {
 	try { await api("archive", { id: Number(convId), archived }); await loadConvs(true); } catch (e) { toast(e.message, true); }
 }
@@ -1393,6 +1406,39 @@ function openAlerts() {
 	if (!$("sheet").open) $("sheet").showModal();
 }
 $("alertsBtn").onclick = openAlerts;
+
+/* ── 定时任务：全部会话的活跃 schedule，可取消（创建走对话） ── */
+async function openSchedules() {
+	$("sheetTitle").textContent = "定时任务";
+	$("sheetBody").innerHTML = `<p class="rnote">全部会话的活跃定时任务，时间按浏览器本地时区显示；取消立即生效，周期任务不再触发。新建请在对应会话里直接说（如「明天 9 点提醒我」）。</p>
+		<div id="sList"></div>
+		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
+	const box = $("sList");
+	let list = [];
+	try { list = await api("schedules"); } catch (e) { toast(e.message, true); return; }
+	if (list.length === 0) box.innerHTML = `<div class="side-empty">暂无定时任务</div>`;
+	const UNIT_ZH = { minute: "分钟", hour: "小时", day: "天", week: "周", month: "月" };
+	for (const s of list) {
+		const row = document.createElement("div");
+		row.className = "rrow";
+		const repeatLabel = s.repeat
+			? "每 " + s.repeat.interval + " " + (UNIT_ZH[s.repeat.unit] ?? s.repeat.unit) + (s.repeat.weekdays ? "（限指定日）" : "")
+			: "单次";
+		row.innerHTML = `<div class="rh"><span class="rt"></span><small></small><button class="btn" data-variant="ghost" data-size="xs" style="color:var(--destructive)">取消</button></div><div class="rb"></div>`;
+		row.querySelector(".rt").textContent = s.conversation;
+		row.querySelector("small").textContent = (s.next ? new Date(s.next).toLocaleString() : "运行中") + " · " + repeatLabel;
+		row.querySelector(".rb").textContent = s.instruction;
+		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, async () => {
+			await api("schedules/cancel", { taskId: s.taskId });
+			row.remove();
+			if (box.children.length === 0) box.innerHTML = `<div class="side-empty">暂无定时任务</div>`;
+			toast("已取消");
+		}, "取消?");
+		box.appendChild(row);
+	}
+	if (!$("sheet").open) $("sheet").showModal();
+}
+$("schedBtn").onclick = openSchedules;
 
 /* ── 快捷键：Ctrl/⌘+K 搜索会话，Esc 关闭菜单/抽屉/清空搜索 ── */
 document.addEventListener("keydown", (e) => {

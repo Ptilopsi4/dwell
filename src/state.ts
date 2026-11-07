@@ -13,6 +13,9 @@ export const DATA_DIR = process.env.DWELL_DATA ?? "./data";
 /** 状态目录（默认 ./state，容器内 /state）：users/sessions/message-map/approvals。必须在 agent 可写域之外。 */
 export const STATE_DIR = process.env.DWELL_STATE ?? "./state";
 
+/** dwell 解释「本地时间」用的 IANA 时区（定时任务 at/周期、日期注入）；缺省取进程时区（服务器为 UTC 时需显式设 Asia/Shanghai）。 */
+export const DWELL_TZ = process.env.DWELL_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
 /** 未设 cwd 的会话（root）的工作目录：不能退回 process.cwd()（应用根），沙箱会把它可写挂进去。 */
 export const DEFAULT_CWD = resolve(DATA_DIR, "work", "root");
 

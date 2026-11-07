@@ -84,7 +84,7 @@ MemoryMax=1200M
 WantedBy=multi-user.target
 ```
 
-node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。
+node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
 
 ```sh
 sudo systemctl daemon-reload

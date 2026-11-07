@@ -15,17 +15,19 @@
 
 ```
 src/
-  index.ts          主程序：装配、飞书消息管线、会话路由、命令（/new /status /cancel /approve /deny /allow /disallow /help /whoami）、审批卡、FeishuBridge
+  index.ts          主程序：装配、飞书消息管线、会话路由、命令（/new /status /cancel /approve /deny /allow /disallow /help /whoami）、审批卡、FeishuBridge、自治 run 开卡（onAutonomousRun）与 scope 重建
   harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer
   pipeline.ts       消息管线判定（群准入/空内容/降级路由/命令识别，无副作用，可单测）
   sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
   users.ts          角色（env 播种，state/users.json 为运行时真相）
-  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR/APP_ROOT/DEFAULT_CWD 常量（放这里避免 approval→harness 循环依赖）
+  state.ts          状态 JSON 原子写（tmp + rename，promise 链串行）+ DATA_DIR/STATE_DIR/APP_ROOT/DEFAULT_CWD/DWELL_TZ 常量（放这里避免 approval→harness 循环依赖）
   media.ts          入站图片/文件预处理（图片 → 视觉描述，文件 → cwd/uploads）
   report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
   sandbox.ts        bash 沙箱：bwrap wrapper 生成 + 启动探测（失败不启用，回退路径治理；真实行为由 probe-bwrap.ts 服务器验证）
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
-  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理
+  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）
+  ext/schedule.ts   dwell.schedule 工具 + dwell.schedule-run durable 任务（sleep→触发→周期续睡）；时区/周期纯函数
+  ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23）
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
   ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）/ dwell.lark.send（cwd 内文件发回当前会话）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
@@ -40,7 +42,7 @@ docs/               部署文档（中英双语）
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 115 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 128 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -66,7 +68,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - **`NodeExecutionEnv` 的 cwd 必须是绝对路径**，否则 bash 工具会双拼路径（见 gotchas）
 - **幂等**：飞书输入以 `requestId = message_id` 提交，重推不会产生第二次 run。handler 里只做 submit，`wait`/流式放到 handler 之外（飞书 3 秒 ack）
 - **运行中插话**用 `whenBusy: "steer"`；`queued` 状态的提交不开新卡（会和旧卡重复）
-- **run 归属**：每次 submit 前设置 `runSender` / `runVia`，审批和 /cancel 靠它判定
+- **run 归属**：每次 submit 前设置 `runSender` / `runVia`，审批和 /cancel 靠它判定；后台子会话的审批按 `conversationScope` 映射到父线开窗，续跑输入发往子会话本身（`pendingApprovals[].conversationId`）
 - **panel 不设隐藏通道**：panel 向飞书会话发的消息一律先在原 chat 可见转发，再作为普通输入提交
 - 状态 JSON 一律经 `writeStateJson` 写
 
@@ -77,6 +79,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - 飞书类工具 `executionMode: "sequential"`（rate limit）
 - 依赖运行时对象（channel、sessions）时用 getter 延迟绑定，参考 `makeLarkExtension`
 - 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS`/`rmRecursiveMatch`/`STATE_FILES` 并补 `test/approval.test.ts`
+- 定时/后台任务：durable task 一律 `background: true`（不占 idle、/cancel 不穿越）；自治 run（无用户消息触发）统一经 `onAutonomousRun` 开卡，归属先 `attribute` 再 submit；requestId 幂等是重启不重发的唯一保障
 - 自研工具执行命令一律用 `env.exec` 的字符串形式（经 shellPath 进沙箱）；禁用字符串数组形式——数组直接 spawn 程序不经 shellPath，绕开 bash 沙箱
 - 对外 HTTP 用 `fetch` + `AbortSignal.timeout`，单测 mock `fetch`（参考 `test/web.test.ts`）
 

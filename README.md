@@ -51,6 +51,7 @@ Everything is configured through environment variables. `.env.example` is a temp
 | `LARK_APP_ID` / `LARK_APP_SECRET` | Credentials of a Feishu custom app |
 | `DWELL_ADMINS` | Admin open_ids, comma-separated |
 | `DWELL_ALLOW` | Member open_ids, comma-separated |
+| `DWELL_TZ` | IANA timezone dwell uses to interpret local times: scheduled tasks (`at` times, recurrence), the date given to the model. Defaults to the process timezone — on a UTC server set e.g. `Asia/Shanghai` |
 
 `DWELL_ADMINS` and `DWELL_ALLOW` seed `state/users.json` once, when the file does not exist. After that `users.json` is the source of truth; manage it with `/allow`, `/disallow`, or the panel. With an empty allowlist every message is rejected.
 
@@ -118,6 +119,8 @@ When a command is held, the bot posts an approval card. Tapping approve, or repl
 | `dwell.lark.read` | Read Feishu chat history: the 20 most recent messages of the current chat by default; `around` reads the context of one message; `chat` reads another chat. The bot must be in the chat. Reading chats other than the current one is limited to tasks triggered by admins | None |
 | `dwell.lark.image` | Describe an image by message id. In groups, images sent without @bot do not enter the context; the model sees `[image]` placeholders in the history and looks at them on demand | None |
 | `dwell.lark.send` | Send a file from the working directory to the current Feishu chat: images (png/jpeg/gif/webp) up to 10MB, other files up to 30MB, no empty files. Current chat only, source limited to the working directory. Panel tasks (no Feishu chat) get a download in the panel instead | None |
+| `dwell.schedule` | Schedule this conversation to receive an instruction later (one-shot or recurring, e.g. workday digests or reminders). One durable background task per schedule: survives restarts, `/cancel` does not touch it, downtime misses fire once and then follow the cadence. Max 20 per conversation, recurrence at least 10 minutes apart | None |
+| `dwell.task` | Start named background agents for long jobs: the conversation stays free, the agent's answer comes back as a follow-up. Background agents share the working directory and tools (minus these two), are held by a background anchor so `/cancel` and context resets do not stop them; stop them with `dwell.task stop` or the panel. Max 3 per conversation, 6 server-wide. Their dangerous commands follow the parent thread's approval | None |
 
 Images and files:
 
@@ -138,6 +141,7 @@ Open `http://<host>:<DWELL_PANEL_PORT>/` in a browser.
 - Attach images or files in the input box (paperclip, paste, drag and drop). Images are described by the vision model before they enter the context; for Feishu conversations the attachments are first posted to the original chat
 - Tool rows offer downloads for files produced by `dwell.lark.send` or `write` (only inside that conversation's working directory, always as an attachment, never rendered inline)
 - The sidebar status dot reflects both the panel's live channel and the Feishu connection (green ok, yellow connecting or reconnecting, red disconnected); the bell at the bottom lists recent runtime alerts, with an unread badge
+- The clock button lists every active scheduled task across conversations and can cancel one; background agents appear in the sidebar under their parent conversation, open to read their transcript, with a stop action in the conversation menu
 - Create panel tasks, rename, archive, clear context, abort, approve, and manage users
 - A message sent to a Feishu conversation from the panel first appears in the original chat as "From admin", then the bot replies; everyone in the group can see it
 - Aborting or clearing a Feishu conversation from the panel posts a notice to the original chat

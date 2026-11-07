@@ -14,6 +14,15 @@ export const runSender = new Map<number, string>();
 /** conversationId → 当前 run 的发起入口；决定审批卡片是否发到飞书。 */
 export const runVia = new Map<number, "panel" | "feishu">();
 
+/** 后台子会话 → 父会话：审批窗口/归属/卡片路由按父线（scope）算，续跑输入发到子会话本身。
+ *  index 启动时从 sqlite 重建，background 扩展 start 时登记；只在进程内存，不落盘。 */
+export const conversationScope = new Map<number, number>();
+
+/** 审批与归属用的会话 scope：子会话归并到父会话，其余原样。 */
+export function scopeOf(conversationId: number): number {
+	return conversationScope.get(conversationId) ?? conversationId;
+}
+
 /** 审批窗口：(conversationId, sender) → 到期时间戳。 */
 export const approvals = new Map<string, number>();
 
@@ -22,6 +31,8 @@ export type PendingApproval = {
 	match: string;
 	trigger: string;
 	via: "panel" | "feishu";
+	/** 被拦截命令所在会话（后台子会话时 ≠ 窗口 scope；审批后由此唤醒） */
+	conversationId?: number;
 	/** 飞书审批卡片的消息 ID，其他入口做出决定后据此更新卡片 */
 	cardMessageId?: string;
 	cardChatId?: string;
@@ -70,7 +81,11 @@ export async function loadApprovalState(): Promise<void> {
 		if (typeof expiry === "number" && expiry > now) approvals.set(key, expiry); // 过期窗口不复活
 	}
 	for (const [key, pending] of saved.pending ?? []) {
-		if (typeof pending?.command === "string") pendingApprovals.set(key, pending);
+		if (typeof pending?.command === "string") {
+			// 旧版本无 conversationId 字段：回填为窗口键里的会话（即 scope 本身）
+			if (typeof pending.conversationId !== "number") pending.conversationId = Number(key.split(":")[0]);
+			pendingApprovals.set(key, pending);
+		}
 	}
 	for (const [id, sender] of saved.runSender ?? []) runSender.set(Number(id), sender);
 	for (const [id, via] of saved.runVia ?? []) runVia.set(Number(id), via);
@@ -262,6 +277,31 @@ export function makePathGuardExtension(cwdOf: CwdOf) {
 	});
 }
 
+/** bash 危险命令判定与拦截（同步；beforeTool 调用，单测直接覆盖）：
+ *  scope = 子会话归并后的父线——窗口/归属/卡片按父线，待审记录被拦截命令所在的真实会话（后台子会话），审批后由此唤醒。 */
+export function bashApprovalBlock(command: string, conversationId: number): { block: string } | undefined {
+	if (stateFileBlocked(command)) {
+		return { block: "Access to service state files or the process environment is not allowed." };
+	}
+	// sudo 在本环境永不可能成功（NoNewPrivileges + dwell 无 sudo 组），直接说明，不走审批
+	if (/\bsudo\b/.test(command)) {
+		return { block: "The service runs as a non-root user without sudo, so this command cannot run. Tell the user and use an approach that does not need elevated privileges." };
+	}
+	const match = dangerMatch(command);
+	if (match === null) return undefined;
+	const scope = scopeOf(conversationId);
+	const sender = runSender.get(scope) ?? "";
+	if (windowOpen(scope, sender)) return undefined;
+	pendingApprovals.set(windowKey(scope, sender), { command, match, trigger: sender, via: runVia.get(scope) ?? "feishu", conversationId });
+	void persistApprovals();
+	onApprovalNeeded?.(scope, sender, command, match);
+	// 面板入口的审批只在面板处理（飞书成员 /approve 开的是自己的窗口，帮不上忙）
+	const viaPanel = runVia.get(scope) === "panel";
+	return { block: viaPanel
+		? `The approval policy blocked this command (${match}). An admin has been notified to approve it in the panel; tell the user to wait. Continue the original task after approval, and do not try to work around the block.`
+		: `The approval policy blocked this command (${match}). Tell the user to tap the button on the approval card or reply /approve (10-minute window by default). Continue the original task after approval, and do not try to work around the block.` };
+}
+
 /** 挂到 registry 的 extension；只管 bash，其余工具放行。 */
 export function makeApprovalExtension() {
 	return defineExtension({
@@ -269,28 +309,8 @@ export function makeApprovalExtension() {
 		hooks: [
 			hook(ToolTask, {
 				beforeTool: (call, api) => {
-					if (call.name !== "bash") return undefined;
-					const command = (call.arguments as { command?: string }).command ?? "";
-					if (stateFileBlocked(command)) {
-						return { block: "Access to service state files or the process environment is not allowed." };
-					}
-					// sudo 在本环境永不可能成功（NoNewPrivileges + dwell 无 sudo 组），直接说明，不走审批
-					if (/\bsudo\b/.test(command)) {
-						return { block: "The service runs as a non-root user without sudo, so this command cannot run. Tell the user and use an approach that does not need elevated privileges." };
-					}
-					const match = dangerMatch(command);
-					if (match === null) return undefined;
-					const convId = api.conversationId as number;
-					const sender = runSender.get(convId) ?? "";
-					if (windowOpen(convId, sender)) return undefined;
-					pendingApprovals.set(windowKey(convId, sender), { command, match, trigger: sender, via: runVia.get(convId) ?? "feishu" });
-					void persistApprovals();
-					onApprovalNeeded?.(convId, sender, command, match);
-					// 面板入口的审批只在面板处理（飞书成员 /approve 开的是自己的窗口，帮不上忙）
-					const viaPanel = runVia.get(convId) === "panel";
-					return { block: viaPanel
-						? `The approval policy blocked this command (${match}). An admin has been notified to approve it in the panel; tell the user to wait. Continue the original task after approval, and do not try to work around the block.`
-						: `The approval policy blocked this command (${match}). Tell the user to tap the button on the approval card or reply /approve (10-minute window by default). Continue the original task after approval, and do not try to work around the block.` };
+				if (call.name !== "bash") return undefined;
+				return bashApprovalBlock((call.arguments as { command?: string }).command ?? "", api.conversationId as number);
 				},
 			}),
 		],

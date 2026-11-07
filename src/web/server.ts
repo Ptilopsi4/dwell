@@ -9,9 +9,12 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
+import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
-import { approvalDecision, clampMinutes, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
+import { approvalDecision, clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
+import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
+import { BackgroundDoc } from "../ext/background.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
@@ -279,11 +282,21 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/conversations") {
-			let list = [...sessions.listConversations()];
+			type ConvRow = ReturnType<Sessions["listConversations"]>[number] & { parent?: number; busy?: boolean };
+			let list: ConvRow[] = [...sessions.listConversations()];
 			if (list.length === 0) {
 				// 本地/空库兜底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
 				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null, notify: false, emoji: null }];
+			}
+			// 后台任务子会话：挂在父会话下（type "task"；名字取父会话名册，停止后名册删除即从侧栏消失）
+			for (const [child, parent] of [...conversationScope.entries()]) {
+				if (!list.some((c) => c.id === parent)) continue;
+				const doc = await harness.snapshot(BackgroundDoc, parent as ConversationId, BACKGROUND_CONTEXT);
+				const name = Object.entries(doc?.agents ?? {}).find(([, v]) => v.conversationId === child)?.[0];
+				if (name === undefined) continue;
+				const busy = (await harness.snapshot(PiLiveDoc, child as ConversationId, BACKGROUND_CONTEXT))?.run !== undefined;
+				list.push({ id: child, key: `bg:${name}`, owner: "", name: `🧵 ${name}`, archived: false, type: "task", lastTs: 0, chatId: null, notify: false, emoji: null, parent, busy });
 			}
 			const titled = await within(
 				Promise.all(list.map(async (c) => {
@@ -362,7 +375,9 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		if (req.method === "POST" && url.pathname === "/api/approve") {
 			const body = await readBody(req);
 			const key = String(body?.key ?? "");
-			const convId = Number(key.split(":")[0]);
+			// 窗口键里的会话是 scope（后台子会话已归并到父线）；续跑目标是待审记录里被拦命令所在会话
+			const pending = pendingApprovals.get(key);
+			const convId = pending?.conversationId ?? Number(key.split(":")[0]);
 			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const action = body?.action === "deny" ? "deny" : "approve";
@@ -416,6 +431,34 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const result = await ingestUpload(cwd, body?.name, body?.data, describer());
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
 			json(res, 200, { path: result.path, kind: result.kind, size: result.size, part: result.part });
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/schedules") {
+			// 全部活跃定时任务（面板只读展示 + 取消；创建走对话）
+			const records = await harness.commit((tx) => scanLiveTasks(tx, { kind: SCHEDULE_TASK_KIND }, 500), BACKGROUND_CONTEXT);
+			const convs = sessions.listConversations();
+			json(res, 200, records.map((t) => {
+				const input = t.input as ScheduleInput;
+				const conv = convs.find((c) => c.id === input.conversationId);
+				return {
+					taskId: String(t.id),
+					id: input.id,
+					conversationId: input.conversationId,
+					conversation: conv?.name ?? `#${input.conversationId}`,
+					instruction: input.instruction,
+						next: t.state.status === "sleeping" ? new Date(t.state.until).toISOString() : null,
+					repeat: input.repeat ?? null,
+					creator: input.creator,
+				};
+			}));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/schedules/cancel") {
+			const body = await readBody(req);
+			const taskId = String(body?.taskId ?? "");
+			if (taskId === "") throw new HttpError(400, "taskId required");
+			const state = await harness.abortTask(taskId as never, BACKGROUND_CONTEXT);
+			json(res, 200, { ok: true, state });
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/events") {

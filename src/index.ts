@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, type Conversation, type ConversationId, type Harness, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
+import { AssistantEntry, type Conversation, type ConversationId, type Cursor, type Harness, type SubmissionId, type TaskGraph, type TaskGraphNode, type TaskGraphState, type TaskId } from "@earendil-works/pi-durable";
 import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { makeReporter } from "./report.ts";
 import { describeResources, sniffImageMime } from "./media.ts";
@@ -15,8 +15,10 @@ import { connectChannel, downloadMessageResource, matchMention, type CardActionE
 import { emptyReply, fallbackRoute, groupAdmits, messageAction } from "./pipeline.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
-import { approvals, clampMinutes, decisionInput, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, setApprovalCallback, windowKey } from "./ext/approval.ts";
+import { approvals, clampMinutes, conversationScope, decisionInput, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, scopeOf, setApprovalCallback, windowKey } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
+import { makeScheduleExtension } from "./ext/schedule.ts";
+import { BACKGROUND_ANCHOR_KIND, makeBackgroundExtension } from "./ext/background.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
 
@@ -61,6 +63,28 @@ async function main(): Promise<void> {
 		},
 		nameOf: (id) => sessions?.nameOf(id),
 	});
+	// 定时触发/后台回报的自治 run：归属登记与开卡入口（schedule/background 两扩展共用；sessions/channel 运行时才解引用）
+	const attributeRun = (conversationId: number, creator: string): void => {
+		void setRunAttributionIfIdle(conversationId, creator, sessions.chatOf(conversationId) === undefined ? "panel" : "feishu");
+	};
+	const onAutonomousRun = (conversationId: number, submissionId: SubmissionId, header: string): void => {
+		void openAutonomousCard(conversationId, submissionId, header);
+	};
+	// 定时任务：sleep → 触发 → 周期续睡；后台子代理：锚任务持有子会话，Reporter 投递与回报
+	// 子代理移除的扩展对象经 getter 延迟取（backgroundExt 自引用，装配后才存在）
+	const scheduleExt = makeScheduleExtension({
+		attribute: attributeRun,
+		onFired: onAutonomousRun,
+		getHarness: () => harness,
+		senderOf: (id) => runSender.get(id),
+	});
+	const backgroundExt = makeBackgroundExtension({
+		attribute: attributeRun,
+		onFired: onAutonomousRun,
+		onStarted: (child, parent) => conversationScope.set(child, parent),
+		senderOf: (id) => runSender.get(id),
+		forbidden: () => [scheduleExt, backgroundExt],
+	});
 	harness = await openDwell(undefined, [
 		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
 		makeLarkExtension({
@@ -82,9 +106,14 @@ async function main(): Promise<void> {
 			const conversation = await harness.conversation(id as ConversationId, context);
 			return conversation === undefined ? undefined : (await conversation.agent(context)).cwd ?? undefined;
 		}),
+		// 定时任务与后台任务（定义见 openDwell 前的两个扩展对象）
+		scheduleExt,
+		backgroundExt,
 	], onReport);
 	sessions = new Sessions(harness);
 	await sessions.load();
+	// 后台子会话 → 父会话映射重建（审批窗口按父线开；重启后 approval 扩展立即能用）
+	await rebuildConversationScope();
 	const realigned = await sessions.alignModel();
 	console.log(`[dwell] 模型 ${MODEL.provider}/${MODEL.modelId}${realigned > 0 ? `（${realigned} 个会话已切换到该模型）` : ""}`);
 	await users.load();
@@ -486,6 +515,80 @@ async function submitAndReplyPlain(
 	}
 }
 
+/** 定时触发/后台回报的自治 run 开回复卡：与用户消息同一套锚点/话题规则；会话忙时等 followUp 出队再开卡（上限 30 分钟），
+ *  避免与正在进行的回答同卡串流。panel 会话（无 chat）走通知开关私发摘要。 */
+async function openAutonomousCard(conversationId: number, submissionId: SubmissionId, header: string): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	const submission = await harness.submission(submissionId, context);
+	if (submission === undefined) return;
+	const chatId = sessions.chatOf(conversationId);
+	if (chatId === undefined || !connected()) {
+		if (sessions.notifyEnabled(conversationId)) void notifyAutonomousPanelResult(conversationId, submission);
+		return;
+	}
+	try {
+		const deadline = Date.now() + 30 * 60_000;
+		for (;;) {
+			const record = await submission.status(context);
+			if (record.status !== "queued") break;
+			if (Date.now() > deadline) return;
+			await new Promise((r) => setTimeout(r, 2000));
+		}
+		const conversation = await harness.conversation(conversationId as ConversationId, context);
+		if (conversation === undefined) return;
+		const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
+		const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
+		const sent = await channel.stream(
+			chatId,
+			{ markdown: async (s) => { await s.append(`${header}\n\n`); await streamReplyCore(conversation, submission, s, context); } },
+			anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" },
+		);
+		await sessions.anchor(sent.messageId, conversationId as ConversationId);
+	} catch (err) {
+		console.error("[dwell] 自治 run 开卡失败:", err);
+	}
+}
+
+/** panel 会话的自治 run（定时/后台）结束后私发结果摘要（通知开关开启时；回复通知即续接任务线）。 */
+async function notifyAutonomousPanelResult(conversationId: number, submission: Awaited<ReturnType<Conversation["submit"]>>): Promise<void> {
+	try {
+		const settled = await submission.wait(BACKGROUND_CONTEXT);
+		let status = "完成";
+		let text = "";
+		if (settled.status === "done" && settled.type === "input") {
+			const entry = await harness.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
+			const answer = entry?.model?.[0] as AssistantMessage | undefined;
+			text = (answer?.content ?? []).flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+		} else {
+			status = "失败";
+			text = settled.status === "unanswered" ? settled.reason : settled.status;
+		}
+		await feishuBridge.notifyPanel(conversationId, status, text === "" ? "（无文本输出）" : text);
+	} catch (err) {
+		console.error("[dwell] panel 自治任务通知失败:", err);
+	}
+}
+
+/** 启动时重建子会话→父会话映射：后台子会话由锚任务持有，扫全部会话记录拿到 (child, 锚任务)，锚任务所在会话即父线。 */
+async function rebuildConversationScope(): Promise<void> {
+	const context = BACKGROUND_CONTEXT;
+	const pairs = await harness.commit<{ child: number; anchor: unknown }[]>(async (tx) => {
+		const out: { child: number; anchor: unknown }[] = [];
+		let cursor: Cursor | undefined;
+		do {
+			const page = await tx.scanConversations({}, 200, cursor);
+			for (const record of page.items) if (record.owner !== undefined) out.push({ child: record.id as number, anchor: record.owner.taskId });
+			cursor = page.next;
+		} while (cursor !== undefined);
+		return out;
+	}, context);
+	for (const { child, anchor } of pairs) {
+		// 非后台任务的 task-owned 会话（当前没有）也顺带跳过：只认锚任务 kind
+		const task = await harness.getTask(anchor as TaskId, context);
+		if (task !== undefined && task.kind === BACKGROUND_ANCHOR_KIND) conversationScope.set(child, task.conversationId as number);
+	}
+}
+
 async function replyTo(target: ReplyTarget, text: string, conversation?: Conversation): Promise<void> {
 	const sent = await channel.send(target.chatId, { markdown: text }, { replyTo: target.messageId });
 	if (conversation !== undefined) await sessions.anchor(sent.messageId, conversation.id);
@@ -593,17 +696,20 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			void persistApprovals();
 			const pending = pendingApprovals.get(windowKey(convId, msg.senderId));
 			if (pending !== undefined) {
-				// 事后批准：存在被拦截的待审命令，唤醒模型重试
+				// 事后批准：存在被拦截的待审命令，唤醒被拦命令所在会话（后台子会话时 ≠ 本命令所在的父线）
 				pendingApprovals.delete(windowKey(convId, msg.senderId));
 				void persistApprovals();
 				await replyTo(target, `已批准：本任务线 ${minutes} 分钟内危险命令免拦截，继续执行。`);
-				const s = await conversation.submit({
+				const targetId = (pending.conversationId ?? convId) as ConversationId;
+				const resume = targetId === conversation.id ? conversation : await harness.conversation(targetId, context);
+				if (resume === undefined) break;
+				const s = await resume.submit({
 					type: "input",
 					content: decisionInput("approve", minutes),
 					whenBusy: "steer",
 					requestId: `${msg.messageId}-approve`,
 				}, context);
-				void submitAndReply(conversation, s, target);
+				void submitAndReply(resume, s, target);
 			} else {
 				// 预授：没有待审命令，只开窗口，不唤醒模型
 				await replyTo(target, `已预先批准：本任务线 ${minutes} 分钟内危险命令免拦截。`);
@@ -687,7 +793,7 @@ function helpCard(): Record<string, unknown> {
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新对话（清空本任务线上下文）"),
 				cmd("/status", "查看运行中任务（管理员）"),
-				cmd("/cancel", "中止当前任务（线主/管理员）"),
+				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),
 				cmd("/deny", "关闭批准窗口"),
 				cmd("/allow @某人 [admin]", "添加成员/管理员（管理员）"),
@@ -876,24 +982,23 @@ async function handleCardActionInner(evt: CardActionEvent): Promise<void> {
 	const conversationId = v.conversationId;
 	if (conversationId === undefined || v.sender === undefined) return;
 	const context = BACKGROUND_CONTEXT;
-	const conversation = await harness.conversation(conversationId as ConversationId, context);
-	if (conversation === undefined) return;
-
-	// 归属校验：触发者 ∪ owner ∪ admin
-	const owner = sessions.ownerOf(conversation.id) ?? "";
+	// 卡片上的 conversationId 是审批 scope（后台子会话已归并到父线）；归属校验按 scope 的 owner
+	const scope = scopeOf(conversationId);
+	const owner = sessions.ownerOf(scope as ConversationId) ?? "";
 	if (evt.operator.openId !== v.sender && evt.operator.openId !== owner && !users.isAdmin(evt.operator.openId)) {
 		console.log(`[dwell] 卡片审批被忽略：operator 非触发者/owner/admin`);
 		return;
 	}
 
-	const key = windowKey(conversationId, v.sender);
+	const key = windowKey(scope, v.sender);
 	const pending = pendingApprovals.get(key);
 	if (pending === undefined) return; // 历史卡/已处理：点击无效，防隔夜开窗
+	// 续跑目标：被拦截命令所在会话（后台子会话时 ≠ scope）
+	const conversation = await harness.conversation((pending.conversationId ?? scope) as ConversationId, context);
+	if (conversation === undefined) return;
 	const minutes = v.minutes ?? 10;
 	const state = v.action === "approve" ? { kind: "approved" as const, minutes } : { kind: "denied" as const };
-	if (pending !== undefined) {
-		await channel.updateCard(evt.messageId, approvalCard(conversationId, v.sender, pending.command, pending.match, state)).catch(() => {});
-	}
+	await channel.updateCard(evt.messageId, approvalCard(scope, v.sender, pending.command, pending.match, state)).catch(() => {});
 
 	if (v.action === "approve") {
 		pendingApprovals.delete(key);
