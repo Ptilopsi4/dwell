@@ -27,7 +27,7 @@ src/
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
   ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）
   ext/schedule.ts   dwell.schedule 工具 + dwell.schedule-run durable 任务（sleep→触发→周期续睡）；时区/周期纯函数
-  ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23）
+  ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23）；makeBackgroundDeliverer 审批续跑投递器（输入经 Reporter 投回子会话，结果 followUp 回父线）
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
   ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）/ dwell.lark.send（cwd 内文件发回当前会话）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
@@ -42,7 +42,7 @@ docs/               部署文档（中英双语）
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 128 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 129 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -68,7 +68,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - **`NodeExecutionEnv` 的 cwd 必须是绝对路径**，否则 bash 工具会双拼路径（见 gotchas）
 - **幂等**：飞书输入以 `requestId = message_id` 提交，重推不会产生第二次 run。handler 里只做 submit，`wait`/流式放到 handler 之外（飞书 3 秒 ack）
 - **运行中插话**用 `whenBusy: "steer"`；`queued` 状态的提交不开新卡（会和旧卡重复）
-- **run 归属**：每次 submit 前设置 `runSender` / `runVia`，审批和 /cancel 靠它判定；后台子会话的审批按 `conversationScope` 映射到父线开窗，续跑输入发往子会话本身（`pendingApprovals[].conversationId`）
+- **run 归属**：每次 submit 前设置 `runSender` / `runVia`，审批和 /cancel 靠它判定；后台子会话的审批按 `conversationScope` 映射到父线开窗（子会话有自己的 runSender，start 时登记创建者，不随父线新消息漂移），续跑一律经 `makeBackgroundDeliverer` 建 Reporter 投回子会话——不直接 submitAndReply 子会话（会把回复卡锚在子会话上且无回报）
 - **panel 不设隐藏通道**：panel 向飞书会话发的消息一律先在原 chat 可见转发，再作为普通输入提交
 - 状态 JSON 一律经 `writeStateJson` 写
 

@@ -3,6 +3,7 @@
 // 停机期间错过的多次触发只补一次，之后跳到下一个晚于 now 的时刻。
 // 时区/周期算法移植自 pi-durable-cloudflare src/schedule.ts（MIT，钉 1.4.0），weekdays 过滤为 dwell 增补。
 import { defineDoc, defineTask, defineTool, defineExtension, section, type ConversationId, type Cursor, type Extension, type Harness, type SubmissionId, type TaskId, type TaskRecord, type Tx, type TaskQuery } from "@earendil-works/pi-durable";
+import { randomUUID } from "node:crypto";
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "typebox";
 import { DWELL_TZ } from "../state.ts";
@@ -33,16 +34,19 @@ export type ScheduleInput = {
 };
 
 type ScheduleCheckpoint = { phase: "wait"; next: number; n: number } | { phase: "fire"; n: number; at: number };
-
 export type ScheduleDeps = {
-	/** run 归属登记（审批卡、/cancel 归属到创建者；submit 前调用） */
-	attribute: (conversationId: number, creator: string) => void;
+	/** run 归属登记（审批卡、/cancel 归属到创建者；submit 前调用）。fire 阶段 await 它，防 run 先启动读到旧归属 */
+	attribute: (conversationId: number, creator: string) => void | Promise<void>;
 	/** 触发的 run 由宿主开回复卡（panel 会话走通知开关） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
 	/** cancel 需要 abortTask；装配时 harness 尚未创建，getter 延迟绑定 */
 	getHarness: () => Pick<Harness, "abortTask"> | undefined;
 	/** 当前 run 发起者（schedule 创建者记录用） */
 	senderOf: (conversationId: number) => string | undefined;
+	/** 创建者是否仍在白名单：被 /disallow 后终止任务并告警（缺省不检查，测试/无 users 场景） */
+	isAllowed?: (openId: string) => boolean;
+	/** 创建者被移出白名单时的告警（report 管线，仅记日志） */
+	onCreatorRevoked?: (input: ScheduleInput) => void;
 };
 
 // ── 时区与周期（纯函数，单测覆盖） ──
@@ -207,15 +211,19 @@ const ScheduleIntent = defineDoc<{ scheduled?: ScheduleInput }>({
 /** 任务图里的活跃状态（terminal 记录仍留在 storage，计数/列表都要过滤）。 */
 export const LIVE_STATUSES = new Set(["pending", "running", "waiting", "sleeping", "completing"]);
 
-/** 分页扫出活跃任务记录（kind/conversationId 过滤交给 query）。 */
+/** 分页扫出活跃任务记录（kind/conversationId/status 过滤交给 query）。
+ *  按 status 逐个查（SQL 等值过滤，terminal 历史不进页）；防御性再过滤一层，包住 restart 后 storage 状态与图不同步的边界。 */
 export async function scanLiveTasks(tx: Tx, query: TaskQuery, max = 500): Promise<TaskRecord<JsonValue, JsonValue, JsonValue>[]> {
 	const out: TaskRecord<JsonValue, JsonValue, JsonValue>[] = [];
-	let cursor: Cursor | undefined;
-	do {
-		const page = await tx.scanTasks(query, 100, cursor);
-		for (const record of page.items) if (LIVE_STATUSES.has(record.state.status)) out.push(record);
-		cursor = page.next;
-	} while (cursor !== undefined && out.length < max);
+	for (const status of LIVE_STATUSES) {
+		let cursor: Cursor | undefined;
+		do {
+			const page = await tx.scanTasks({ ...query, status: status as TaskQuery["status"] }, 100, cursor);
+			for (const record of page.items) if (LIVE_STATUSES.has(record.state.status)) out.push(record);
+			cursor = page.next;
+		} while (cursor !== undefined && out.length < max);
+		if (out.length >= max) break;
+	}
 	return out;
 }
 
@@ -230,8 +238,14 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 			fire: async (task, runtime, context) => {
 				const input = task.input;
 				const { n, at } = task.state.checkpoint;
-				// 归属先于 submit：审批卡与 /cancel 按创建者记（会话忙时归属不变，见 index.setRunAttributionIfIdle）
-				deps.attribute(input.conversationId, input.creator);
+				// 创建者已被移出白名单：终止任务并告警（防止被 /disallow 的成员留下的定时任务继续以其身份触发）
+				if (input.creator !== "" && deps.isAllowed !== undefined && !deps.isAllowed(input.creator)) {
+					deps.onCreatorRevoked?.(input);
+					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+					return;
+				}
+				// 归属先于 submit：审批卡与 /cancel 按创建者记（会话忙时归属不变，见 index.setRunAttributionIfIdle）；await 完成再 submit，防竞态读旧归属
+				await deps.attribute(input.conversationId, input.creator);
 				const conversation = await runtime.conversation(input.conversationId as ConversationId, context);
 				if (conversation === undefined) {
 					runtime.report(new Error(`Scheduled task ${input.id}: conversation ${input.conversationId} is missing`));
@@ -248,7 +262,11 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 					},
 					context,
 				);
-				deps.onFired(input.conversationId, submission.id, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
+				// memo 去重：submit 与后续 commit 之间崩溃重跑时 submission 幂等（同 requestId），但开卡回调会重复。
+				//  memo 同名永不覆写 → 每次触发一个槽：重放拿回的不是自己的 token 说明首次已开卡（每条约 45B，随触发次数线性增长，可接受）
+				const token = randomUUID();
+				const winner = await runtime.memo(`fired:${n}`, token, context);
+				if (winner === token) deps.onFired(input.conversationId, submission.id, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
 				await runtime.commit(() => {
 					if (input.repeat === undefined) return { status: "terminal", outcome: { status: "completed", result: null } };
 					const next = nextRecurrenceRunAt(at, input.repeat, runtime.now(), input.tz);

@@ -10,7 +10,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, type Extension, type Harness as HarnessType, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, MAX_SCHEDULES, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleInput } from "../src/ext/schedule.ts";
+import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleInput } from "../src/ext/schedule.ts";
 
 const UTC = "UTC";
 const MIN = 60_000;
@@ -122,8 +122,7 @@ const lastUserText = async (harness: HarnessType, conversationId: number): Promi
 	return JSON.stringify(users[0]?.model ?? []);
 };
 
-test("集成：单次触发提交输入并结束；周期任务续睡；取消不再触发；重开后 sleeping 仍触发", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-"));
+test("集成：单次触发提交输入并结束；周期任务续睡；取消不再触发；重开后 sleeping 仍触发", async () => {	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-"));
 	const fired: { conversationId: number; header: string; submissionId: SubmissionId }[] = [];
 	const clock = new FakeClock();
 	const deps = {
@@ -131,6 +130,8 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		onFired: (conversationId: number, submissionId: SubmissionId, header: string) => fired.push({ conversationId, header, submissionId }),
 		getHarness: () => undefined,
 		senderOf: () => "ou_test",
+		// 白名单检查：ou_banned 已被移出 → 其 schedule 触发时终止
+		isAllowed: (id: string) => id !== "ou_banned",
 	};
 	const ScheduleRun = makeScheduleRunTask(deps);
 	const ext: Extension = makeScheduleExtension(deps);
@@ -176,30 +177,32 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		// 两次触发的 requestId 不同（n 递增），内容都进了会话
 		assert.match(await lastUserText(harness, convId), /tick/);
 
-		// 取消：abort 后推进不再触发
+		// 取消：abort 后推进不再触发；terminal 记录不进 scanLiveTasks（status 过滤在 SQL 层生效）
 		const before = fired.length;
 		const live = await harness.commit((tx) => scanLiveTasks(tx, { conversationId: conv.id, kind: SCHEDULE_TASK_KIND }), context);
 		const loop = live.find((t) => (t.input as ScheduleInput).id === "schedule:loop");
 		assert.ok(loop !== undefined);
 		await harness.abortTask(loop.id, context);
+		await until(async () => (await harness.getTask(loop.id, context))?.state.status === "terminal");
+		const afterAbort = await harness.commit((tx) => scanLiveTasks(tx, { conversationId: conv.id, kind: SCHEDULE_TASK_KIND }), context);
+		assert.ok(!afterAbort.some((t) => (t.input as ScheduleInput).id === "schedule:loop"), "terminal 记录不应出现在活跃扫描里");
 		await clock.advance(30 * MIN);
 		await new Promise((r) => setTimeout(r, 50));
 		assert.equal(fired.length, before);
 
-		// 重开：新建 sleeping 的任务在 close/reopen 后照常触发
-		const after = await create({ id: "schedule:restart", instruction: "reborn", firstAt: clock.now + 5 * MIN });
+		// 重开：新建 sleeping 的任务在 close/reopen 后照常触发；创建者已被移出白名单的任务触发时终止
+		const banned = await conv.commit((tx) => tx.createTask(ScheduleRun, { id: "schedule:banned", instruction: "ghost", firstAt: clock.now + 1 * MIN, conversationId: convId, creator: "ou_banned", tz: UTC } as ScheduleInput, { ownership: { kind: "conversation" }, background: true }), context);
+		const after = await create({ id: "schedule:restart", instruction: "reborn", firstAt: clock.now + 20 * MIN });
 		assert.ok(after !== undefined);
+		await clock.advance(6 * MIN);
+		await until(async () => (await harness.getTask(banned, context))?.state.status === "terminal");
+		assert.ok(!fired.some((f) => f.header.includes("ghost")), "被移出白名单的创建者不应触发");
 		await harness.close(context);
 		harness = await open();
-		await clock.advance(6 * MIN);
+		await clock.advance(20 * MIN);
 		await until(() => fired.some((f) => f.header.includes("reborn")));
 	} finally {
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });
 	}
-});
-
-test("scanLiveTasks 过滤 terminal 记录；上限常量就位", async () => {
-	assert.equal(MAX_SCHEDULES, 20);
-	// 纯 scan 行为已在集成测试中间接覆盖（取消前找到 loop、abort 后 terminal）
 });

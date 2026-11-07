@@ -45,6 +45,8 @@ export interface FeishuBridge {
 	notice(conversationId: number, text: string): Promise<void>;
 	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
 	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
+	/** 被拦命令在后台子会话时的 panel 决定：窗口记账 + 更新飞书卡 + 经 Reporter 续跑子会话；false = 待审已失效或任务已停止 */
+	decideBackground?(scope: number, child: number, key: string, action: "approve" | "deny", minutes: number): Promise<boolean>;
 	afterDecision(conversation: Conversation, pending: PendingApproval, action: "approve" | "deny", minutes: number, submission: Submission): Promise<void>;
 }
 
@@ -375,13 +377,19 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		if (req.method === "POST" && url.pathname === "/api/approve") {
 			const body = await readBody(req);
 			const key = String(body?.key ?? "");
-			// 窗口键里的会话是 scope（后台子会话已归并到父线）；续跑目标是待审记录里被拦命令所在会话
-			const pending = pendingApprovals.get(key);
-			const convId = pending?.conversationId ?? Number(key.split(":")[0]);
-			const conv = Number.isFinite(convId) ? await harness.conversation(convId as ConversationId, BACKGROUND_CONTEXT) : undefined;
-			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const action = body?.action === "deny" ? "deny" : "approve";
 			const minutes = clampMinutes(Number(body?.minutes ?? 10));
+			// 窗口键里的会话是 scope（后台子会话已归并到父线）；被拦命令在子会话时走 decideBackground（经 Reporter 续跑）
+			const pending = pendingApprovals.get(key);
+			const scopeId = Number(key.split(":")[0]);
+			const dest = pending?.conversationId ?? scopeId;
+			if (dest !== scopeId && feishu.decideBackground !== undefined) {
+				const ok = await feishu.decideBackground(scopeId, dest, key, action, minutes);
+				json(res, 200, { ok });
+				return;
+			}
+			const conv = Number.isFinite(scopeId) ? await harness.conversation(scopeId as ConversationId, BACKGROUND_CONTEXT) : undefined;
+			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const result = await approvalDecision(conv, key, action, minutes);
 			if (!result.ok) { json(res, 200, result); return; }
 			await feishu.afterDecision(conv, result.pending, action, minutes, result.submission);
@@ -455,8 +463,11 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 		if (req.method === "POST" && url.pathname === "/api/schedules/cancel") {
 			const body = await readBody(req);
-			const taskId = String(body?.taskId ?? "");
-			if (taskId === "") throw new HttpError(400, "taskId required");
+			const taskId = Number(body?.taskId);
+			if (!Number.isFinite(taskId)) throw new HttpError(400, "taskId required");
+			// 只允许取消定时任务：先校验 kind（panel 能 abort 任意任务的面收窄）
+			const task = await harness.getTask(taskId as never, BACKGROUND_CONTEXT);
+			if (task?.kind !== SCHEDULE_TASK_KIND) throw new HttpError(404, "schedule not found");
 			const state = await harness.abortTask(taskId as never, BACKGROUND_CONTEXT);
 			json(res, 200, { ok: true, state });
 			return;

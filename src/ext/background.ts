@@ -2,7 +2,8 @@
 // 子会话继承父会话的 cwd/模型/工具（去掉 dwell.task / dwell.schedule 防递归派生）；父线 /cancel 与 idle 等待
 // 不穿越 background 边界。答案以 followUp 回到父会话，由宿主 onFired 开卡（模式同官方 example 23）。
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, section, type ConversationId, type Extension, type SubmissionId } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, section, type ConversationId, type Extension, type Harness, type SubmissionId } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { scanLiveTasks } from "./schedule.ts";
 
@@ -21,8 +22,8 @@ export function backgroundCapViolation(perConversation: number, total: number): 
 }
 
 export type BackgroundDeps = {
-	/** run 归属登记（后台回报触发的父线 run 归到创建者） */
-	attribute: (conversationId: number, creator: string) => void;
+	/** run 归属登记（后台回报触发的父线 run 归到创建者；submit 前调用） */
+	attribute: (conversationId: number, creator: string) => void | Promise<void>;
 	/** 触发的 run 由宿主开回复卡（与定时任务同一入口） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
 	/** 子会话创建登记：审批 scope 映射（子→父）与 panel 展示用 */
@@ -32,6 +33,44 @@ export type BackgroundDeps = {
 	/** 子代理 agent 变更中要移除的扩展对象（防递归派生；AgentChange 按对象引用，getter 延迟取装配产物） */
 	forbidden: () => readonly Extension[];
 };
+
+/** 审批后向后台子会话投递续跑输入：宿主拿这个 handle 在父线上建 Reporter（结果按 followUp 回父线，开卡走 onFired）。
+ *  不再直接 submitAndReply(子会话)：那会把回复卡锢在子会话上（回复即进子会话聊天），且结果无回报。
+ *  Reporter 定义与扩展内同名同版（注册表按 name 解析，重启后续跑不受影响）。 */
+export type BackgroundDeliverer = {
+	/** 子会话所属的后台任务名（名册已删 = 已 stop） */
+	nameOf: (parent: number, child: number) => Promise<string | undefined>;
+	/** 在父线上建 Reporter 投递 content；false = 无名册（已 stop）或 harness 未就绪 */
+	deliver: (parent: number, child: number, content: string) => Promise<boolean>;
+};
+
+export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => Harness | undefined): BackgroundDeliverer {
+	const Reporter = makeBackgroundReporter(deps);
+	const nameOf = async (parent: number, child: number): Promise<string | undefined> => {
+		const harness = getHarness();
+		if (harness === undefined) return undefined;
+		const doc = await harness.snapshot(BackgroundDoc, parent as ConversationId, BACKGROUND_CONTEXT);
+		if (doc === undefined) return undefined;
+		return Object.entries(doc.agents).find(([, v]) => v.conversationId === child)?.[0];
+	};
+	return {
+		nameOf,
+		deliver: async (parent, child, content) => {
+			const harness = getHarness();
+			if (harness === undefined) return false;
+			const name = await nameOf(parent, child);
+			if (name === undefined) return false;
+			await harness.commit(async (tx) => {
+				await tx.createTask(
+					Reporter,
+					{ name, parent, child, message: content, creator: deps.senderOf(parent) ?? "", followUp: false },
+					{ ownership: { kind: "conversation" }, background: true, conversationId: parent as ConversationId },
+				);
+			}, BACKGROUND_CONTEXT);
+			return true;
+		},
+	};
+}
 
 /** 父会话的名册：name → 子会话。停止即移除（名字可复用）；durable，重启不丢。 */
 export const BackgroundDoc = defineDoc<{ agents: Record<string, { conversationId: number }> }>({
@@ -101,7 +140,7 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 			report: async (task, runtime, context) => {
 				const report = task.state.checkpoint.report;
 				if (report !== undefined) {
-					deps.attribute(task.input.parent, task.input.creator);
+					await deps.attribute(task.input.parent, task.input.creator);
 					const parent = await runtime.conversation(task.input.parent as ConversationId, context);
 					if (parent !== undefined) {
 						const submission = await parent.submit(
@@ -166,6 +205,12 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 
 			if (args.action === "send") {
 				if (existing === undefined) return text(`No background task named ${name}; use start.`, true);
+				// send 同样过成本闸：空闲代理逐个 send 可并发起 N 个 run，与 start 同限
+				const cap = await api.commit(async (tx) => {
+					const live = await scanLiveTasks(tx, { kind: BACKGROUND_REPORTER_KIND }, 1000);
+					return backgroundCapViolation(live.filter((t) => (t.conversationId as number) === (api.conversationId as number)).length, live.length);
+				}, context);
+				if (cap !== undefined) return text(cap, true);
 				await api.commit(async (tx) => {
 					await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: existing.conversationId, message, creator: deps.senderOf(api.conversationId as number) ?? "", followUp: args.followUp === true }, { ownership: { kind: "conversation" }, background: true });
 				}, context);

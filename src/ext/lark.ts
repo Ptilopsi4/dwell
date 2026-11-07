@@ -10,7 +10,9 @@ import type { ImageDescriber } from "../harness.ts";
 import { sniffImageMime } from "../media.ts";
 import { sendPathViolation } from "./approval.ts";
 
-/** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。 */
+/** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。
+ *  chatOf/senderOf/sendToChat 的实现（index 装配）内部先经 scopeOf 归并到父线——
+ *  否则后台子会话的 lark 工具会把自己当成 panel 任务（无 chat）：send 谎报已交付、read 拒读、跨会话门槛误拒。 */
 export type LarkDeps = {
 	getClient: () => { im: { v1: { message: unknown; messageResource?: unknown } } } | undefined;
 	getDirectory: () => Directory | undefined;

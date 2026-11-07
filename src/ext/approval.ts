@@ -290,7 +290,8 @@ export function bashApprovalBlock(command: string, conversationId: number): { bl
 	const match = dangerMatch(command);
 	if (match === null) return undefined;
 	const scope = scopeOf(conversationId);
-	const sender = runSender.get(scope) ?? "";
+	// 后台子会话优先用自己的归属（start 时登记的创建者，不随父线新消息漂移）；普通会话即自身
+	const sender = runSender.get(conversationId) ?? runSender.get(scope) ?? "";
 	if (windowOpen(scope, sender)) return undefined;
 	pendingApprovals.set(windowKey(scope, sender), { command, match, trigger: sender, via: runVia.get(scope) ?? "feishu", conversationId });
 	void persistApprovals();
