@@ -380,7 +380,7 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 			if (!result.ok) return text(result.error, true);
 			const s = result.scheduled;
 			const repeatText = s.repeat === undefined ? "" : `, repeating every ${s.repeat.interval} ${s.repeat.unit}${s.repeat.interval > 1 ? "s" : ""}${s.repeat.weekdays !== undefined ? " (weekdays)" : ""}`;
-			return text(`Scheduled (id ${s.id}). It will run at ${formatLocalTime(s.firstAt, timezone)} ${timezone}${repeatText}. Tell the user it is set; nothing else is needed now.`);
+			return text(`Scheduled (id ${s.id}). It will run at ${formatLocalTime(s.firstAt, timezone)} ${timezone}${repeatText}. Tell the user it is set and when it runs, in plain words — no tool names, and keep the id to yourself (it is only for cancel); nothing else is needed now.`);
 		},
 	});
 }
