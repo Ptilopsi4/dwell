@@ -25,7 +25,7 @@ src/
   report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
   sandbox.ts        bash 沙箱：bwrap wrapper 生成 + 启动探测（失败不启用，回退路径治理；真实行为由 probe-bwrap.ts 服务器验证）
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
-  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）
+  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）+ 待审 targets 多目标与 takeDecision/splitTargets（父线与子会话先后被拦不覆盖，决定后逐个唤醒）
   ext/schedule.ts   dwell.schedule 工具 + dwell.schedule-run durable 任务（sleep→触发→周期续睡）；时区/周期纯函数
   ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23）；makeBackgroundDeliverer 审批续跑投递器（输入经 Reporter 投回子会话，结果 followUp 回父线）
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
@@ -42,7 +42,7 @@ docs/               部署文档（中英双语）
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 129 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 134 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```

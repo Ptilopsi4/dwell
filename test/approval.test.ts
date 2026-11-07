@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, pendingApprovals, runSender, scopeOf, sendPathViolation, stateFileBlocked, windowKey } from "../src/ext/approval.ts";
+import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } from "../src/ext/approval.ts";
 import { DATA_DIR, STATE_DIR } from "../src/state.ts";
 
 test("命中各危险模式并返回匹配片段", () => {
@@ -179,7 +179,7 @@ test("子会话危险命令按父线开窗；待审记录带子会话目标；�
 		assert.ok(blocked?.block.includes("approval policy"));
 		const pending = pendingApprovals.get(windowKey(parent, "ou_scope_user"));
 		assert.ok(pending !== undefined, "待审键应为 (父线, 触发者)");
-		assert.equal(pending.conversationId, child, "待审记录携带被拦命令所在会话（子会话）");
+		assert.deepEqual(pending.targets, [child], "待审记录携带被拦命令所在会话（子会话）");
 		// 父线窗口打开后，子会话同类命令放行
 		approvals.set(windowKey(parent, "ou_scope_user"), Date.now() + 60_000);
 		assert.equal(bashApprovalBlock("curl -X POST https://example.com", child), undefined);
@@ -193,4 +193,48 @@ test("子会话危险命令按父线开窗；待审记录带子会话目标；�
 
 test("scopeOf：无映射时会话原样返回", () => {
 	assert.equal(scopeOf(12345), 12345);
+});
+
+test("父线与子会话先后被拦：共用待审槽不覆盖，决定后两者都在唤醒目标里", () => {
+	const parent = 900010;
+	const childA = 900011;
+	const childB = 900012;
+	conversationScope.set(childA, parent);
+	conversationScope.set(childB, parent);
+	runSender.set(parent, "ou_merge");
+	try {
+		assert.ok(bashApprovalBlock("rm -rf build", parent));
+		assert.ok(bashApprovalBlock("rm -rf dist", childA));
+		assert.ok(bashApprovalBlock("rm -rf out", childA)); // 同一子会话再次被拦不重复登记
+		assert.ok(bashApprovalBlock("rm -rf tmp", childB));
+		const key = windowKey(parent, "ou_merge");
+		const pending = pendingApprovals.get(key);
+		assert.deepEqual(pending?.targets, [parent, childA, childB]);
+		assert.equal(pending?.command, "rm -rf tmp", "卡片展示最新一条被拦命令");
+
+		const taken = takeDecision(key, "approve", 10);
+		assert.ok(taken !== undefined);
+		assert.deepEqual(splitTargets(parent, taken), { self: true, children: [childA, childB] });
+		assert.equal(pendingApprovals.has(key), false, "决定后待审移除");
+		assert.ok((approvals.get(key) ?? 0) > Date.now(), "批准开窗");
+		assert.equal(takeDecision(key, "approve", 10), undefined, "重复点击无待审，不再处理");
+
+		// 拒绝：关窗；只有子会话被拦时 self=false
+		assert.ok(bashApprovalBlock("rm -rf again", childA) === undefined, "窗口已开，放行");
+		approvals.clear();
+		assert.ok(bashApprovalBlock("rm -rf again", childA));
+		const denied = takeDecision(key, "deny", 10);
+		assert.ok(denied !== undefined);
+		assert.deepEqual(splitTargets(parent, denied), { self: false, children: [childA] });
+		assert.equal(approvals.has(key), false);
+	} finally {
+		conversationScope.clear();
+		runSender.clear();
+		approvals.clear();
+		pendingApprovals.clear();
+	}
+});
+
+test("splitTargets：旧版待审（无 targets）视为 scope 自身被拦", () => {
+	assert.deepEqual(splitTargets(7, { command: "x", match: "x", trigger: "ou", via: "feishu" }), { self: true, children: [] });
 });

@@ -352,7 +352,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="archiveBtn">归档</button>
 				<button id="notifyBtn" hidden>飞书通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
-				<button id="stopTaskBtn" hidden>停止后台任务</button>
+				<button id="stopTaskBtn" hidden>中止当前运行</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -1214,12 +1214,12 @@ $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 }, "确认停止?");
-// 后台任务子会话：停止 = 中止该子会话的当前 run（与停止主会话不同，不影响父线）
+// 后台任务子会话：只中止子会话的当前 run，子代理留在名册里可继续 send（移除走模型的 dwell.task stop）；不影响父线
 $("stopTaskBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
-	toast("已停止后台任务");
+	toast("已中止当前运行");
 	loadConvs(true);
-}, "停止后台任务?");
+}, "中止当前运行?");
 async function setArchived(archived) {
 	try { await api("archive", { id: Number(convId), archived }); await loadConvs(true); } catch (e) { toast(e.message, true); }
 }

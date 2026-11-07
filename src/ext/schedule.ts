@@ -3,7 +3,6 @@
 // 停机期间错过的多次触发只补一次，之后跳到下一个晚于 now 的时刻。
 // 时区/周期算法移植自 pi-durable-cloudflare src/schedule.ts（MIT，钉 1.4.0），weekdays 过滤为 dwell 增补。
 import { defineDoc, defineTask, defineTool, defineExtension, section, type ConversationId, type Cursor, type Extension, type Harness, type SubmissionId, type TaskId, type TaskRecord, type Tx, type TaskQuery } from "@earendil-works/pi-durable";
-import { randomUUID } from "node:crypto";
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "typebox";
 import { DWELL_TZ } from "../state.ts";
@@ -33,10 +32,13 @@ export type ScheduleInput = {
 	readonly tz: string;
 };
 
-type ScheduleCheckpoint = { phase: "wait"; next: number; n: number } | { phase: "fire"; n: number; at: number };
+type ScheduleCheckpoint =
+	| { phase: "wait"; next: number; n: number }
+	| { phase: "fire"; n: number; at: number }
+	| { phase: "announce"; n: number; at: number; submissionId: number };
 export type ScheduleDeps = {
-	/** run 归属登记（审批卡、/cancel 归属到创建者；submit 前调用）。fire 阶段 await 它，防 run 先启动读到旧归属 */
-	attribute: (conversationId: number, creator: string) => void | Promise<void>;
+	/** run 归属登记（审批卡、/cancel 归属到创建者）。fire 阶段 await 它登记完才 submit；类型定为 Promise，实现送回 void 时 tsc 报错（曾因 void 包装静默失效） */
+	attribute: (conversationId: number, creator: string) => Promise<void>;
 	/** 触发的 run 由宿主开回复卡（panel 会话走通知开关） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
 	/** cancel 需要 abortTask；装配时 harness 尚未创建，getter 延迟绑定 */
@@ -227,7 +229,9 @@ export async function scanLiveTasks(tx: Tx, query: TaskQuery, max = 500): Promis
 	return out;
 }
 
-/** dwell.schedule-run：wait 睡到 next，fire 提交输入并（有周期时）续睡下一次。 */
+/** dwell.schedule-run：wait 睡到 next；fire 提交输入；announce 开卡并（有周期时）续睡下一次。
+ *  fire/announce 分两段：submit 由 requestId 幂等，开卡回调在 submissionId 落进 checkpoint 后才调用——fire 崩溃重跑不会多开卡；
+ *  announce 在回调与续睡 commit 之间崩溃时可能多开一张卡（已知残留）。不用 memo：memo 随任务记录整条重写，按触发次数分槽会无限增长。 */
 export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 	defineTask<ScheduleInput, ScheduleCheckpoint, null>({
 		name: SCHEDULE_TASK_KIND,
@@ -262,11 +266,12 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 					},
 					context,
 				);
-				// memo 去重：submit 与后续 commit 之间崩溃重跑时 submission 幂等（同 requestId），但开卡回调会重复。
-				//  memo 同名永不覆写 → 每次触发一个槽：重放拿回的不是自己的 token 说明首次已开卡（每条约 45B，随触发次数线性增长，可接受）
-				const token = randomUUID();
-				const winner = await runtime.memo(`fired:${n}`, token, context);
-				if (winner === token) deps.onFired(input.conversationId, submission.id, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
+				await runtime.commit(() => ({ status: "running", checkpoint: { phase: "announce", n, at, submissionId: submission.id as number } }), context);
+			},
+			announce: async (task, runtime, context) => {
+				const input = task.input;
+				const { n, at, submissionId } = task.state.checkpoint;
+				deps.onFired(input.conversationId, submissionId as SubmissionId, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
 				await runtime.commit(() => {
 					if (input.repeat === undefined) return { status: "terminal", outcome: { status: "completed", result: null } };
 					const next = nextRecurrenceRunAt(at, input.repeat, runtime.now(), input.tz);
@@ -353,11 +358,12 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 			}
 			type CreateResult = { ok: false; error: string } | { ok: true; scheduled: ScheduleInput };
 			const result = await api.commit<CreateResult>(async (tx) => {
+				// replay 重放：同一工具调用只建一个 schedule。先于上限检查：建的若是第 20 个，重放时它已在计数里
+				const intent = await tx.doc(ScheduleIntent, api.taskId);
+				// doc 值是事务内的 overlay，commit 后再读会抛 settled overlay：拷出普通对象再返回
+				if (intent.scheduled !== undefined) return { ok: true, scheduled: JSON.parse(JSON.stringify(intent.scheduled)) as ScheduleInput };
 				const live = await scanLiveTasks(tx, { conversationId: api.conversationId, kind: SCHEDULE_TASK_KIND });
 				if (live.length >= MAX_SCHEDULES) return { ok: false, error: `This conversation already has ${live.length} scheduled tasks (max ${MAX_SCHEDULES}); cancel some first.` };
-				// replay 重放：同一工具调用只建一个 schedule
-				const intent = await tx.doc(ScheduleIntent, api.taskId);
-				if (intent.scheduled !== undefined) return { ok: true, scheduled: intent.scheduled };
 				const scheduled: ScheduleInput = {
 					id: `schedule:${api.taskId}`,
 					conversationId: api.conversationId as number,

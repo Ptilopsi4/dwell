@@ -10,7 +10,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, LiveDoc, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { BackgroundAnchor, BACKGROUND_ANCHOR_KIND, BackgroundDoc, backgroundCapViolation, makeBackgroundDeliverer, makeBackgroundExtension, makeBackgroundReporter, type BackgroundDeps } from "../src/ext/background.ts";
+import { BackgroundAnchor, BACKGROUND_ANCHOR_KIND, BackgroundDoc, backgroundCapViolation, backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, makeBackgroundReporter, type BackgroundDeps } from "../src/ext/background.ts";
 import { makeScheduleExtension } from "../src/ext/schedule.ts";
 
 const until = async (check: () => Promise<boolean> | boolean, ms = 10_000): Promise<void> => {
@@ -32,7 +32,7 @@ test("集成：报告送达父会话；锚任务 background；父线 abort 不�
 	const fired: { conversationId: number; header: string }[] = [];
 	const started: { child: number; parent: number }[] = [];
 	const deps: BackgroundDeps = {
-		attribute: () => {},
+		attribute: async () => {},
 		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
 		onStarted: (child, parent) => started.push({ child, parent }),
 		senderOf: () => "ou_test",
@@ -109,7 +109,7 @@ test("集成：deliverer 审批续跑——输入经 Reporter 投回子会话，
 	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-deliver-"));
 	const fired: { conversationId: number; header: string }[] = [];
 	const deps: BackgroundDeps = {
-		attribute: () => {},
+		attribute: async () => {},
 		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
 		onStarted: () => {},
 		senderOf: () => "ou_test",
@@ -168,13 +168,13 @@ test("工具层：start 建子会话并去掉后台/定时扩展；send 过成�
 	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-tool-"));
 	const fired: { conversationId: number; header: string }[] = [];
 	const deps: BackgroundDeps = {
-		attribute: () => {},
+		attribute: async () => {},
 		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
 		onStarted: () => {},
 		senderOf: () => "ou_test",
 		forbidden: () => [],
 	};
-	const scheduleDeps = { attribute: () => {}, onFired: () => {}, getHarness: () => undefined, senderOf: () => "ou_test" };
+	const scheduleDeps = { attribute: async () => {}, onFired: () => {}, getHarness: () => undefined, senderOf: () => "ou_test" };
 	const scheduleExt = makeScheduleExtension(scheduleDeps);
 	const bgExt = makeBackgroundExtension(deps);
 	// forbidden 闭包在调用时解引用（此时 bgExt 已初始化）
@@ -228,6 +228,58 @@ test("工具层：start 建子会话并去掉后台/定时扩展；send 过成�
 		// stop：删名册、abort 子会话；status 无任务
 		assert.match(out(await tool.execute({ action: "stop", name: "w" }, api, ctx)), /^Stopped w\./);
 		assert.match(out(await tool.execute({ action: "status" }, api, ctx)), /No background tasks/);
+	} finally {
+		await harness.close(context).catch(() => {});
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("集成：回报前 await 归属登记；重开后 backgroundChildren 重建子→父映射", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-attr-"));
+	const order: string[] = [];
+	const deps: BackgroundDeps = {
+		// 登记延迟 resolve：回报的 submit 必须排在登记完成之后
+		attribute: async () => {
+			order.push("attribute:start");
+			await new Promise((r) => setTimeout(r, 30));
+			order.push("attribute:done");
+		},
+		onFired: () => order.push("fired"),
+		onStarted: () => {},
+		senderOf: () => "ou_test",
+		forbidden: () => [],
+	};
+	const Reporter = makeBackgroundReporter(deps);
+	const faux = fauxProvider();
+	faux.setResponses(Array.from({ length: 20 }, () => fauxAssistantMessage([fauxText("ok")])));
+	const models = createModels();
+	models.setProvider(faux.provider);
+	const model = { provider: "faux", modelId: "faux-1" };
+	const context = BACKGROUND_CONTEXT;
+	const open = async () => {
+		const registry = createRegistry();
+		registry.install(makeBackgroundExtension(deps));
+		const h = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry }, context);
+		h.resume();
+		return h;
+	};
+	let harness = await open();
+	try {
+		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, context);
+		// 普通会话（非锚持有）不应出现在映射里
+		await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, context);
+		const { child, reporter } = await parent.commit(async (tx) => {
+			const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
+			const c = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+			const r = await tx.createTask(Reporter, { name: "w", parent: parent.id as number, child: c.id as number, message: "job", creator: "ou_test", followUp: false }, { ownership: { kind: "conversation" }, background: true });
+			return { child: c.id as number, reporter: r };
+		}, context);
+		await until(async () => (await harness.getTask(reporter, context))?.state.status === "terminal");
+		assert.deepEqual(order, ["attribute:start", "attribute:done", "fired"], "登记完成后才 submit 回报并开卡");
+
+		await harness.close(context);
+		harness = await open();
+		assert.deepEqual(await backgroundChildren(harness), [{ child, parent: parent.id as number }]);
 	} finally {
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });

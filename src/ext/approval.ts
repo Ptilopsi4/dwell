@@ -4,8 +4,8 @@
 import { readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { defineExtension, hook, ToolTask, type Conversation, type Submission } from "@earendil-works/pi-durable";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
+import type { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, stateFile, writeStateJson } from "../state.ts";
 
 /** conversationId → 当前 run 的发起者（submit 前设置，run 归属判定用）。 */
@@ -31,8 +31,8 @@ export type PendingApproval = {
 	match: string;
 	trigger: string;
 	via: "panel" | "feishu";
-	/** 被拦截命令所在会话（后台子会话时 ≠ 窗口 scope；审批后由此唤醒） */
-	conversationId?: number;
+	/** 等待这次审批的会话：scope 本身和/或它的后台子会话（同一窗口键下可能先后被拦多个，决定后逐个唤醒）。缺省 = scope */
+	targets?: number[];
 	/** 飞书审批卡片的消息 ID，其他入口做出决定后据此更新卡片 */
 	cardMessageId?: string;
 	cardChatId?: string;
@@ -81,11 +81,7 @@ export async function loadApprovalState(): Promise<void> {
 		if (typeof expiry === "number" && expiry > now) approvals.set(key, expiry); // 过期窗口不复活
 	}
 	for (const [key, pending] of saved.pending ?? []) {
-		if (typeof pending?.command === "string") {
-			// 旧版本无 conversationId 字段：回填为窗口键里的会话（即 scope 本身）
-			if (typeof pending.conversationId !== "number") pending.conversationId = Number(key.split(":")[0]);
-			pendingApprovals.set(key, pending);
-		}
+		if (typeof pending?.command === "string") pendingApprovals.set(key, pending);
 	}
 	for (const [id, sender] of saved.runSender ?? []) runSender.set(Number(id), sender);
 	for (const [id, via] of saved.runVia ?? []) runVia.set(Number(id), via);
@@ -159,26 +155,22 @@ export function decisionInput(action: "approve" | "deny", minutes: number): stri
 		: "The user denied the dangerous command. Stop that operation and take another approach, or ask the user what they intend.";
 }
 
-/** 面板/卡片共用的审批决策：开/关窗口并唤醒（或通知）模型。返回已处理的待审与续跑 submission，调用方决定回复发到哪里。 */
-export async function approvalDecision(
-	conversation: Conversation,
-	key: string,
-	action: "approve" | "deny",
-	minutes: number,
-): Promise<{ ok: true; pending: PendingApproval; submission: Submission } | { ok: false; error: string }> {
+/** 审批决定的状态记账（卡片、/approve、panel 三条路径共用）：取走待审，批准开窗、拒绝关窗。无待审返回 undefined 且不动窗口。
+ *  唤醒谁、回复发到哪里由调用方按 splitTargets 决定。 */
+export function takeDecision(key: string, action: "approve" | "deny", minutes: number): PendingApproval | undefined {
 	const pending = pendingApprovals.get(key);
-	if (pending === undefined) return { ok: false, error: "该请求已失效" };
+	if (pending === undefined) return undefined;
 	pendingApprovals.delete(key);
 	if (action === "approve") approvals.set(key, Date.now() + clampMinutes(minutes) * 60_000);
 	else approvals.delete(key);
 	void persistApprovals();
-	const submission = await conversation.submit({
-		type: "input",
-		content: decisionInput(action, clampMinutes(minutes)),
-		whenBusy: "steer",
-		requestId: `decision-${key}-${Date.now()}`,
-	}, BACKGROUND_CONTEXT);
-	return { ok: true, pending, submission };
+	return pending;
+}
+
+/** 待审的唤醒目标拆分：self = scope 本身被拦（调用方按自己的回复位置续跑），children = 被拦的后台子会话（经 Reporter 投回）。 */
+export function splitTargets(scope: number, pending: PendingApproval): { self: boolean; children: number[] } {
+	const targets = pending.targets ?? [scope];
+	return { self: targets.includes(scope), children: targets.filter((t) => t !== scope) };
 }
 
 // ── S2 文件工具路径治理 ──
@@ -293,7 +285,10 @@ export function bashApprovalBlock(command: string, conversationId: number): { bl
 	// 后台子会话优先用自己的归属（start 时登记的创建者，不随父线新消息漂移）；普通会话即自身
 	const sender = runSender.get(conversationId) ?? runSender.get(scope) ?? "";
 	if (windowOpen(scope, sender)) return undefined;
-	pendingApprovals.set(windowKey(scope, sender), { command, match, trigger: sender, via: runVia.get(scope) ?? "feishu", conversationId });
+	// 父线与其子会话（同创建者）共用窗口键：后到的拦截并入目标列表，不覆盖先到者——否则先被拦的会话审批后无人唤醒
+	const key = windowKey(scope, sender);
+	const targets = [...new Set([...(pendingApprovals.get(key)?.targets ?? []), conversationId])];
+	pendingApprovals.set(key, { command, match, trigger: sender, via: runVia.get(scope) ?? "feishu", targets });
 	void persistApprovals();
 	onApprovalNeeded?.(scope, sender, command, match);
 	// 面板入口的审批只在面板处理（飞书成员 /approve 开的是自己的窗口，帮不上忙）
@@ -310,8 +305,8 @@ export function makeApprovalExtension() {
 		hooks: [
 			hook(ToolTask, {
 				beforeTool: (call, api) => {
-				if (call.name !== "bash") return undefined;
-				return bashApprovalBlock((call.arguments as { command?: string }).command ?? "", api.conversationId as number);
+					if (call.name !== "bash") return undefined;
+					return bashApprovalBlock((call.arguments as { command?: string }).command ?? "", api.conversationId as number);
 				},
 			}),
 		],

@@ -8,9 +8,10 @@ import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, Harness, type Extension, type Harness as HarnessType, type SubmissionId } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, type Conversation, type Extension, type Harness as HarnessType, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleInput } from "../src/ext/schedule.ts";
+import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, MAX_SCHEDULES, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleInput } from "../src/ext/schedule.ts";
+import { resolveTimeZone } from "../src/state.ts";
 
 const UTC = "UTC";
 const MIN = 60_000;
@@ -75,6 +76,12 @@ test("formatLocalTime 按时区输出", () => {
 	assert.equal(formatLocalTime(Date.UTC(2026, 10, 8, 1, 5), UTC), "2026-11-08 01:05");
 });
 
+test("resolveTimeZone：合法名原样返回，缺省取进程时区，非法名启动即报错", () => {
+	assert.equal(resolveTimeZone("Asia/Shanghai"), "Asia/Shanghai");
+	assert.equal(resolveTimeZone(undefined), Intl.DateTimeFormat().resolvedOptions().timeZone);
+	assert.throws(() => resolveTimeZone("Mars/Olympus"), /DWELL_TZ=Mars\/Olympus/);
+});
+
 // ── 假时钟集成 ──
 
 /** 手动时钟：登记非 background 定时器，advance 推进并触发到期回调。 */
@@ -122,11 +129,22 @@ const lastUserText = async (harness: HarnessType, conversationId: number): Promi
 	return JSON.stringify(users[0]?.model ?? []);
 };
 
-test("集成：单次触发提交输入并结束；周期任务续睡；取消不再触发；重开后 sleeping 仍触发", async () => {	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-"));
+test("集成：单次触发提交输入并结束；周期任务续睡；取消不再触发；重开后 sleeping 仍触发", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-"));
 	const fired: { conversationId: number; header: string; submissionId: SubmissionId }[] = [];
 	const clock = new FakeClock();
+	// 归属登记要先完成再 submit：登记延迟 resolve，期间会话里不应出现触发输入
+	let attributed = 0;
+	let submittedBeforeAttributed = false;
+	let conversationRef: Pick<Conversation, "entries"> | undefined;
 	const deps = {
-		attribute: () => {},
+		attribute: async () => {
+			const before = (await conversationRef?.entries({}, 50, undefined, BACKGROUND_CONTEXT))?.items.length ?? 0;
+			await new Promise((r) => setTimeout(r, 30));
+			const after = (await conversationRef?.entries({}, 50, undefined, BACKGROUND_CONTEXT))?.items.length ?? 0;
+			if (after !== before) submittedBeforeAttributed = true;
+			attributed++;
+		},
 		onFired: (conversationId: number, submissionId: SubmissionId, header: string) => fired.push({ conversationId, header, submissionId }),
 		getHarness: () => undefined,
 		senderOf: () => "ou_test",
@@ -151,6 +169,7 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 	};
 	let harness = await open();
 	const conv = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, context);
+	conversationRef = conv;
 	const convId = conv.id as number;
 
 	const create = (input: Omit<ScheduleInput, "conversationId" | "creator" | "tz">) =>
@@ -166,6 +185,8 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		assert.equal(settled.status, "done");
 		assert.match(await lastUserText(harness, convId), /say hi/);
 		await until(async () => (await harness.getTask(once, context))?.state.status === "terminal");
+		assert.equal(attributed, 1, "触发前登记归属");
+		assert.equal(submittedBeforeAttributed, false, "归属登记完成前不应 submit");
 
 		// 周期：5 分钟后首触发，每 10 分钟一次
 		await create({ id: "schedule:loop", instruction: "tick", firstAt: clock.now + 5 * MIN, repeat: { unit: "minute", interval: 10 } });
@@ -176,6 +197,12 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		await until(() => fired.length === 3);
 		// 两次触发的 requestId 不同（n 递增），内容都进了会话
 		assert.match(await lastUserText(harness, convId), /tick/);
+		// 开卡不靠 memo 去重：周期任务的记录不随触发次数增长
+		const loopLive = await harness.commit((tx) => scanLiveTasks(tx, { conversationId: conv.id, kind: SCHEDULE_TASK_KIND }), context);
+		const loopRecord = loopLive.find((t) => (t.input as ScheduleInput).id === "schedule:loop");
+		await until(async () => (await harness.getTask(loopRecord!.id, context))?.state.status === "sleeping");
+		const sleepingLoop = await harness.getTask(loopRecord!.id, context);
+		assert.equal(Object.keys(sleepingLoop?.memos ?? {}).length, 0, "周期任务不应累积 memo");
 
 		// 取消：abort 后推进不再触发；terminal 记录不进 scanLiveTasks（status 过滤在 SQL 层生效）
 		const before = fired.length;
@@ -199,8 +226,53 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		assert.ok(!fired.some((f) => f.header.includes("ghost")), "被移出白名单的创建者不应触发");
 		await harness.close(context);
 		harness = await open();
+		// 归属桩读的是会话 entries：换到新 harness 的句柄（旧句柄随 close 失效）
+		conversationRef = await harness.conversation(conv.id, context);
 		await clock.advance(20 * MIN);
 		await until(() => fired.some((f) => f.header.includes("reborn")));
+	} finally {
+		await harness.close(context).catch(() => {});
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("工具层：create 重放先认 intent 再查上限（第 20 个的重放不被上限挡回）", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-tool-"));
+	const deps = { attribute: async () => {}, onFired: () => {}, getHarness: () => undefined, senderOf: () => "ou_test" };
+	const ScheduleRun = makeScheduleRunTask(deps);
+	const ext = makeScheduleExtension(deps);
+	const tool = ext.tools?.[0];
+	if (tool === undefined) throw new Error("dwell.schedule 未注册");
+	const context = BACKGROUND_CONTEXT;
+	const registry = createRegistry();
+	registry.install(ext);
+	const models = createModels();
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry }, context);
+	harness.resume();
+	try {
+		const conv = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+		const far = Date.now() + 300 * 24 * 3_600_000;
+		const ids = [];
+		for (let i = 0; i < MAX_SCHEDULES - 1; i++) {
+			ids.push(await conv.commit((tx) => tx.createTask(ScheduleRun, { id: `schedule:seed${i}`, conversationId: conv.id as number, instruction: "seed", firstAt: far, creator: "ou_test", tz: UTC } as ScheduleInput, { ownership: { kind: "conversation" }, background: true }), context));
+		}
+		// ScheduleIntent 是 task 作用域 doc：借一个活任务的 id 充当工具调用的 taskId
+		const apiFor = (taskId: unknown) => ({
+			conversationId: conv.id,
+			taskId,
+			now: () => Date.now(),
+			commit: <T,>(fn: (tx: never) => T | Promise<T>) => conv.commit(fn as never, context),
+		}) as never;
+		const out = (r: unknown) => String((r as { output?: { text?: string }[] }).output?.[0]?.text ?? "");
+		const args = { action: "create", instruction: "check build", delayMinutes: 60 } as never;
+
+		const first = out(await tool.execute(args, apiFor(ids[0]), context as never));
+		assert.match(first, /^Scheduled \(id schedule:/);
+		// 同一工具调用重放：此时已满 20 个，仍返回已建的那条
+		const replay = out(await tool.execute(args, apiFor(ids[0]), context as never));
+		assert.equal(replay, first);
+		// 新的调用才受上限约束
+		assert.match(out(await tool.execute(args, apiFor(ids[1]), context as never)), /max 20/);
 	} finally {
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });

@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness, Submission } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
 import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
-import { approvalDecision, clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation, type PendingApproval } from "../ext/approval.ts";
+import { clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { BackgroundDoc } from "../ext/background.ts";
 import { recentReports } from "../report.ts";
@@ -45,9 +45,8 @@ export interface FeishuBridge {
 	notice(conversationId: number, text: string): Promise<void>;
 	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
 	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
-	/** 被拦命令在后台子会话时的 panel 决定：窗口记账 + 更新飞书卡 + 经 Reporter 续跑子会话；false = 待审已失效或任务已停止 */
-	decideBackground?(scope: number, child: number, key: string, action: "approve" | "deny", minutes: number): Promise<boolean>;
-	afterDecision(conversation: Conversation, pending: PendingApproval, action: "approve" | "deny", minutes: number, submission: Submission): Promise<void>;
+	/** panel 审批决定：窗口记账 + 同步飞书卡 + 唤醒全部被拦会话（本线直接续跑，后台子会话经 Reporter） */
+	decide(key: string, action: "approve" | "deny", minutes: number): Promise<{ ok: boolean; error?: string }>;
 }
 
 class HttpError extends Error {
@@ -379,21 +378,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const key = String(body?.key ?? "");
 			const action = body?.action === "deny" ? "deny" : "approve";
 			const minutes = clampMinutes(Number(body?.minutes ?? 10));
-			// 窗口键里的会话是 scope（后台子会话已归并到父线）；被拦命令在子会话时走 decideBackground（经 Reporter 续跑）
-			const pending = pendingApprovals.get(key);
-			const scopeId = Number(key.split(":")[0]);
-			const dest = pending?.conversationId ?? scopeId;
-			if (dest !== scopeId && feishu.decideBackground !== undefined) {
-				const ok = await feishu.decideBackground(scopeId, dest, key, action, minutes);
-				json(res, 200, { ok });
-				return;
-			}
-			const conv = Number.isFinite(scopeId) ? await harness.conversation(scopeId as ConversationId, BACKGROUND_CONTEXT) : undefined;
-			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
-			const result = await approvalDecision(conv, key, action, minutes);
-			if (!result.ok) { json(res, 200, result); return; }
-			await feishu.afterDecision(conv, result.pending, action, minutes, result.submission);
-			json(res, 200, { ok: true });
+			json(res, 200, await feishu.decide(key, action, minutes));
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/users") {

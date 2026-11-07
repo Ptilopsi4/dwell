@@ -3,7 +3,7 @@
 // 不穿越 background 边界。答案以 followUp 回到父会话，由宿主 onFired 开卡（模式同官方 example 23）。
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, section, type ConversationId, type Extension, type Harness, type SubmissionId } from "@earendil-works/pi-durable";
+import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, LiveDoc, section, type ConversationId, type Cursor, type Extension, type Harness, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { scanLiveTasks } from "./schedule.ts";
 
@@ -22,8 +22,8 @@ export function backgroundCapViolation(perConversation: number, total: number): 
 }
 
 export type BackgroundDeps = {
-	/** run 归属登记（后台回报触发的父线 run 归到创建者；submit 前调用） */
-	attribute: (conversationId: number, creator: string) => void | Promise<void>;
+	/** run 归属登记（后台回报触发的父线 run 归到创建者）。report 阶段 await 它登记完才 submit；类型定为 Promise，同 ScheduleDeps */
+	attribute: (conversationId: number, creator: string) => Promise<void>;
 	/** 触发的 run 由宿主开回复卡（与定时任务同一入口） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
 	/** 子会话创建登记：审批 scope 映射（子→父）与 panel 展示用 */
@@ -70,6 +70,28 @@ export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => 
 			return true;
 		},
 	};
+}
+
+/** 全部后台子会话及其父会话：子会话由锚任务持有，扫会话记录拿到 (child, 锚任务)，锚任务所在会话即父线。
+ *  启动时重建审批 scope 用（conversationScope 只在内存）；非锚任务持有的 task-owned 会话跳过。 */
+export async function backgroundChildren(harness: Pick<Harness, "commit" | "getTask">): Promise<{ child: number; parent: number }[]> {
+	const context = BACKGROUND_CONTEXT;
+	const owned = await harness.commit(async (tx) => {
+		const out: { child: number; anchor: TaskId }[] = [];
+		let cursor: Cursor | undefined;
+		do {
+			const page = await tx.scanConversations({}, 200, cursor);
+			for (const record of page.items) if (record.owner !== undefined) out.push({ child: record.id as number, anchor: record.owner.taskId });
+			cursor = page.next;
+		} while (cursor !== undefined);
+		return out;
+	}, context);
+	const pairs: { child: number; parent: number }[] = [];
+	for (const { child, anchor } of owned) {
+		const task = await harness.getTask(anchor, context);
+		if (task?.kind === BACKGROUND_ANCHOR_KIND) pairs.push({ child, parent: task.conversationId as number });
+	}
+	return pairs;
 }
 
 /** 父会话的名册：name → 子会话。停止即移除（名字可复用）；durable，重启不丢。 */
