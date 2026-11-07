@@ -1386,7 +1386,7 @@ async function loadHealth() {
 function openAlerts() {
 	const seen = seenTs();
 	$("sheetTitle").textContent = "运行告警";
-	$("sheetBody").innerHTML = `<p class="rnote">任务故障、扩展报错等，最近 50 条；服务重启后清空。飞书已连接时同步私聊管理员（同类 10 分钟内只发一条）。</p>
+	$("sheetBody").innerHTML = `<p class="rnote">任务故障、扩展报错等，最近 50 条，服务重启后清空；同时私发管理员。</p>
 		<div id="rList"></div>
 		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
 	const box = $("rList");
@@ -1410,7 +1410,7 @@ $("alertsBtn").onclick = openAlerts;
 /* ── 定时任务：全部会话的活跃 schedule，可取消（创建走对话） ── */
 async function openSchedules() {
 	$("sheetTitle").textContent = "定时任务";
-	$("sheetBody").innerHTML = `<p class="rnote">全部会话的活跃定时任务，时间按浏览器本地时区显示；取消立即生效，周期任务不再触发。新建请在对应会话里直接说（如「明天 9 点提醒我」）。</p>
+	$("sheetBody").innerHTML = `<p class="rnote">全部会话的活跃定时任务（时间按浏览器时区显示）；取消立即生效。新建请在对应会话里直接说。</p>
 		<div id="sList"></div>
 		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
 	const box = $("sList");
@@ -1418,11 +1418,23 @@ async function openSchedules() {
 	try { list = await api("schedules"); } catch (e) { toast(e.message, true); return; }
 	if (list.length === 0) box.innerHTML = `<div class="side-empty">暂无定时任务</div>`;
 	const UNIT_ZH = { minute: "分钟", hour: "小时", day: "天", week: "周", month: "月" };
+	const WD_ZH = "日一二三四五六";
+	// 周几列表压成区间：[1,2,3,4,5] → 周一至周五，[0,6] → 周日、周六
+	const weekdayLabel = (days) => {
+		const parts = [];
+		for (let i = 0; i < days.length; i++) {
+			let j = i;
+			while (j + 1 < days.length && days[j + 1] === days[j] + 1) j++;
+			parts.push(j > i ? `周${WD_ZH[days[i]]}至周${WD_ZH[days[j]]}` : `周${WD_ZH[days[i]]}`);
+			i = j;
+		}
+		return parts.join("、");
+	};
 	for (const s of list) {
 		const row = document.createElement("div");
 		row.className = "rrow";
 		const repeatLabel = s.repeat
-			? "每 " + s.repeat.interval + " " + (UNIT_ZH[s.repeat.unit] ?? s.repeat.unit) + (s.repeat.weekdays ? "（限指定日）" : "")
+			? "每 " + s.repeat.interval + " " + (UNIT_ZH[s.repeat.unit] ?? s.repeat.unit) + (s.repeat.weekdays ? `（仅${weekdayLabel(s.repeat.weekdays)}）` : "")
 			: "单次";
 		row.innerHTML = `<div class="rh"><span class="rt"></span><small></small><button class="btn" data-variant="ghost" data-size="xs" style="color:var(--destructive)">取消</button></div><div class="rb"></div>`;
 		row.querySelector(".rt").textContent = s.conversation;
