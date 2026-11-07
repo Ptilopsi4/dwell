@@ -27,7 +27,7 @@ let sessions: Sessions;
 let channel: LarkChannel;
 const users = new Users();
 let directory: Directory;
-/** 审批后续跑后台子会话的投递器（main 装配；被拦命令在子会话时经 Reporter 投回，不直接 submitAndReply） */
+/** 审批后续跑后台子会话的投递器（main 装配；定义与投递语义见 ext/background.ts） */
 let backgroundDeliverer: ReturnType<typeof makeBackgroundDeliverer>;
 /** panel 操作者：panel 发起的输入/审批/控制都记在这个 open_id 名下 */
 let panelUser = "";
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
 		senderOf: (id) => runSender.get(id),
 		forbidden: () => [scheduleExt, backgroundExt],
 	});
-	// 审批续跑后台子会话的投递器：在父线上建 Reporter，结果按 followUp 回父线（不直接 submitAndReply 子会话）
+	// 审批续跑后台子会话的投递器：在父线上建 Reporter，结果按 followUp 回父线
 	backgroundDeliverer = makeBackgroundDeliverer({
 		attribute: attributeRun,
 		onFired: onAutonomousRun,

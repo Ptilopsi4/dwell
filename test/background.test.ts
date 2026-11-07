@@ -92,7 +92,7 @@ test("集成：报告送达父会话；锚任务 background；父线 abort 不�
 		const firedBefore = fired.length;
 		const third = await spawn("web3", "another slow job");
 		const thirdConv = await harness.conversation(third.child, context);
-		// 等子会话的 run 真正起来（LiveDoc.run 出现）再 abort，不素卡时机
+		// 等子会话的 run 真正起来（LiveDoc.run 出现）再 abort，不赌时机
 		await until(async () => (await harness.snapshot(LiveDoc, third.child as ConversationId, context))?.run !== undefined);
 		await thirdConv!.abort(context);
 		await until(async () => (await harness.getTask(third.reporter, context))?.state.status === "terminal");

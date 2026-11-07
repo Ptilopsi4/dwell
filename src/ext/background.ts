@@ -22,7 +22,7 @@ export function backgroundCapViolation(perConversation: number, total: number): 
 }
 
 export type BackgroundDeps = {
-	/** run 归属登记（后台回报触发的父线 run 归到创建者）。report 阶段 await 它登记完才 submit；类型定为 Promise，同 ScheduleDeps */
+	/** run 归属登记（后台回报触发的父线 run 归到创建者）。report 阶段 await 它完成才 submit；必须返回 Promise，约束同 ScheduleDeps.attribute */
 	attribute: (conversationId: number, creator: string) => Promise<void>;
 	/** 触发的 run 由宿主开回复卡（与定时任务同一入口） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
@@ -35,7 +35,7 @@ export type BackgroundDeps = {
 };
 
 /** 审批后向后台子会话投递续跑输入：宿主拿这个 handle 在父线上建 Reporter（结果按 followUp 回父线，开卡走 onFired）。
- *  不再直接 submitAndReply(子会话)：那会把回复卡锢在子会话上（回复即进子会话聊天），且结果无回报。
+ *  经 Reporter 而非直接 submitAndReply 子会话：直接续跑会把回复卡锢在子会话上（回复即进子会话聊天），且结果无回报。
  *  Reporter 定义与扩展内同名同版（注册表按 name 解析，重启后续跑不受影响）。 */
 export type BackgroundDeliverer = {
 	/** 子会话所属的后台任务名（名册已删 = 已 stop） */

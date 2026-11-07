@@ -37,7 +37,7 @@ type ScheduleCheckpoint =
 	| { phase: "fire"; n: number; at: number }
 	| { phase: "announce"; n: number; at: number; submissionId: number };
 export type ScheduleDeps = {
-	/** run 归属登记（审批卡、/cancel 归属到创建者）。fire 阶段 await 它登记完才 submit；类型定为 Promise，实现送回 void 时 tsc 报错（曾因 void 包装静默失效） */
+	/** run 归属登记（审批卡、/cancel 归属到创建者）。fire 阶段 await 它完成才 submit；必须返回 Promise——void 包装会让 await 直接通过，顺序约束失效 */
 	attribute: (conversationId: number, creator: string) => Promise<void>;
 	/** 触发的 run 由宿主开回复卡（panel 会话走通知开关） */
 	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
@@ -231,7 +231,7 @@ export async function scanLiveTasks(tx: Tx, query: TaskQuery, max = 500): Promis
 
 /** dwell.schedule-run：wait 睡到 next；fire 提交输入；announce 开卡并（有周期时）续睡下一次。
  *  fire/announce 分两段：submit 由 requestId 幂等，开卡回调在 submissionId 落进 checkpoint 后才调用——fire 崩溃重跑不会多开卡；
- *  announce 在回调与续睡 commit 之间崩溃时可能多开一张卡（已知残留）。不用 memo：memo 随任务记录整条重写，按触发次数分槽会无限增长。 */
+ *  announce 在回调与续睡 commit 之间崩溃时可能多开一张卡（已知残留）。不要改用 memo 去重：任务记录整体重写，按触发次数分槽会无限增长。 */
 export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 	defineTask<ScheduleInput, ScheduleCheckpoint, null>({
 		name: SCHEDULE_TASK_KIND,
