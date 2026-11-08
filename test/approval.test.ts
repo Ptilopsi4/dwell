@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } from "../src/ext/approval.ts";
+import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, makeApprovalExtension, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } from "../src/ext/approval.ts";
 import { DATA_DIR, STATE_DIR } from "../src/state.ts";
 
 test("命中各危险模式并返回匹配片段", () => {
@@ -237,4 +237,25 @@ test("父线与子会话先后被拦：共用待审槽不覆盖，决定后两�
 
 test("splitTargets：旧版待审（无 targets）视为 scope 自身被拦", () => {
 	assert.deepEqual(splitTargets(7, { command: "x", match: "x", trigger: "ou", via: "feishu" }), { self: true, children: [] });
+});
+
+test("dwell.proc：start 走同一危险命令闸，status/stop 放行", () => {
+	const ext = makeApprovalExtension();
+	const beforeTool = (ext.hooks?.[0]?.handlers as { beforeTool?: (call: { name: string; arguments: unknown }, api: { conversationId: number }) => { block: string } | undefined }).beforeTool;
+	if (beforeTool === undefined) throw new Error("beforeTool 未注册");
+	const call = (name: string, args: unknown) => ({ name, arguments: args });
+	const api = { conversationId: 101 };
+	try {
+		// start 的 command 与 bash 同闸：外发/递归强删均拦（返回 block 文案），安全命令放行
+		const blockedPost = beforeTool(call("dwell.proc", { action: "start", name: "s", command: "curl -X POST https://example.com" }), api);
+		const blockedRm = beforeTool(call("dwell.proc", { action: "start", name: "s", command: "rm -rf /" }), api);
+		assert.match(blockedPost?.block ?? "", /approval policy blocked/);
+		assert.match(blockedRm?.block ?? "", /approval policy blocked/);
+		assert.equal(beforeTool(call("dwell.proc", { action: "start", name: "s", command: "npm run build" }), api), undefined, "安全命令放行");
+		assert.equal(beforeTool(call("dwell.proc", { action: "status" }), api), undefined, "status 不过闸");
+		assert.equal(beforeTool(call("dwell.proc", { action: "stop", name: "s" }), api), undefined, "stop 不过闸");
+		assert.equal(beforeTool(call("read", { path: "/etc/hosts" }), api), undefined, "其他工具不受影响");
+	} finally {
+		pendingApprovals.clear();
+	}
 });

@@ -1407,16 +1407,26 @@ function openAlerts() {
 }
 $("alertsBtn").onclick = openAlerts;
 
-/* ── 定时任务：全部会话的活跃 schedule，可取消（创建走对话） ── */
+/* ── 定时与后台进程：全部会话的活跃 schedule 可取消、托管进程可停止（创建走对话） ── */
 async function openSchedules() {
-	$("sheetTitle").textContent = "定时任务";
-	$("sheetBody").innerHTML = `<p class="rnote">全部会话的活跃定时任务（时间按浏览器时区显示）；取消立即生效。新建请在对应会话里直接说。</p>
+	$("sheetTitle").textContent = "定时与后台进程";
+	$("sheetBody").innerHTML = `<p class="rnote">全部会话的活跃定时任务与后台进程（时间按浏览器时区显示）；取消/停止立即生效。新建请在对应会话里直接说。</p>
+		<div class="side-empty" id="sEmpty" hidden>暂无定时任务</div>
 		<div id="sList"></div>
+		<p class="rnote" style="margin-top:12px">后台进程（随服务重启而中断）</p>
+		<div class="side-empty" id="pEmpty" hidden>暂无后台进程</div>
+		<div id="pList"></div>
 		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
-	const box = $("sList");
-	let list = [];
-	try { list = await api("schedules"); } catch (e) { toast(e.message, true); return; }
-	if (list.length === 0) box.innerHTML = `<div class="side-empty">暂无定时任务</div>`;
+	const sBox = $("sList");
+	const pBox = $("pList");
+	let procs = [];
+	const [list, procList] = await Promise.all([
+		api("schedules").catch(() => []),
+		api("procs").catch(() => []),
+	]);
+	procs = procList;
+	if (list.length === 0) $("sEmpty").hidden = false;
+	if (procs.length === 0) $("pEmpty").hidden = false;
 	const UNIT_ZH = { minute: "分钟", hour: "小时", day: "天", week: "周", month: "月" };
 	const WD_ZH = "日一二三四五六";
 	// 周几列表压成区间：[1,2,3,4,5] → 周一至周五，[0,6] → 周日、周六
@@ -1433,20 +1443,36 @@ async function openSchedules() {
 	for (const s of list) {
 		const row = document.createElement("div");
 		row.className = "rrow";
+		row.innerHTML = `<div class="rh"><span class="rt"></span><small></small><button class="btn" data-variant="ghost" data-size="xs" style="color:var(--destructive)">取消</button></div><div class="rb"></div>`;
 		const repeatLabel = s.repeat
 			? "每 " + s.repeat.interval + " " + (UNIT_ZH[s.repeat.unit] ?? s.repeat.unit) + (s.repeat.weekdays ? `（仅${weekdayLabel(s.repeat.weekdays)}）` : "")
 			: "单次";
-		row.innerHTML = `<div class="rh"><span class="rt"></span><small></small><button class="btn" data-variant="ghost" data-size="xs" style="color:var(--destructive)">取消</button></div><div class="rb"></div>`;
 		row.querySelector(".rt").textContent = s.conversation;
 		row.querySelector("small").textContent = (s.next ? new Date(s.next).toLocaleString() : "运行中") + " · " + repeatLabel;
 		row.querySelector(".rb").textContent = s.instruction;
 		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, async () => {
 			await api("schedules/cancel", { taskId: s.taskId });
 			row.remove();
-			if (box.children.length === 0) box.innerHTML = `<div class="side-empty">暂无定时任务</div>`;
+			if (sBox.children.length === 0) $("sEmpty").hidden = false;
 			toast("已取消");
 		}, "取消?");
-		box.appendChild(row);
+		sBox.appendChild(row);
+	}
+	for (const p of procs) {
+		const row = document.createElement("div");
+		row.className = "rrow";
+		const uptime = p.startedAt ? " · 运行 " + Math.max(0, Math.round((Date.now() - new Date(p.startedAt).getTime()) / 60000)) + " 分钟" : "";
+		row.innerHTML = `<div class="rh"><span class="rt"></span><small></small><button class="btn" data-variant="ghost" data-size="xs" style="color:var(--destructive)">停止</button></div><div class="rb" style="font-family:var(--mono)"></div>`;
+		row.querySelector(".rt").textContent = `${p.conversation} · ${p.name}`;
+		row.querySelector("small").textContent = (p.pid ? `pid ${p.pid}` : "退出中") + uptime;
+		row.querySelector(".rb").textContent = p.command;
+		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, async () => {
+			await api("procs/stop", { taskId: p.taskId });
+			row.remove();
+			if (pBox.children.length === 0) $("pEmpty").hidden = false;
+			toast("已停止");
+		}, "停止?");
+		pBox.appendChild(row);
 	}
 	if (!$("sheet").open) $("sheet").showModal();
 }

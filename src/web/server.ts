@@ -14,6 +14,7 @@ import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
 import { clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
+import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
@@ -453,6 +454,36 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			// 只允许取消定时任务：先校验 kind（panel 能 abort 任意任务的面收窄）
 			const task = await harness.getTask(taskId as never, BACKGROUND_CONTEXT);
 			if (task?.kind !== SCHEDULE_TASK_KIND) throw new HttpError(404, "schedule not found");
+			const state = await harness.abortTask(taskId as never, BACKGROUND_CONTEXT);
+			json(res, 200, { ok: true, state });
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/procs") {
+			// 全部活跃后台进程（面板只读展示 + 停止；创建走对话）
+			const records = await harness.commit((tx) => scanLiveTasks(tx, { kind: PROC_TASK_KIND }, 500), BACKGROUND_CONTEXT);
+			const convs = sessions.listConversations();
+			json(res, 200, records.map((t) => {
+				const input = t.input as ProcInput;
+				const conv = convs.find((c) => c.id === input.conversationId);
+				const ck = t.state.status === "running" && t.state.checkpoint !== undefined ? (t.state.checkpoint as { phase?: string; pid?: number; startedAt?: number }) : undefined;
+				return {
+					taskId: String(t.id),
+					name: input.name,
+					conversationId: input.conversationId,
+					conversation: conv?.name ?? `#${input.conversationId}`,
+					command: input.command,
+					pid: ck?.phase === "watch" ? (ck.pid ?? null) : null,
+					startedAt: ck?.startedAt !== undefined ? new Date(ck.startedAt).toISOString() : null,
+				};
+			}));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/procs/stop") {
+			const body = await readBody(req);
+			const taskId = Number(body?.taskId);
+			if (!Number.isFinite(taskId)) throw new HttpError(400, "taskId required");
+			const task = await harness.getTask(taskId as never, BACKGROUND_CONTEXT);
+			if (task?.kind !== PROC_TASK_KIND) throw new HttpError(404, "process not found");
 			const state = await harness.abortTask(taskId as never, BACKGROUND_CONTEXT);
 			json(res, 200, { ok: true, state });
 			return;

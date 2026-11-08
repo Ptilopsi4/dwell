@@ -1,5 +1,5 @@
 // 后台任务：dwell.task 工具把自包含任务派给后台子代理（Anchor 持有子会话 + Reporter 投递与回报）。
-// 子会话继承父会话的 cwd/模型/工具（去掉 dwell.task / dwell.schedule 防递归派生）；父线 /cancel 与 idle 等待
+// 子会话继承父会话的 cwd/模型/工具（去掉 dwell.task / dwell.schedule / dwell.proc 防递归派生）；父线 /cancel 与 idle 等待
 // 不穿越 background 边界。答案以 followUp 回到父会话，由宿主 onFired 开卡（模式同官方 example 23）。
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -249,7 +249,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 				// 子会话由锚持有：复制父 agent（cwd/模型/工具），再收掉递归派生工具
 				const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
 				await configure(tx, child.id, {
-					// 移除后台/定时扩展对象：子代理不能递归派生（任务定义随扩展走，子会话也不会跑这两类任务）
+					// 移除后台/定时/托管进程扩展对象：子代理不能递归派生，也不起后台进程（任务定义随扩展走，子会话也不会跑这几类任务）
 					extensions: { remove: [...deps.forbidden()] },
 					instructions:
 						`You are a background task agent working for the main dwell conversation. The user does not see this conversation directly. ` +

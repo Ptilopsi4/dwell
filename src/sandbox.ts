@@ -66,6 +66,27 @@ echo "selftest OK"
 
 export type SandboxState = { enabled: boolean; reason?: string; wrapperPath?: string };
 
+/** dwell.proc 直接 spawn 用的 shell：沙箱启用即 wrapper（与 bash 工具同一进沙箱路径）；否则找系统 bash。
+ *  NodeExecutionEnv 的默认解析是私有函数，这里用同一套候选（win32：Git Bash 安装位 → PATH；其余：/bin/bash → which）。
+ *  找不到返回空 path：proc 任务的 start 阶段会拒并回报，不影响其他工具。 */
+export function resolveSpawnShell(state: SandboxState): { path: string; sandboxed: boolean } {
+	if (state.enabled && state.wrapperPath !== undefined) return { path: state.wrapperPath, sandboxed: true };
+	if (process.platform === "win32") {
+		const candidates = [`${process.env.ProgramFiles ?? ""}\\Git\\bin\\bash.exe`, `${process.env["ProgramFiles(x86)"] ?? ""}\\Git\\bin\\bash.exe`].filter((p) => p !== "\\Git\\bin\\bash.exe");
+		for (const candidate of candidates) if (existsSync(candidate)) return { path: candidate, sandboxed: false };
+		const where = spawnSync("where", ["bash"], { encoding: "utf8" });
+		if (where.status === 0) {
+			const found = where.stdout.split(/\r?\n/).find((p) => p.trim() !== "");
+			if (found !== undefined) return { path: found.trim(), sandboxed: false };
+		}
+		return { path: "", sandboxed: false };
+	}
+	if (existsSync("/bin/bash")) return { path: "/bin/bash", sandboxed: false };
+	const which = spawnSync("which", ["bash"], { encoding: "utf8" });
+	if (which.status === 0 && which.stdout.trim() !== "") return { path: which.stdout.trim(), sandboxed: false };
+	return { path: "", sandboxed: false };
+}
+
 /** 启动探测：Linux + bwrap 存在 + 在 $dataDir/work/.selftest 里跑 wrapper 自检通过 → 启用；
  *  任一步失败返回 disabled（不算错误，调用方记日志后照常运行）。 */
 export async function probeSandbox(opts: { dataDir: string; stateDir: string; appRoot: string; forceOff: boolean }): Promise<SandboxState> {

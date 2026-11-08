@@ -121,6 +121,8 @@ sudo -u dwell env -i PATH=/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/
 
 `test/probe-scrub.ts` 检查凭证是否已从 `/proc/<pid>/environ` 清除，用法见文件头注释。
 
+`test/probe-proc.ts` 验证托管后台进程（`dwell.proc`）在沙箱下的真实行为：进程活过 spawn 调用、组击杀能清掉 pidns 内含 `setsid` 孙进程、进程起的 server 能被其他 bash 调用连上、输出落日志。跑法同 `probe-bwrap.ts`（需沙箱已启用）。
+
 ## 5. Panel 与网络
 
 panel 没有登录。保护它的是网络，加上服务端的两道检查：

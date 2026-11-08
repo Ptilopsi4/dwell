@@ -25,9 +25,10 @@ src/
   report.ts         运行告警：onReport → 日志 + 管理员私聊（10 分钟同键节流）；session_failed 不节流，index 侧退出进程交重启
   sandbox.ts        bash 沙箱：bwrap wrapper 生成 + 启动探测（失败不启用，回退路径治理；真实行为由 probe-bwrap.ts 服务器验证）
   smoke.ts          冒烟：有 key 走真模型，无 key 走 faux
-  ext/approval.ts   bash 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）+ 待审 targets 多目标与 takeDecision/splitTargets（父线与子会话先后被拦不覆盖，决定后逐个唤醒）
+  ext/approval.ts   bash 与 dwell.proc start 危险命令拦截 + 审批窗口 (conversationId, sender) + 审批状态持久化（approvals.json）+ read/write/edit 路径治理 + 后台子会话→父会话 scope 映射（conversationScope）+ 待审 targets 多目标与 takeDecision/splitTargets（父线与子会话先后被拦不覆盖，决定后逐个唤醒）
   ext/schedule.ts   dwell.schedule 工具 + dwell.schedule-run durable 任务（sleep→触发→周期续睡）；时区/周期纯函数
-  ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23）；makeBackgroundDeliverer 审批续跑投递器（输入经 Reporter 投回子会话，结果 followUp 回父线）
+  ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23；子会话去掉 schedule/task/proc 三扩展防递归派生）；makeBackgroundDeliverer 审批续跑投递器（输入经 Reporter 投回子会话，结果 followUp 回父线）
+  ext/proc.ts       dwell.proc 工具 + dwell.proc-run durable 任务（托管后台进程：宿主直接 spawn 同一沙箱 wrapper，watch 等退出，report followUp 回会话；重启后按 lost 回报）
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
   ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）/ dwell.lark.send（cwd 内文件发回当前会话）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
@@ -35,6 +36,7 @@ src/
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
 test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探针，不在 npm test 内
 test/probe-bwrap.ts  bash 沙箱服务器探针（需先 apt install bubblewrap；非 Linux 自动 skip）
+test/probe-proc.ts  dwell.proc 服务器探针（沙箱内进程存活/停止清场/网络可达；重启清场属 systemd 行为，部署时手动验证；非 Linux 自动 skip）
 docs/               部署文档（中英双语）
 ```
 
@@ -42,7 +44,7 @@ docs/               部署文档（中英双语）
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 134 个，Windows 上 1 个 sh 依赖用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 142 个，Windows 上 1 个 sh 依赖用例跳过、无 bash 时进程集成用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
@@ -80,7 +82,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 - 依赖运行时对象（channel、sessions）时用 getter 延迟绑定，参考 `makeLarkExtension`
 - 治理：只读免审；bash 危险模式走 `ext/approval.ts`。新增危险模式改 `DANGEROUS`/`rmRecursiveMatch`/`STATE_FILES` 并补 `test/approval.test.ts`
 - 定时/后台任务：durable task 一律 `background: true`（不占 idle、/cancel 不穿越）；自治 run（无用户消息触发）统一经 `onAutonomousRun` 开卡，归属先 `attribute` 再 submit；requestId 幂等是重启不重发的唯一保障
-- 自研工具执行命令一律用 `env.exec` 的字符串形式（经 shellPath 进沙箱）；禁用字符串数组形式——数组直接 spawn 程序不经 shellPath，绕开 bash 沙箱
+- 自研工具执行命令一律用 `env.exec` 的字符串形式（经 shellPath 进沙箱）；禁用字符串数组形式——数组直接 spawn 程序不经 shellPath，绕开 bash 沙箱。例外 dwell.proc：它要的是活过单次调用的进程，`env.exec` 会阻塞到退出，故直接 spawn，shell 与 bash 工具同一选择（`resolveSpawnShell`），沙箱语义不变
 - 对外 HTTP 用 `fetch` + `AbortSignal.timeout`，单测 mock `fetch`（参考 `test/web.test.ts`）
 
 ## 飞书侧注意

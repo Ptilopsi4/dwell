@@ -305,6 +305,12 @@ export function makeApprovalExtension() {
 		hooks: [
 			hook(ToolTask, {
 				beforeTool: (call, api) => {
+					// dwell.proc start 与 bash 同一条危险命令闸（否则它就是绕过审批的通道）；status/stop 只读/受控，放行
+					if (call.name === "dwell.proc") {
+						const args = call.arguments as { action?: unknown; command?: unknown };
+						if (args.action !== "start") return undefined;
+						return bashApprovalBlock(typeof args.command === "string" ? args.command : "", api.conversationId as number);
+					}
 					if (call.name !== "bash") return undefined;
 					return bashApprovalBlock((call.arguments as { command?: string }).command ?? "", api.conversationId as number);
 				},

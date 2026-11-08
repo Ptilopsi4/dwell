@@ -121,6 +121,8 @@ Every line should be `PASS`: the state directory, the application directory, and
 
 `test/probe-scrub.ts` checks that credentials are removed from `/proc/<pid>/environ`. Its header comment explains how to run it.
 
+`test/probe-proc.ts` verifies the real behavior of managed background processes (`dwell.proc`) under the sandbox: a process survives its spawn call, a group kill clears the pid namespace including `setsid` grandchildren, a server started by a process is reachable from other bash calls, and output lands in the log. Run it the same way as `probe-bwrap.ts` (sandbox must be enabled).
+
 ## 5. Panel and network
 
 The panel has no login. Its protection is the network plus two server-side checks:

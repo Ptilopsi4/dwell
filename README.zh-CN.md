@@ -120,7 +120,8 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 | `dwell.lark.image` | 按消息 id 拉取图片描述：群里不 @ 发的图不进上下文，模型读历史看到 `[image]` 占位后按需回看 | 免审 |
 | `dwell.lark.send` | 把会话工作目录内的文件发到当前会话的飞书聊天：图片（png/jpeg/gif/webp）≤ 10MB，其余文件 ≤ 30MB，不允许空文件。只发当前会话，来源限本会话工作目录；panel 任务（无飞书聊天）在 panel 提供下载 | 免审 |
 | `dwell.schedule` | 给当前会话定一个定时触发（单次或周期，如工作日早报、延时提醒）。每个 schedule 是一个 durable 后台任务：重启不丢，`/cancel` 不影响，停机错过的多次只补一次后照周期继续。每会话上限 20 个，周期最短 10 分钟 | 免审 |
-| `dwell.task` | 把自包含长任务派给命名的后台子代理：当前对话不被占住，子代理跑完把结果作为 followUp 报回。子代理与父会话共享工作目录和工具（去掉这两个），由 background 锚任务持有，`/cancel` 与清空上下文都不会停它。`dwell.task stop` 中止并移除该子代理；panel 的「中止当前运行」只中止当前 run（子代理仍在名单里）。每会话并发上限 3 个、全局 6 个；其危险命令按父线的审批窗口拦截 | 免审 |
+| `dwell.task` | 把自包含长任务派给命名的后台子代理：当前对话不被占住，子代理跑完把结果作为 followUp 报回。子代理与父会话共享工作目录和工具（去掉 dwell.schedule / dwell.task / dwell.proc），由 background 锚任务持有，`/cancel` 与清空上下文都不会停它。`dwell.task stop` 中止并移除该子代理；panel 的「中止当前运行」只中止当前 run（子代理仍在名单里）。每会话并发上限 3 个、全局 6 个；其危险命令按父线的审批窗口拦截 | 免审 |
+| `dwell.proc` | 托管后台进程（dev server、watcher、长爬虫等需活过单次 bash 调用的进程）：同一沙箱与工作目录，输出落 `.dwell-proc/<name>.log`，退出码与日志尾以 followUp 报回（`notify: false` 可关）。`dwell.proc stop` 杀进程树；`/cancel` 与清空上下文不影响。进程与服务同生命周期：dwell 重启即终止并告知会话。每会话上限 5 个、全局 10 个；`start` 与 bash 同一条危险命令审批 | 危险命令需审批（同 bash） |
 
 图片和文件：
 
