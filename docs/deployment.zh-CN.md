@@ -79,12 +79,13 @@ ProtectSystem=strict
 ReadWritePaths=/opt/dwell
 PrivateTmp=true
 MemoryMax=1200M
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
+node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`，服务停止时 systemd 会清空它。`OOMPolicy=continue` 让 bash 命令超出 `MemoryMax` 时只杀掉该进程，服务继续运行。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
 
 ```sh
 sudo systemctl daemon-reload
@@ -219,6 +220,23 @@ sudo chmod 640 /etc/dwell/git-signing
 ```
 
 `<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。noreply 地址算账号的已验证邮箱，签名后的 commit 显示 Verified。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 与 `XDG_STATE_HOME` 移出工作目录，dwell 会自行设置。
+
+**构建检查与 CI**
+
+bash 里的命令跑在服务的 cgroup 内，重型构建会和 dwell 抢同一份 `MemoryMax`。unit 加 `OOMPolicy=continue`（见第 3 节模板）：内存超限时内核只杀掉吃内存的进程，systemd 不会停掉整个服务。
+
+系统提示让本地只做轻量检查（formatter、linter、改动包的构建与测试，套 `timeout` 和 `nice`），完整 CI 交给账号 fork 上的 GitHub Actions：push 之后模型用 `gh run` 跟进运行结果。账号的 Actions 保持开启；fork 没有 secrets，fork 的 `GITHUB_TOKEN` 只作用于 fork 本身。只在 `pull_request` 上触发、依赖 secrets 或 self-hosted runner 的 workflow 在 fork 上跑不起来，模型会说明哪些检查没跑。
+
+本地检查用的工具链装在宿主：沙箱只读挂载 `/usr`，模型自己装不了。缓存要放在工作目录之外。以 Go 为例：官方 tarball 装到 `/usr/local/go`，把 `go`/`gofmt` 链接到 `/usr/bin`（在 `DWELL_TOOL_PATH` 内），默认值写进 `/usr/local/go/go.env`（Go 在环境变量之前读它）：
+
+```ini
+GOPATH=/tmp/dwell-go/path
+GOCACHE=/tmp/dwell-go/cache
+GOTOOLCHAIN=local
+GOTELEMETRY=off
+```
+
+默认代理不可达时在这里加 `GOPROXY`/`GOSUMDB` 镜像。`GOTOOLCHAIN=local` 禁止 `go` 自行下载其他版本工具链。重装 Go 会覆盖 `go.env`，升级后要重写。
 
 **容器**
 
