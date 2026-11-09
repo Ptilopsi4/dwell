@@ -125,7 +125,7 @@ export function githubEnabled(): boolean {
 }
 
 /** gh/git 非交互由环境保证（沙箱经 SANDBOX_PASS_ENV 透传，非沙箱直接继承），须在 probeSandbox 之前调用。
- *  GH_CONFIG_DIR / XDG_STATE_HOME 移出会话 cwd：沙箱内 HOME=cwd，gh 的配置与 state（device-id）默认写进工作目录。 */
+ *  GH_CONFIG_DIR 移出会话 cwd：沙箱内 HOME=cwd，gh 配置默认写进工作目录（state 走沙箱固定的 XDG_STATE_HOME）。 */
 export function applyGithubEnv(): void {
 	if (!githubEnabled()) return;
 	process.env.GH_PROMPT_DISABLED = "1";
@@ -133,7 +133,6 @@ export function applyGithubEnv(): void {
 	process.env.GH_NO_UPDATE_NOTIFIER = "1";
 	process.env.GH_PAGER = "cat";
 	process.env.GH_CONFIG_DIR = join(tmpdir(), "dwell-gh");
-	process.env.XDG_STATE_HOME = join(tmpdir(), "dwell-gh", "state");
 }
 
 /** 系统提示前导段：渲染期判 GitHub 开关（单测可切 env）。 */

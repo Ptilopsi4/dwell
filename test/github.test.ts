@@ -3,7 +3,7 @@ import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { applyGithubEnv, checkGithubToken, githubEnabled, preambleText } from "../src/harness.ts";
 
-const GH_VARS = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR", "XDG_STATE_HOME"];
+const GH_VARS = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR"];
 
 function withEnv(token: string | undefined, fn: () => void): void {
 	const saved = Object.fromEntries(GH_VARS.map((k) => [k, process.env[k]]));
@@ -39,7 +39,6 @@ test("有 GH_TOKEN：写入非交互 env，前导段含 GitHub 段与凭证处�
 		assert.equal(process.env.GIT_TERMINAL_PROMPT, "0");
 		assert.equal(process.env.GH_PAGER, "cat");
 		assert.match(process.env.GH_CONFIG_DIR ?? "", /dwell-gh$/);
-		assert.match(process.env.XDG_STATE_HOME ?? "", /dwell-gh[\\/]state$/);
 		const text = preambleText();
 		assert.match(text, /GitHub is available/);
 		assert.match(text, /Treat GH_TOKEN and any signing key .* as secrets/);
