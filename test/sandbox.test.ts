@@ -73,7 +73,7 @@ test("wrapperScript：passEnv 只写变量名、位于 --clearenv 之后", () =>
 	assert.ok(!wrapperScript("/usr/bin/bwrap", []).includes("GH_TOKEN"), "无 passEnv 时不出现");
 });
 
-test("wrapperScript：XDG 目录固定指到 /tmp（HOME=cwd 时工具配置不落进工作目录），且在 --clearenv 之后", () => {
+test("wrapperScript：XDG 目录指到 /tmp 且在 --clearenv 之后", () => {
 	const script = wrapperScript("/usr/bin/bwrap", []);
 	const clearenv = script.indexOf("--clearenv");
 	for (const name of ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {

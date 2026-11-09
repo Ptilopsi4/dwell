@@ -183,7 +183,7 @@ async function main(): Promise<void> {
 	// 密钥已全部进入闭包：从 env 与 /proc 原始环境区彻底移除（失败即拒绝启动），此后任何任务都读不回
 	await scrubSecretEnv();
 
-	// GitHub 接入：非交互变量须在沙箱探测前写入（wrapper 的透传名单在生成期按存在与否定好）
+	// 须在沙箱探测前：wrapper 的透传名单按生成期 env 定
 	applyGithubEnv();
 	// bash 沙箱探测在 scrub 之后（probe 自身 spawn 不需要密钥）、任何任务开跑之前；未启用不算错误，回退路径治理 + 危险命令正则
 	const sandbox = await probeSandbox({ dataDir: DATA_DIR, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: process.env.DWELL_SANDBOX === "off" });
@@ -192,7 +192,7 @@ async function main(): Promise<void> {
 	if (sandbox.enabled) console.log(`[dwell] bash 沙箱已启用（wrapper: ${sandbox.wrapperPath}）`);
 	else console.log(`[dwell] bash 沙箱未启用，回退路径治理：${sandbox.reason}`);
 
-	// GH_TOKEN 自检：启动一次 + 每 24h。告警直发管理员（不走 onReport），网络失败只记日志；不阻断启动
+	// GH_TOKEN 自检：告警直发管理员（不是 pi-durable 故障，不走 onReport），网络失败只记日志
 	const githubCheck = async (): Promise<void> => {
 		const warnings = await checkGithubToken(process.env.GH_TOKEN ?? "");
 		if (warnings === null) {
@@ -232,7 +232,7 @@ async function main(): Promise<void> {
 	});
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
 	await reattachStreams();
-	// 自检放在 Channel 连上之后：告警要能私发管理员
+	// Channel 连上之后才能私发告警
 	if (githubEnabled()) void githubCheck();
 	// resume 放在擦除密钥与飞书重挂之后：续跑任务（含其 bash）从这里才开跑
 	harness.resume();
