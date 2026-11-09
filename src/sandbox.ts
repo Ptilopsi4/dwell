@@ -14,7 +14,7 @@ const DEFAULT_RO_DIRS = ["/etc", dirname(dirname(process.execPath)), "/run/resol
 const shWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`);
 
 /** 透传进沙箱的 env 名单（GitHub 接入）：gh/git 只从 env 读 token 与非交互设置，--clearenv 后须显式设回。 */
-export const SANDBOX_PASS_ENV = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR", "XDG_STATE_HOME"] as const;
+export const SANDBOX_PASS_ENV = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR"] as const;
 
 /** bash 沙箱 wrapper（POSIX sh）：作为 bash 工具的 shellPath，spawn(shellPath, ["-c", cmd]) 在此进入 mount namespace。
  *  passEnv 只写变量名、值在运行期从 wrapper 自身的 env 取（值不落盘）；名单在生成期按存在与否定好，不做运行期条件展开。 */
@@ -39,13 +39,15 @@ export function wrapperScript(bwrapPath: string, roDirs: readonly string[], pass
 BWRAP=${shWord(bwrapPath)}
 # pwd -P 取物理路径：spawn 传入的 cwd 可能经软链，bwrap 的挂载源与 --chdir 都要真实路径
 CWD=$(pwd -P)
-# clearenv 必须在两个 setenv 之前：bwrap 按出现顺序应用参数，先清空再设 PATH/HOME（反序会把两者一并清掉）。
+# clearenv 必须在全部 setenv 之前：bwrap 按出现顺序应用参数，反序会把设好的变量一并清掉。
+# HOME=cwd 时工具（gh、go telemetry 等）会把配置/状态写进工作目录，XDG 三个目录固定指到 /tmp。
 # 注：exec 的续行内不能插注释（注释的行尾会终结整条命令）
 exec "$BWRAP" ${mountArgs.join(" ")} \\
 	--symlink usr/bin /bin --symlink usr/bin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \\
 	--dev /dev --proc /proc --unshare-pid --die-with-parent \\
 	--bind /tmp /tmp --bind "$CWD" "$CWD" --chdir "$CWD" \\
-	--clearenv --setenv PATH "$PATH" --setenv HOME "$CWD"${passEnv.map((name) => ` --setenv ${name} "$${name}"`).join("")} \\
+	--clearenv --setenv PATH "$PATH" --setenv HOME "$CWD" \\
+	--setenv XDG_CONFIG_HOME /tmp/dwell-xdg/config --setenv XDG_STATE_HOME /tmp/dwell-xdg/state --setenv XDG_CACHE_HOME /tmp/dwell-xdg/cache${passEnv.map((name) => ` --setenv ${name} "$${name}"`).join("")} \\
 	/bin/bash "$@"
 `;
 }
