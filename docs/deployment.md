@@ -119,6 +119,8 @@ sudo -u dwell env -i PATH=/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/
 
 Every line should be `PASS`: the state directory, the application directory, and other conversations' directories are invisible; the working directory is writable; `/usr` is read-only; the environment holds no secrets; DNS works; `/proc/1` is the sandbox's init; and from inside the sandbox the panel answers 403 on `/api/approvals` and 200 on `/healthz`. Pass `DWELL_DATA` and `DWELL_STATE` explicitly; without them the probe falls back to `./data` and creates its test directories inside the application directory.
 
+The probe rewrites the shared wrapper `data/bin/sandbox-bash` from its own environment. With GitHub configured (section 7), restart the service after running it so the wrapper passes `GH_TOKEN` again.
+
 `test/probe-scrub.ts` checks that credentials are removed from `/proc/<pid>/environ`. Its header comment explains how to run it.
 
 `test/probe-proc.ts` verifies the real behavior of managed background processes (`dwell.proc`) under the sandbox: a process survives its spawn call, a group kill clears the pid namespace including `setsid` grandchildren, a server started by a process is reachable from other bash calls, and output lands in the log. Run it the same way as `probe-bwrap.ts` (sandbox must be enabled).
