@@ -41,7 +41,8 @@ test("有 GH_TOKEN：写入非交互 env，前导段含 GitHub 段与凭证处�
 		assert.match(process.env.GH_CONFIG_DIR ?? "", /dwell-gh$/);
 		const text = preambleText();
 		assert.match(text, /GitHub is available/);
-		assert.match(text, /Treat GH_TOKEN as a secret/);
+		assert.match(text, /Treat GH_TOKEN and any signing key .* as secrets/);
+		assert.match(text, /--no-gpg-sign/);
 		assert.match(text, /env -u GH_TOKEN/);
 		assert.ok(!text.includes("ghp_x"), "token 值不进提示词");
 	});
