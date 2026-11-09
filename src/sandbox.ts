@@ -13,8 +13,12 @@ const DEFAULT_RO_DIRS = ["/etc", dirname(dirname(process.execPath)), "/run/resol
 /** sh 引号：常规路径原样嵌入（脚本可读、探针可 grep），含特殊字符时退回单引号转义。 */
 const shWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`);
 
-/** bash 沙箱 wrapper（POSIX sh）：作为 bash 工具的 shellPath，spawn(shellPath, ["-c", cmd]) 在此进入 mount namespace。 */
-export function wrapperScript(bwrapPath: string, roDirs: readonly string[]): string {
+/** 透传进沙箱的 env 名单（GitHub 接入）：gh/git 只从 env 读 token 与非交互设置，--clearenv 后须显式设回。 */
+export const SANDBOX_PASS_ENV = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR"] as const;
+
+/** bash 沙箱 wrapper（POSIX sh）：作为 bash 工具的 shellPath，spawn(shellPath, ["-c", cmd]) 在此进入 mount namespace。
+ *  passEnv 只写变量名、值在运行期从 wrapper 自身的 env 取（值不落盘）；名单在生成期按存在与否定好，不做运行期条件展开。 */
+export function wrapperScript(bwrapPath: string, roDirs: readonly string[], passEnv: readonly string[] = []): string {
 	// 挂载表按目标路径去重、保持首次出现顺序：/usr 与 /etc 是固定项，roDirs 已含 /etc 或 DNS 解析目录时不重复拼
 	const mounts: readonly (readonly [string, string])[] = [
 		["--ro-bind", "/usr"],
@@ -41,7 +45,7 @@ exec "$BWRAP" ${mountArgs.join(" ")} \\
 	--symlink usr/bin /bin --symlink usr/bin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \\
 	--dev /dev --proc /proc --unshare-pid --die-with-parent \\
 	--bind /tmp /tmp --bind "$CWD" "$CWD" --chdir "$CWD" \\
-	--clearenv --setenv PATH "$PATH" --setenv HOME "$CWD" \\
+	--clearenv --setenv PATH "$PATH" --setenv HOME "$CWD"${passEnv.map((name) => ` --setenv ${name} "$${name}"`).join("")} \\
 	/bin/bash "$@"
 `;
 }
@@ -108,7 +112,8 @@ export async function probeSandbox(opts: { dataDir: string; stateDir: string; ap
 		await mkdir(selftestDir, { recursive: true });
 		await mkdir(sibling, { recursive: true }); // 兄弟会话目录要真实存在，断言才有意义
 		// wrapper 落盘：tmp 写 + chmod + rename 原子替换，回读校验内容一致
-		const script = wrapperScript(bwrap, DEFAULT_RO_DIRS);
+		const passEnv = SANDBOX_PASS_ENV.filter((name) => (process.env[name] ?? "") !== "");
+		const script = wrapperScript(bwrap, DEFAULT_RO_DIRS, passEnv);
 		const wrapperPath = join(dataDir, "bin", "sandbox-bash");
 		await mkdir(join(dataDir, "bin"), { recursive: true });
 		const tmp = `${wrapperPath}.tmp`;
