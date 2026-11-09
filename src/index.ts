@@ -4,7 +4,7 @@ import { basename, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type SubmissionId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
-import { MODEL, busyConversations, makeImageDescriber, openDwell, runConversations, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
+import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { makeReporter } from "./report.ts";
 import { describeResources, sniffImageMime } from "./media.ts";
 import { probeSandbox, resolveSpawnShell } from "./sandbox.ts";
@@ -183,6 +183,8 @@ async function main(): Promise<void> {
 	// 密钥已全部进入闭包：从 env 与 /proc 原始环境区彻底移除（失败即拒绝启动），此后任何任务都读不回
 	await scrubSecretEnv();
 
+	// GitHub 接入：非交互变量须在沙箱探测前写入（wrapper 的透传名单在生成期按存在与否定好）
+	applyGithubEnv();
 	// bash 沙箱探测在 scrub 之后（probe 自身 spawn 不需要密钥）、任何任务开跑之前；未启用不算错误，回退路径治理 + 危险命令正则
 	const sandbox = await probeSandbox({ dataDir: DATA_DIR, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: process.env.DWELL_SANDBOX === "off" });
 	setSandboxState(sandbox);
@@ -190,12 +192,31 @@ async function main(): Promise<void> {
 	if (sandbox.enabled) console.log(`[dwell] bash 沙箱已启用（wrapper: ${sandbox.wrapperPath}）`);
 	else console.log(`[dwell] bash 沙箱未启用，回退路径治理：${sandbox.reason}`);
 
+	// GH_TOKEN 自检：启动一次 + 每 24h。告警直发管理员（不走 onReport），网络失败只记日志；不阻断启动
+	const githubCheck = async (): Promise<void> => {
+		const warnings = await checkGithubToken(process.env.GH_TOKEN ?? "");
+		if (warnings === null) {
+			console.error("[dwell] GH_TOKEN 自检：请求 GitHub 失败，跳过");
+			return;
+		}
+		if (warnings.length === 0) console.log("[dwell] GH_TOKEN 自检通过");
+		for (const text of warnings) {
+			console.error(`[dwell] ${text}`);
+			await notifyAdmins(`⚠️ ${text}`);
+		}
+	};
+	if (githubEnabled()) {
+		if (!sandbox.enabled) console.error("[dwell] 已配 GH_TOKEN 但沙箱未启用：bash 继承完整环境");
+		setInterval(() => void githubCheck(), 24 * 3600_000).unref();
+	}
+
 	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
 		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
+			if (githubEnabled()) void githubCheck();
 			harness.resume();
 			return;
 		}
@@ -211,6 +232,8 @@ async function main(): Promise<void> {
 	});
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
 	await reattachStreams();
+	// 自检放在 Channel 连上之后：告警要能私发管理员
+	if (githubEnabled()) void githubCheck();
 	// resume 放在擦除密钥与飞书重挂之后：续跑任务（含其 bash）从这里才开跑
 	harness.resume();
 	console.log(`[dwell] 就绪（bot: ${channel.botIdentity?.name ?? "?"}）`);

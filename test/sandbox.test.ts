@@ -64,3 +64,11 @@ test("probeSandbox：forceOff 关闭（平台检查在前，非 Linux 上先被�
 	if (process.platform === "linux") assert.equal(s.reason, "DWELL_SANDBOX=off");
 	else assert.ok(s.reason?.includes("非 Linux"), "平台检查在 forceOff 之前");
 });
+
+test("wrapperScript：passEnv 只写变量名、位于 --clearenv 之后", () => {
+	const script = wrapperScript("/usr/bin/bwrap", [], ["GH_TOKEN", "GH_CONFIG_DIR"]);
+	const clearenv = script.indexOf("--clearenv");
+	assert.ok(script.indexOf(`--setenv GH_TOKEN "$GH_TOKEN"`) > clearenv);
+	assert.ok(script.indexOf(`--setenv GH_CONFIG_DIR "$GH_CONFIG_DIR"`) > clearenv);
+	assert.ok(!wrapperScript("/usr/bin/bwrap", []).includes("GH_TOKEN"), "无 passEnv 时不出现");
+});
