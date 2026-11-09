@@ -174,6 +174,19 @@ curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true
 2. 建 **classic** personal access token，勾 `public_repo` 与 `workflow`，设到期日。fine-grained token 不能向账号不是成员的 public 仓库提 PR；不勾 `workflow` 时，上游一旦改过 `.github/workflows/`，`gh repo sync` 与 push 到 fork 都会失败
 3. env 文件加 `GH_TOKEN=<token>`，重启
 
+**commit 签名（可选）**
+
+只有 git 在本地签名的 commit 才显示 Verified：personal access token 经 API 创建的 commit 不签名。用一把只用于签名的 SSH key：
+
+```sh
+sudo install -d -o root -g dwell -m 750 /etc/dwell
+sudo ssh-keygen -t ed25519 -N "" -C "<account> signing" -f /etc/dwell/git-signing
+sudo chown root:dwell /etc/dwell/git-signing /etc/dwell/git-signing.pub
+sudo chmod 640 /etc/dwell/git-signing
+```
+
+把 `/etc/dwell/git-signing.pub` 添加到账号 Settings → SSH and GPG keys，类型选 **Signing Key**（不是认证 key，不能用来 push），再把下面模板里的签名段写进 `/etc/gitconfig`。key 放在 `/etc` 下是因为沙箱只读挂载 `/etc`，沙箱内的 git 能读到。需要 git 2.34 及以上。
+
 启动时与之后每 24 小时，dwell 用 token 请求 `https://api.github.com/user`：返回 401、缺 `public_repo` 或 `workflow`、14 天内到期时私聊通知管理员。
 
 **宿主配置（systemd）**
@@ -192,9 +205,18 @@ curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true
 [url "https://github.com/"]
 	insteadOf = git@github.com:
 	insteadOf = ssh://git@github.com/
+# commit 签名（可选）
+[gpg]
+	format = ssh
+[user]
+	signingkey = /etc/dwell/git-signing.pub
+[commit]
+	gpgsign = true
+[tag]
+	gpgsign = true
 ```
 
-`<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 移出工作目录，dwell 会自行设置。
+`<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。noreply 地址算账号的已验证邮箱，签名后的 commit 显示 Verified。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 移出工作目录，dwell 会自行设置。
 
 **容器**
 
@@ -204,7 +226,7 @@ curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true
 
 - 启动日志出现 `[dwell] GH_TOKEN 自检通过`，`/healthz` 为 `"sandbox":true`；沙箱未启用时 bash 继承完整环境
 - 在会话里让 dwell 执行 `gh auth status`
-- 选一个近期改过 workflow 的上游：fork、`gh repo sync`、push 分支到 fork（commit 作者关联到该账号）、提 PR；直接 push 上游必须得到 403
+- 选一个近期改过 workflow 的上游：fork、`gh repo sync`、push 分支到 fork（commit 作者关联到该账号；配了签名时 `git log --show-signature -1` 显示签名有效、GitHub 显示 Verified）、提 PR；直接 push 上游必须得到 403
 - 会话工作目录下没有 `.config/gh`
 
 **风险**
@@ -215,7 +237,9 @@ curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true
 - 仓库代码（依赖安装、构建脚本、测试）在模型没加 `env -u GH_TOKEN` 时带着 token 运行，而沙箱不隔离网络
 - 仓库、issue 或网页里的内容可能诱导模型把 token 外发
 
-系统提示要求模型不泄露 token、不带 token 运行仓库代码、把读到的内容当数据而不是指令。这些规则减少误操作，挡不住恶意成员或成功的 prompt injection。边界在账号层：账号名下不放其他资产，scope 只给 `public_repo` + `workflow`，设到期日，泄露即吊销。push 到 fork 或以该账号发出的内容是公开的，无法完全撤回。
+签名私钥同样对 bash 可读。泄露后别人能以该账号身份生成显示 Verified 的 commit，但不能 push 或代表账号操作；在 GitHub 上删掉这把 Signing Key 即作废。
+
+系统提示要求模型不泄露 token 和签名私钥、不带 token 运行仓库代码、把读到的内容当数据而不是指令。这些规则减少误操作，挡不住恶意成员或成功的 prompt injection。边界在账号层：账号名下不放其他资产，scope 只给 `public_repo` + `workflow`，设到期日，泄露即吊销。push 到 fork 或以该账号发出的内容是公开的，无法完全撤回。
 
 ## 8. Docker
 
