@@ -4,7 +4,7 @@
 
 ## 技术栈
 
-- Node ≥ 22.19，直接运行 `.ts`（type stripping），**无构建步骤**。`tsconfig` 开了 `erasableSyntaxOnly`：不能用 enum、namespace、构造函数参数属性；import 必须带 `.ts` 后缀
+- Node ≥ 26，直接运行 `.ts`（type stripping），**无构建步骤**。`tsconfig` 开了 `erasableSyntaxOnly`：不能用 enum、namespace、构造函数参数属性；import 必须带 `.ts` 后缀
 - `@earendil-works/pi-durable` / `pi-ai` / `chord` 锁精确版本 `1.4.0`（experimental，API 可能变）。不加 `^`，升级作为单独任务处理
 - 飞书：`@larksuiteoapi/node-sdk` 的 Channel 模块（单 WebSocket 收消息和卡片回调，自动重连）。lark-cli 已退出运行时，不要再引入
 - 模型：`DWELL_PROVIDER` 选 `zai-coding-cn`（默认 glm-5.3）或 `deepseek`；图片走视觉模型 `DWELL_VISION_MODEL`（默认 glm-5.3-flash）
@@ -38,18 +38,21 @@ test/*.test.ts      node:test 单测；test/probe-*.ts 是一次性真链路探�
 test/probe-bwrap.ts  bash 沙箱服务器探针（需先 apt install bubblewrap；非 Linux 自动 skip）
 test/probe-proc.ts  dwell.proc 服务器探针（沙箱内进程存活/停止清场/网络可达；重启清场属 systemd 行为，部署时手动验证；非 Linux 自动 skip）
 docs/               部署文档（中英双语）
+.github/            CI workflow + Dependabot
 ```
 
 ## 命令
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node --test "test/*.test.ts"（全量 151 个，Windows 上 1 个 sh 依赖用例跳过、无 bash 时进程集成用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
+npm test        # node --test "test/*.test.ts"（全量 152 个，Windows 上 1 个 sh 依赖用例跳过、无 bash 时进程集成用例跳过；test/probe-*.ts 是一次性探针，不在 npm test 内）
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不连飞书
 ```
 
 单测按改动范围跑：`node --test test/lark.test.ts`。
+
+CI：`.github/workflows/ci.yml`（PR / push main，Node 26 跑 check、test、faux smoke）；只做 CI 不做 CD，部署按手动 SOP。Dependabot 忽略 `@earendil-works/*`（精确锁版本，升级单独处理）。
 
 ## 工程原则（贯穿全部代码）
 

@@ -50,7 +50,7 @@ sudo cp .env.example /opt/dwell/.env && sudo chmod 600 /opt/dwell/.env
 sudo chown -R dwell:dwell /opt/dwell
 ```
 
-需要 Node ≥ 22.19。node 不在系统 `PATH` 里时，按下面的 unit 设置 `PATH`。
+需要 Node ≥ 26。node 不在系统 `PATH` 里时，按下面的 unit 设置 `PATH`。
 
 ## 3. systemd unit
 

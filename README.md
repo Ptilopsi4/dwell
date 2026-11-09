@@ -14,7 +14,7 @@ Built on [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-
 
 ## Quick start
 
-Requires Node ≥ 22.19. dwell runs the `.ts` sources directly; there is no build step.
+Requires Node ≥ 26. dwell runs the `.ts` sources directly; there is no build step.
 
 ```sh
 npm install
@@ -181,5 +181,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start    # panel only, for local wo
 ```
 
 Feishu spreads the events of one app across all connected clients at random. When debugging locally, do not connect to the same app as a running production instance.
+
+CI (`.github/workflows/ci.yml`) runs `check`, `test` and a faux-model `smoke` on Node 26 for every PR and every push to `main`. Deployment stays manual.
 
 Contribution conventions and code layout are in `AGENTS.md`.

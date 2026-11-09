@@ -14,7 +14,7 @@
 
 ## 快速开始
 
-需要 Node ≥ 22.19（直接运行 `.ts`，没有构建步骤）。
+需要 Node ≥ 26（直接运行 `.ts`，没有构建步骤）。
 
 ```sh
 npm install
@@ -181,5 +181,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start    # 本地只起 panel
 ```
 
 同一个飞书应用的长连接会在多个客户端之间随机分流消息，本机调试不要和线上实例同时连同一个应用。
+
+CI（`.github/workflows/ci.yml`）在每个 PR 和 push 到 `main` 时，于 Node 26 上跑 `check`、`test` 和 faux 模型 `smoke`。部署仍为手动。
 
 贡献约定和代码结构见 `AGENTS.md`。

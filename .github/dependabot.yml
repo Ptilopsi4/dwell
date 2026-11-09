@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Pinned to exact versions on purpose (experimental API); upgrades are handled manually
+      - dependency-name: "@earendil-works/*"
+      # Types track the engines floor (Node 26)
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      dev:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
