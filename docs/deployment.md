@@ -164,7 +164,60 @@ Run `npm ci --omit=dev` again when `package-lock.json` changed. Before deploying
 
 For backups, `data/dwell.sqlite` (with its `-wal`/`-shm` files) holds all conversations and `state/` holds routing and users. Copy both while the service is stopped, or use `sqlite3 .backup` for the database.
 
-## 7. Docker
+## 7. GitHub (optional)
+
+With `GH_TOKEN` set, bash gets `gh` and `git` authenticated under a dedicated GitHub account, and dwell works as an outside contributor: fork the upstream, push to the fork, open a PR with `gh pr create`. It never needs collaborator access to anyone's repository.
+
+**Account and token**
+
+1. Create a dedicated account for dwell. Set its email to an address the operators read: GitHub mails a warning before a token expires
+2. Create a **classic** personal access token with the `public_repo` and `workflow` scopes, and set an expiration date. Fine-grained tokens cannot open PRs on public repositories the account is not a member of. Without `workflow`, `gh repo sync` and pushes to the fork fail as soon as the upstream has changed anything under `.github/workflows/`
+3. Add `GH_TOKEN=<token>` to the env file and restart
+
+At startup and every 24 hours dwell calls `https://api.github.com/user` with the token and sends admins a direct message when it gets a 401, when `public_repo` or `workflow` is missing, or when the token expires within 14 days.
+
+**Host setup (systemd)**
+
+Install `git` and `gh` (from GitHub's official apt repository), then write the system-wide `/etc/gitconfig`. The sandbox mounts `/etc` read-only and sets `HOME` to the working directory, so only system-level git configuration applies:
+
+```ini
+[user]
+	name = <account>
+	email = <ID>+<account>@users.noreply.github.com
+[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+[init]
+	defaultBranch = main
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+```
+
+`<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets `GH_PROMPT_DISABLED`, `GIT_TERMINAL_PROMPT=0`, `GH_PAGER=cat`, and moves `GH_CONFIG_DIR` out of the working directory on its own.
+
+**Container**
+
+The repository's Dockerfile does not include git or gh. Build a derived image that installs them and writes `/etc/gitconfig`. The container has no bash sandbox, so bash sees `GH_TOKEN` and the whole environment.
+
+**Verify**
+
+- The startup log shows `[dwell] GH_TOKEN 自检通过`, and `/healthz` reports `"sandbox":true`. If the sandbox is off, bash inherits the full environment
+- Ask dwell to run `gh auth status` in a conversation
+- Pick an upstream that changed its workflows recently: fork it, `gh repo sync`, push a branch to the fork (the commit author links to the account), open a PR. A direct push to the upstream must get a 403
+- No `.config/gh` appears in the conversation's working directory
+
+**Risks**
+
+This is the one exception to "credentials stay out of what bash can read": `GH_TOKEN` stays in the environment, because `gh` and `git` read it from there. Treat the token as exposed:
+
+- Any allowlisted member can ask the model to print it, and bash output is visible in the conversation and the panel
+- Code from a repository (dependency installs, build scripts, tests) runs with the token unless the model prefixes it with `env -u GH_TOKEN`, and the sandbox does not isolate the network
+- Content in a repository, an issue, or a web page can try to trick the model into sending the token out
+
+The system prompt tells the model never to reveal the token, to run repository code without it, and to treat content it reads as data. These rules reduce mistakes; they do not stop a malicious member or a successful prompt injection. The boundary is the account: give it nothing else, keep the scopes to `public_repo` + `workflow`, set an expiration, and revoke the token if it leaks. Anything pushed to the fork or posted under the account is public and cannot be fully taken back.
+
+## 8. Docker
 
 `docker compose up -d --build` runs dwell as a non-root `dwell` user with `./data` and `./state` mounted. Limits of this form:
 
