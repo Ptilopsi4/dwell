@@ -216,7 +216,7 @@ sudo chmod 640 /etc/dwell/git-signing
 	gpgsign = true
 ```
 
-`<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。noreply 地址算账号的已验证邮箱，签名后的 commit 显示 Verified。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 移出工作目录，dwell 会自行设置。
+`<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。noreply 地址算账号的已验证邮箱，签名后的 commit 显示 Verified。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 与 `XDG_STATE_HOME` 移出工作目录，dwell 会自行设置。
 
 **容器**
 
@@ -227,7 +227,7 @@ sudo chmod 640 /etc/dwell/git-signing
 - 启动日志出现 `[dwell] GH_TOKEN 自检通过`，`/healthz` 为 `"sandbox":true`；沙箱未启用时 bash 继承完整环境
 - 在会话里让 dwell 执行 `gh auth status`
 - 选一个近期改过 workflow 的上游：fork、`gh repo sync`、push 分支到 fork（commit 作者关联到该账号；配了签名时 `git log --show-signature -1` 显示签名有效、GitHub 显示 Verified）、提 PR；直接 push 上游必须得到 403
-- 会话工作目录下没有 `.config/gh`
+- 会话工作目录下没有 `.config/gh` 或 `.local/state/gh`
 
 **风险**
 

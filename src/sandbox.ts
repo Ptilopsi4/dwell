@@ -14,7 +14,7 @@ const DEFAULT_RO_DIRS = ["/etc", dirname(dirname(process.execPath)), "/run/resol
 const shWord = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`);
 
 /** 透传进沙箱的 env 名单（GitHub 接入）：gh/git 只从 env 读 token 与非交互设置，--clearenv 后须显式设回。 */
-export const SANDBOX_PASS_ENV = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR"] as const;
+export const SANDBOX_PASS_ENV = ["GH_TOKEN", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "GH_NO_UPDATE_NOTIFIER", "GH_PAGER", "GH_CONFIG_DIR", "XDG_STATE_HOME"] as const;
 
 /** bash 沙箱 wrapper（POSIX sh）：作为 bash 工具的 shellPath，spawn(shellPath, ["-c", cmd]) 在此进入 mount namespace。
  *  passEnv 只写变量名、值在运行期从 wrapper 自身的 env 取（值不落盘）；名单在生成期按存在与否定好，不做运行期条件展开。 */

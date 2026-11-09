@@ -216,7 +216,7 @@ Install `git` and `gh` (from GitHub's official apt repository), then write the s
 	gpgsign = true
 ```
 
-`<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The noreply address counts as a verified email of the account, so signed commits show as Verified. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets `GH_PROMPT_DISABLED`, `GIT_TERMINAL_PROMPT=0`, `GH_PAGER=cat`, and moves `GH_CONFIG_DIR` out of the working directory on its own.
+`<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The noreply address counts as a verified email of the account, so signed commits show as Verified. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets `GH_PROMPT_DISABLED`, `GIT_TERMINAL_PROMPT=0`, `GH_PAGER=cat`, and moves `GH_CONFIG_DIR` and `XDG_STATE_HOME` out of the working directory on its own.
 
 **Container**
 
@@ -227,7 +227,7 @@ The repository's Dockerfile does not include git or gh. Build a derived image th
 - The startup log shows `[dwell] GH_TOKEN 自检通过`, and `/healthz` reports `"sandbox":true`. If the sandbox is off, bash inherits the full environment
 - Ask dwell to run `gh auth status` in a conversation
 - Pick an upstream that changed its workflows recently: fork it, `gh repo sync`, push a branch to the fork (the commit author links to the account; with signing configured, `git log --show-signature -1` shows a good signature and GitHub shows Verified), open a PR. A direct push to the upstream must get a 403
-- No `.config/gh` appears in the conversation's working directory
+- No `.config/gh` or `.local/state/gh` appears in the conversation's working directory
 
 **Risks**
 
