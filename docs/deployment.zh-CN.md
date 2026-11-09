@@ -119,6 +119,8 @@ sudo -u dwell env -i PATH=/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/
 
 每一行都应是 `PASS`：状态目录、应用目录、其他会话目录不可见；工作目录可写；`/usr` 只读；环境里没有密钥；DNS 正常；`/proc/1` 是沙箱的 init；沙箱内访问 panel 时 `/api/approvals` 返回 403、`/healthz` 返回 200。`DWELL_DATA` 和 `DWELL_STATE` 必须显式传入，否则探针回退到 `./data`，会把测试目录建进应用目录。
 
+探针会按自己的环境重写共用的 wrapper `data/bin/sandbox-bash`。配置了 GitHub（第 7 节）时，跑完探针要重启服务，wrapper 才会重新透传 `GH_TOKEN`。
+
 `test/probe-scrub.ts` 检查凭证是否已从 `/proc/<pid>/environ` 清除，用法见文件头注释。
 
 `test/probe-proc.ts` 验证托管后台进程（`dwell.proc`）在沙箱下的真实行为：进程活过 spawn 调用、组击杀能清掉 pidns 内含 `setsid` 孙进程、进程起的 server 能被其他 bash 调用连上、输出落日志。跑法同 `probe-bwrap.ts`（需沙箱已启用）。
