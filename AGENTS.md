@@ -16,7 +16,7 @@
 ```
 src/
   index.ts          主程序：装配、飞书消息管线、会话路由、命令（/new /status /cancel /approve /deny /allow /disallow /help /whoami）、审批卡、FeishuBridge、自治 run 开卡（onAutonomousRun）与 scope 重建
-  harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer；GitHub 接入（GH_TOKEN 开关、非交互 env、提示词段、token 自检）
+  harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer；GitHub 接入（开关、非交互 env、提示词段、token 自检）
   pipeline.ts       消息管线判定（群准入/空内容/降级路由/命令识别，无副作用，可单测）
   sessions.ts       路由键 → conversation 映射、owner/名称/归档/通知开关、messageId 锚点（上限 10k）
   users.ts          角色（env 播种，state/users.json 为运行时真相）
@@ -63,7 +63,7 @@ DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 本地只起 panel，不�
 
 ## 必须守住的不变量
 
-- **凭证不进 bash 可读面**：启动读取后 `scrubSecretEnv()` 删除 `process.env` 并（Linux）覆写 `/proc/self/environ` 原始环境区的密钥值，自检失败拒绝启动；续跑任务（`harness.resume()`）在擦除后才开跑。新增密钥 env 要加进 `harness.ts` 的 `SECRET_ENV`，并在清理前读进闭包；凭证一律参数传递（Directory/connectChannel），不事后读 env。唯一例外 `GH_TOKEN`：gh/git 只从 env 读凭证，故不进 `SECRET_ENV`、经 `SANDBOX_PASS_ENV` 透传进沙箱；按「可泄露」设计，边界在专用账号层（最小 scope + 到期 + 吊销），提示词约束只减少误操作。不要再把其他凭证加进透传名单
+- **凭证不进 bash 可读面**：启动读取后 `scrubSecretEnv()` 删除 `process.env` 并（Linux）覆写 `/proc/self/environ` 原始环境区的密钥值，自检失败拒绝启动；续跑任务（`harness.resume()`）在擦除后才开跑。新增密钥 env 要加进 `harness.ts` 的 `SECRET_ENV`，并在清理前读进闭包；凭证一律参数传递（Directory/connectChannel），不事后读 env。唯一例外 `GH_TOKEN`（gh/git 只从 env 读凭证）：不进 `SECRET_ENV`，经 `SANDBOX_PASS_ENV` 透传；按可泄露设计，边界是专用账号。其他凭证不进透传名单
 - **文件工具限可写域**：`write`/`edit` 限会话 cwd 与系统临时目录，`read` 禁状态目录/应用根/sqlite/`/proc`（`ext/approval.ts` 的 `fileToolViolation`，挂 `dwell-path-guard` 扩展）。软链与 `..` 逃逸按 `realpath` 后的真实路径判；bash 仍可绕过（减速带，硬边界是部署隔离）
 - **panel 请求准入**：POST 强制 JSON Content-Type + Origin 同源 + Host 白名单（IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置名），见 `server.ts` 的 `checkPanelRequest`；本机来源除 `/healthz` 外 403（`isLocalSource`，防 bash 自调 panel 自批），仅 `DWELL_PANEL_ONLY=1` / `DWELL_PANEL_TRUST_LOCAL=1` 时关闭
 - **状态文件在 agent 可写域之外**：`DWELL_STATE` 与 `DWELL_DATA` 分开（目录权限），STATE_FILES 正则与文件工具路径治理双重拦截（含 approvals.json；均为减速带，bash 可绕，硬边界是部署隔离）。不要把 users/sessions/message-map/approvals 挪进 `data/`

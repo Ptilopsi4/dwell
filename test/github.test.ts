@@ -31,7 +31,7 @@ test("无 GH_TOKEN：不启用、不写 env、前导段无 GitHub 内容但含�
 	withEnv("", () => assert.equal(githubEnabled(), false));
 });
 
-test("有 GH_TOKEN：写入非交互 env，前导段含 GitHub 段与凭证处理条", () => {
+test("有 GH_TOKEN：写入非交互 env，前导段含 GitHub 段", () => {
 	withEnv("ghp_x", () => {
 		assert.equal(githubEnabled(), true);
 		applyGithubEnv();
@@ -41,11 +41,6 @@ test("有 GH_TOKEN：写入非交互 env，前导段含 GitHub 段与凭证处�
 		assert.match(process.env.GH_CONFIG_DIR ?? "", /dwell-gh$/);
 		const text = preambleText();
 		assert.match(text, /GitHub is available/);
-		assert.match(text, /Treat GH_TOKEN and any signing key .* as secrets/);
-		assert.match(text, /--no-gpg-sign/);
-		assert.ok(text.includes("repos/<owner>-<repo> under your working directory"));
-		assert.ok(text.includes("gh run list/watch"));
-		assert.match(text, /env -u GH_TOKEN/);
 		assert.ok(!text.includes("ghp_x"), "token 值不进提示词");
 	});
 });

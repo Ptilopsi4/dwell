@@ -177,20 +177,7 @@ With `GH_TOKEN` set, bash gets `gh` and `git` authenticated under a dedicated Gi
 2. Create a **classic** personal access token with the `public_repo` and `workflow` scopes, and set an expiration date. Fine-grained tokens cannot open PRs on public repositories the account is not a member of. Without `workflow`, `gh repo sync` and pushes to the fork fail as soon as the upstream has changed anything under `.github/workflows/`
 3. Add `GH_TOKEN=<token>` to the env file and restart
 
-**Commit signing (optional)**
-
-Commits get the Verified badge only when git signs them locally: commits that a personal access token creates through the API are not signed. Use an SSH key that does nothing but sign:
-
-```sh
-sudo install -d -o root -g dwell -m 750 /etc/dwell
-sudo ssh-keygen -t ed25519 -N "" -C "<account> signing" -f /etc/dwell/git-signing
-sudo chown root:dwell /etc/dwell/git-signing /etc/dwell/git-signing.pub
-sudo chmod 640 /etc/dwell/git-signing
-```
-
-Add `/etc/dwell/git-signing.pub` to the account under Settings → SSH and GPG keys as a **Signing Key** (not an authentication key: it cannot push), then add the signing block below to `/etc/gitconfig`. The key lives under `/etc` because the sandbox mounts `/etc` read-only, so git inside the sandbox can read it. Git 2.34 or later is required.
-
-At startup and every 24 hours dwell calls `https://api.github.com/user` with the token and sends admins a direct message when it gets a 401, when `public_repo` or `workflow` is missing, or when the token expires within 14 days.
+At startup and every 24 hours dwell checks the token against `https://api.github.com/user` and sends admins a direct message on a 401, a missing `public_repo` or `workflow` scope, or an expiry within 14 days.
 
 **Host setup (systemd)**
 
@@ -208,7 +195,24 @@ Install `git` and `gh` (from GitHub's official apt repository), then write the s
 [url "https://github.com/"]
 	insteadOf = git@github.com:
 	insteadOf = ssh://git@github.com/
-# commit signing (optional)
+```
+
+`<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets the non-interactive variables for `gh`/`git` itself.
+
+**Commit signing (optional)**
+
+GitHub shows commits as Verified only when git signs them locally; commits a personal access token creates through the API are not signed. Create an SSH key that only signs (git 2.34 or later):
+
+```sh
+sudo install -d -o root -g dwell -m 750 /etc/dwell
+sudo ssh-keygen -t ed25519 -N "" -C "<account> signing" -f /etc/dwell/git-signing
+sudo chown root:dwell /etc/dwell/git-signing /etc/dwell/git-signing.pub
+sudo chmod 640 /etc/dwell/git-signing
+```
+
+Add `/etc/dwell/git-signing.pub` to the account under Settings → SSH and GPG keys as a **Signing Key** (it cannot push), and append to `/etc/gitconfig`:
+
+```ini
 [gpg]
 	format = ssh
 [user]
@@ -219,15 +223,13 @@ Install `git` and `gh` (from GitHub's official apt repository), then write the s
 	gpgsign = true
 ```
 
-`<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The noreply address counts as a verified email of the account, so signed commits show as Verified. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets `GH_PROMPT_DISABLED`, `GIT_TERMINAL_PROMPT=0`, `GH_PAGER=cat`, and moves `GH_CONFIG_DIR` out of the working directory on its own; the sandbox points `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` at `/tmp/dwell-xdg`, so tools' config and state stay out of it too.
+The key lives under `/etc` so that git inside the sandbox can read it. The noreply address counts as a verified email of the account, so signed commits show as Verified.
 
 **Build checks and CI**
 
-Commands from bash run inside the service's cgroup, so a heavy build competes with dwell for the same `MemoryMax`. Add `OOMPolicy=continue` to the unit (see the template in section 3) so that the kernel kills only the offending process instead of systemd stopping the whole service.
+The system prompt keeps local checks light (formatters, linters, builds and tests of the touched packages, under `timeout` and `nice`) because bash shares the service's memory; `OOMPolicy=continue` in the unit (section 3) keeps an oversized build from stopping dwell. Full CI runs on GitHub Actions on the account's fork, which the model follows with `gh run`. Keep Actions enabled on the account: forks have no secrets, and the fork's `GITHUB_TOKEN` only reaches the fork. Workflows that run only on `pull_request` or need secrets or self-hosted runners do not run on the fork; the model then says which checks it could not run.
 
-The system prompt keeps local checks light (formatters, linters, builds and tests of the touched packages, under `timeout` and `nice`) and leaves full CI to GitHub Actions on the account's fork: after a push, the model follows the run with `gh run`. Keep Actions enabled on the account; forks have no secrets and the fork's `GITHUB_TOKEN` only reaches the fork. Workflows that only run on `pull_request` or need secrets or self-hosted runners do not run on the fork, and the model reports which checks it could not run.
-
-Toolchains for local checks go on the host: the sandbox mounts `/usr` read-only, so the model cannot install them. Keep their caches out of the working directory. For Go, install the official tarball to `/usr/local/go`, link `go`/`gofmt` into `/usr/bin` (inside `DWELL_TOOL_PATH`), and set the defaults in `/usr/local/go/go.env`, which Go reads before the environment:
+Toolchains for local checks go on the host, since the sandbox mounts `/usr` read-only. Keep their caches out of the working directory. For Go, install the official tarball to `/usr/local/go`, link `go`/`gofmt` into `/usr/bin` (inside `DWELL_TOOL_PATH`), and set defaults in `/usr/local/go/go.env`:
 
 ```ini
 GOPATH=/tmp/dwell-go/path
@@ -235,7 +237,7 @@ GOCACHE=/tmp/dwell-go/cache
 GOTOOLCHAIN=local
 ```
 
-Add `GOPROXY`/`GOSUMDB` mirrors there when the default proxy is unreachable. `GOTOOLCHAIN=local` stops `go` from downloading other toolchains on its own. Reinstalling Go overwrites `go.env`; write it again after an upgrade.
+Add `GOPROXY`/`GOSUMDB` mirrors there when the default proxy is unreachable. `GOTOOLCHAIN=local` stops `go` from downloading other toolchains. Reinstalling Go overwrites `go.env`.
 
 **Container**
 
@@ -245,20 +247,20 @@ The repository's Dockerfile does not include git or gh. Build a derived image th
 
 - The startup log shows `[dwell] GH_TOKEN 自检通过`, and `/healthz` reports `"sandbox":true`. If the sandbox is off, bash inherits the full environment
 - Ask dwell to run `gh auth status` in a conversation
-- Pick an upstream that changed its workflows recently: fork it, `gh repo sync`, push a branch to the fork (the commit author links to the account; with signing configured, `git log --show-signature -1` shows a good signature and GitHub shows Verified), open a PR. A direct push to the upstream must get a 403
+- Pick an upstream that changed its workflows recently: fork it, `gh repo sync`, push a branch to the fork, open a PR. The commit author links to the account, and with signing configured GitHub shows Verified. A direct push to the upstream must get a 403
 - No `.config` or `.local` appears in the conversation's working directory
 
 **Risks**
 
-This is the one exception to "credentials stay out of what bash can read": `GH_TOKEN` stays in the environment, because `gh` and `git` read it from there. Treat the token as exposed:
+`GH_TOKEN` is the one exception to "credentials stay out of what bash can read": `gh` and `git` read it from the environment. Treat it as exposed:
 
 - Any allowlisted member can ask the model to print it, and bash output is visible in the conversation and the panel
-- Code from a repository (dependency installs, build scripts, tests) runs with the token unless the model prefixes it with `env -u GH_TOKEN`, and the sandbox does not isolate the network
-- Content in a repository, an issue, or a web page can try to trick the model into sending the token out
+- Repository code (dependency installs, build scripts, tests) runs with the token unless the model prefixes it with `env -u GH_TOKEN`, and the sandbox does not isolate the network
+- Content the model reads can try to trick it into sending the token out
 
-The signing key is readable by bash in the same way. A leaked signing key lets someone produce commits that GitHub shows as Verified for the account, but cannot push or act as it; deleting the Signing Key on GitHub ends that.
+The signing key is readable by bash the same way. A leaked signing key lets someone make commits that show as Verified for the account, but not push or act as it; deleting the Signing Key on GitHub ends that.
 
-The system prompt tells the model never to reveal the token or the signing key, to run repository code without it, and to treat content it reads as data. These rules reduce mistakes; they do not stop a malicious member or a successful prompt injection. The boundary is the account: give it nothing else, keep the scopes to `public_repo` + `workflow`, set an expiration, and revoke the token if it leaks. Anything pushed to the fork or posted under the account is public and cannot be fully taken back.
+The system prompt tells the model never to reveal either secret and to run repository code without the token. That reduces mistakes; it does not stop a malicious member or a successful prompt injection. The boundary is the account: give it nothing else, keep the scopes to `public_repo` + `workflow`, set an expiration, and revoke the token if it leaks. Anything pushed to the fork or posted under the account is public.
 
 ## 8. Docker
 
