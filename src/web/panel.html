@@ -866,6 +866,12 @@ function appendEntry(entry) {
 			tag.className = "tag";
 			tag.textContent = entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
 			el.querySelector(".hd time").before(tag);
+		} else if (entry.data?.via === "schedule" || entry.data?.via === "background" || entry.data?.via === "proc") {
+			// 自治输入（定时/后台/进程）以创建者身份进 transcript（run 归属），展示层标注来源以免误读为用户亲手发送
+			const tag = document.createElement("span");
+			tag.className = "tag";
+			tag.textContent = { schedule: "定时任务", background: "后台任务", proc: "后台进程" }[entry.data.via];
+			el.querySelector(".hd time").before(tag);
 		}
 		const body = el.querySelector(".bd");
 		const { text, blocks } = splitAttachments(contentText(model?.content));
