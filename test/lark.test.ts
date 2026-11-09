@@ -11,8 +11,10 @@ type Item = { message_id: string; msg_type?: string; create_time?: string; chat_
 
 function fakeDeps(items: Item[], anchor?: Item) {
 	const calls: string[] = [];
+	const listParams: Record<string, unknown>[] = [];
 	return {
 		calls,
+		listParams,
 		deps: {
 			getClient: () => ({
 				im: {
@@ -20,6 +22,7 @@ function fakeDeps(items: Item[], anchor?: Item) {
 						message: {
 							list: async ({ params }: { params: Record<string, unknown> }) => {
 								calls.push(`list:${params.container_id}:${params.sort_type ?? ""}:${params.start_time ?? ""}:${params.end_time ?? ""}`);
+								listParams.push(params);
 								return { code: 0, data: { items } };
 							},
 							get: async ({ path }: { path: { message_id: string } }) => {
@@ -48,7 +51,7 @@ const context = {} as never;
 const out = (r: { output?: { text?: string }[] }) => String(r.output?.[0]?.text ?? "");
 
 test("默认读当前会话，按时间正序，带消息 id 与发送者", async () => {
-	const { deps } = fakeDeps([
+	const { deps, listParams } = fakeDeps([
 		{ message_id: "om_b", msg_type: "text", create_time: "2000", body: { content: JSON.stringify({ text: "第二条" }) }, sender: { id: "ou_2" }, senderName: "李四" },
 		{ message_id: "om_a", msg_type: "text", create_time: "1000", body: { content: JSON.stringify({ text: "第一条" }) }, sender: { id: "ou_1" }, senderName: "张三" },
 	]);
@@ -56,18 +59,22 @@ test("默认读当前会话，按时间正序，带消息 id 与发送者", asyn
 	const text = out(r as never);
 	assert.match(text, /Recent messages in .*\(oldest first/);
 	assert.ok(text.indexOf("张三 (om_a): 第一条") < text.indexOf("李四 (om_b): 第二条"), "正序排列");
+	assert.equal(listParams[0]?.card_msg_content_type, "raw_card_content", "list 请求卡片实体当前内容");
 });
 
 test("媒体与富文本占位/截断", async () => {
 	const long = "x".repeat(300);
+	const cardLong = { schema: "2.0", body: { elements: [{ tag: "markdown", content: "y".repeat(300) }] } };
 	const { deps } = fakeDeps([
 		{ message_id: "om_i", msg_type: "image", create_time: "1000" },
 		{ message_id: "om_t", msg_type: "text", create_time: "2000", body: { content: JSON.stringify({ text: long }) }, senderName: "A" },
+		{ message_id: "om_k", msg_type: "interactive", create_time: "3000", body: { content: JSON.stringify(cardLong) }, sender: { id: "cli_other", sender_type: "app" }, senderName: "B" },
 	]);
-	const r = await toolOf(deps).execute({ count: 2 }, api, context);
+	const r = await toolOf({ ...deps, getSelfAppId: () => "app_self" }).execute({ count: 3 }, api, context);
 	const text = out(r as never);
 	assert.match(text, /\[image\]/);
-	assert.match(text, new RegExp(`x{200}…`)); // 单条截 200 字
+	assert.match(text, new RegExp(`x{200}…`)); // text 单条截 200 字
+	assert.match(text, new RegExp(`y{300}`)); // 卡片截断上限 1000，300 字不截
 });
 
 test("around：get 定位后前后拼装去重（同会话）", async () => {
@@ -123,16 +130,45 @@ test("API 错误返回 isError", async () => {
 	assert.match(out(r as never), /230002/);
 });
 
-test("卡片消息：app 发的卡（含降级文案）直接标注，用户卡提取文本", async () => {
+test("卡片消息：自家卡默认占位可指引展开，其他 bot 卡提取正文（i18n/summary 不混入）", async () => {
+	const streamCard = { schema: "2.0", config: { summary: { content: "[Generating...]" } }, body: { elements: [{ tag: "markdown", element_id: "stream_md", content: "值班日报：一切正常" }, { tag: "button", text: { text: "查看详情" } }] }, i18n_body: { elements: [{ tag: "markdown", content: "值班日报：一切正常" }] } };
+	const botCard = { schema: "2.0", body: { elements: [{ tag: "markdown", content: { text: "外 bot 卡正文" } }] } };
 	const { deps } = fakeDeps([
-		{ message_id: "om_c1", msg_type: "interactive", create_time: "1000", body: { content: JSON.stringify({ elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]] }) }, sender: { id: "app_1", sender_type: "app" } },
-		{ message_id: "om_c2", msg_type: "interactive", create_time: "2000", body: { content: JSON.stringify({ elements: [[{ tag: "div", text: { tag: "lark_md", content: "标题：值班日报" } }]] }) }, sender: { id: "ou_9" }, senderName: "王五" },
+		// 自家流式卡：消息体只有 card_id 引用，正文内联在 json_card 字符串（卡片实体当前状态）
+		{ message_id: "om_self", msg_type: "interactive", create_time: "1000", body: { content: JSON.stringify({ type: "card", data: { card_id: "ctm_x" }, json_card: JSON.stringify(streamCard) }) }, sender: { id: "app_self", sender_type: "app" } },
+		{ message_id: "om_bot", msg_type: "interactive", create_time: "2000", body: { content: JSON.stringify(botCard) }, sender: { id: "cli_other", sender_type: "app" }, senderName: "日报机器人" },
+		{ message_id: "om_user", msg_type: "interactive", create_time: "3000", body: { content: JSON.stringify({ elements: [[{ tag: "div", text: { tag: "lark_md", content: "标题：值班日报" } }]] }) }, sender: { id: "ou_9" }, senderName: "王五" },
 	]);
-	const r = await toolOf(deps).execute({ count: 2 }, api, context);
-	const text = out(r as never);
-	assert.match(text, /\[dwell reply card; its content is in the conversation context\]/); // app 卡不提取（降级文案不污染）
-	assert.doesNotMatch(text, /请升级至最新版本/);
-	assert.match(text, /值班日报/); // 用户卡提取 lark_md
+	const own = { ...deps, getSelfAppId: () => "app_self" };
+	let r = await toolOf(own).execute({ count: 3 }, api, context);
+	let text = out(r as never);
+	assert.match(text, /om_self.*\[dwell reply card; pass ownCards: true to read its text\]/); // 默认占位，不误读不胀 token
+	assert.doesNotMatch(text, /一切正常/);
+	assert.match(text, /日报机器人 \(om_bot\): 外 bot 卡正文/); // 其他 bot 卡照旧提取
+	assert.match(text, /王五.*值班日报/); // 用户卡照旧提取
+	// ownCards: true → 自家流式卡提取 json_card 正文（含按钮文字），summary 占位与 i18n 副本不混入
+	r = await toolOf(own).execute({ count: 3, ownCards: true }, api, context);
+	text = out(r as never);
+	assert.match(text, /om_self.*值班日报：一切正常 查看详情/);
+	assert.doesNotMatch(text, /Generating/);
+	assert.equal(text.match(/一切正常/g)?.length, 1, "i18n 副本不重复拼入");
+});
+
+test("别家 bot 的卡提取不到正文时诚实占位；selfAppId 缺失时 app 卡保守占位", async () => {
+	const { deps } = fakeDeps([
+		{ message_id: "om_x", msg_type: "interactive", create_time: "1000", body: { content: JSON.stringify({ schema: "2.0", config: {} }) }, sender: { id: "cli_other", sender_type: "app" }, senderName: "某 bot" },
+		{ message_id: "om_y", msg_type: "interactive", create_time: "2000", body: { content: JSON.stringify({ type: "card", data: { card_id: "ctm_y" } }) }, sender: { id: "app_self", sender_type: "app" } },
+		// json_card 非法 JSON：catch 后保留原结构，提取为空 → 同缺失路径诚实占位
+		{ message_id: "om_z", msg_type: "interactive", create_time: "3000", body: { content: JSON.stringify({ json_card: "{not json" }) }, sender: { id: "cli_other", sender_type: "app" }, senderName: "某 bot" },
+	]);
+	let r = await toolOf({ ...deps, getSelfAppId: () => "app_self" }).execute({ count: 3 }, api, context);
+	assert.equal(out(r as never).match(/\[card from another bot; content not readable\]/g)?.length, 2);
+	// ownCards 下自家卡提取不到也诚实占位（消息体只剩 card_id 引用、json_card 缺失时）
+	r = await toolOf({ ...deps, getSelfAppId: () => "app_self" }).execute({ count: 3, ownCards: true }, api, context);
+	assert.match(out(r as never), /\[dwell reply card; content not readable\]/);
+	// selfAppId 拿不到（异常装配）：app 卡无法区分归属，保守占位
+	r = await toolOf(deps).execute({ count: 3 }, api, context);
+	assert.match(out(r as never), /\[dwell reply card; pass ownCards/);
 });
 
 test("空结果提示", async () => {

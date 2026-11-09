@@ -23,6 +23,8 @@ export type LarkDeps = {
 	isAdmin?: (openId: string) => boolean;
 	/** 当前 run 发起者（审批归属同源；缺失视为非管理员） */
 	senderOf?: (conversationId: number) => string | undefined;
+	/** 自家 app 的 app_id：app 发的消息 sender.id 即 app_id，用来区分自家回复卡与其他 bot 的卡 */
+	getSelfAppId?: () => string | undefined;
 	/** 发消息到会话所在 chat（复用 index 的锚点/话题规则）；返回 undefined = 当前会话没有飞书 chat（panel 任务） */
 	sendToChat?: (conversationId: number, input: SendInput) => Promise<{ messageId: string } | undefined>;
 };
@@ -47,11 +49,14 @@ type ListParams = {
 	start_time?: string;
 	end_time?: string;
 	with_sender_name?: boolean;
+	/** 卡片消息返回卡片实体当前内容（json_card 字段内联，流式卡正文只在实体里，发送时 JSON 是空壳）；
+	 *  raw_card_content 未在官方文档枚举，openclaw 与官方 Lark 插件同款用法 */
+	card_msg_content_type?: "raw_card_content";
 };
 
 type ListResult = { code?: number; msg?: string; data?: { has_more?: boolean; items?: MessageItem[] } };
 
-/** 卡片消息提取：elements 里 text/lark_md 段拼尽（cardkit 流式卡只带降级结构，提取不到时诚实占位）。 */
+/** 卡片消息提取：text/content 段拼尽（i18n_* 是原始卡 JSON 的多语言副本、summary 是会话列表预览，跳过避免重复/占位文案混入）。 */
 function interactiveText(parsed: unknown): string {
 	const texts: string[] = [];
 	const walk = (node: unknown): void => {
@@ -62,6 +67,7 @@ function interactiveText(parsed: unknown): string {
 		if (typeof node !== "object" || node === null) return;
 		for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
 			if ((key === "text" || key === "content") && typeof value === "string" && value.trim() !== "") texts.push(value);
+			else if (key.startsWith("i18n_") || key === "summary") continue;
 			else walk(value);
 		}
 	};
@@ -69,8 +75,8 @@ function interactiveText(parsed: unknown): string {
 	return texts.join(" ");
 }
 
-/** 单条内容提取：文本直出，富文本拼段，媒体/卡片给占位；单条截 200 字。 */
-function messageText(item: MessageItem): string {
+/** 单条内容提取：文本直出，富文本拼段，媒体占位；卡片按发送者分流；单条截 200 字。 */
+function messageText(item: MessageItem, selfAppId: string | undefined, readOwn: boolean): string {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(item.body?.content ?? "");
@@ -81,18 +87,34 @@ function messageText(item: MessageItem): string {
 	if (item.msg_type === "text") text = typeof parsed === "object" && parsed !== null ? String((parsed as { text?: string }).text ?? "") : String(parsed ?? "");
 	else if (item.msg_type === "post") text = JSON.stringify(parsed).match(/"text":"[^"]*"/g)?.map((s) => s.slice(8, -1)).join(" ") ?? "";
 	else if (item.msg_type === "interactive") {
-		// bot 自己的卡（流式回复/审批）不走提取：cardkit 降级文案会污染内容，且正文就在会话上下文里
-		if (item.sender?.sender_type === "app") text = "[dwell reply card; its content is in the conversation context]";
-		else {
-			text = interactiveText(parsed);
-			if (text === "") text = "[card message, content not readable]";
+		// 自家回复卡默认占位：正文通常就在会话上下文里，且群聊里自家卡密度高，全提取徒增 token；
+		// ownCards 显式要求时提取（compact 后正文不在上下文/用户问卡里写了什么）。
+		// app 消息的 sender.id 即 app_id，以此区分其他 bot 的卡（一律提取）；
+		// selfAppId 未知时保守视为自家卡
+		const own = item.sender?.sender_type === "app" && (selfAppId === undefined || item.sender.id === selfAppId);
+		if (own && !readOwn) {
+			text = "[dwell reply card; pass ownCards: true to read its text]";
+		} else {
+			// 流式卡的消息体只有 card_id 引用，正文内联在 json_card 字符串里（卡片实体当前状态），展开后再提取
+			let card = parsed;
+			if (card !== null && typeof card === "object" && typeof (card as { json_card?: unknown }).json_card === "string") {
+				try {
+					card = JSON.parse((card as { json_card: string }).json_card);
+				} catch {
+					/* 解析失败保留原结构，提取不到则占位 */
+				}
+			}
+			text = interactiveText(card);
+			if (text === "") text = own ? "[dwell reply card; content not readable]" : item.sender?.sender_type === "app" ? "[card from another bot; content not readable]" : "[card message, content not readable]";
 		}
 	} else {
 		const kinds: Record<string, string> = { image: "[image]", file: "[file]", audio: "[voice]", media: "[video]", sticker: "[sticker]", share_chat: "[group card]", share_user: "[contact card]", system: "[system message]" };
 		text = kinds[item.msg_type ?? ""] ?? `[${item.msg_type ?? "unknown type"}]`;
 	}
 	text = text.replace(/\s+/g, " ").trim();
-	return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+	// 卡片是结构化内容（PR/审批/报表），200 字必截断且无展开入口，放宽；text/post 维持 200 防长文刷屏
+	const limit = item.msg_type === "interactive" ? 1000 : 200;
+	return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
 function formatTime(createTime: string | undefined): string {
@@ -104,13 +126,14 @@ function formatTime(createTime: string | undefined): string {
 }
 
 /** 格式化一批消息（按时间正序传入）。 */
-async function formatItems(items: MessageItem[], chatName: string | undefined, directory: Directory | undefined): Promise<string> {
-	const senderIds = items.map((i) => i.sender?.id).filter((id): id is string => id !== undefined && !id.startsWith("app"));
+async function formatItems(items: MessageItem[], chatName: string | undefined, directory: Directory | undefined, selfAppId: string | undefined, readOwn: boolean): Promise<string> {
+	// app 发送者的 id 是 app_id（cli_ 开头），不进用户名查询
+	const senderIds = items.filter((i) => i.sender?.sender_type !== "app").map((i) => i.sender?.id).filter((id): id is string => id !== undefined);
 	const names = directory !== undefined && senderIds.length > 0 ? await directory.userNames(senderIds) : {};
 	const lines = items.map((item) => {
 		const senderId = item.sender?.id ?? "";
 		const name = item.senderName || (senderId in names ? names[senderId] : undefined) || (senderId === "" ? "?" : senderId.slice(-6));
-		return `[${formatTime(item.create_time)}] ${name} (${item.message_id ?? "?"}): ${messageText(item)}`;
+		return `[${formatTime(item.create_time)}] ${name} (${item.message_id ?? "?"}): ${messageText(item, selfAppId, readOwn)}`;
 	});
 	return `Recent messages in ${chatName ?? "this chat"} (oldest first; the id in parentheses works as \`around\` or as input to dwell.lark.image):\n${lines.join("\n")}`;
 }
@@ -124,7 +147,7 @@ async function listMessages(deps: LarkDeps, params: ListParams): Promise<Message
 		get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
 	};
 	try {
-		const result = await message.list({ params });
+		const result = await message.list({ params: { card_msg_content_type: "raw_card_content", ...params } });
 		if (result.code !== undefined && result.code !== 0) throw new Error(`Feishu API ${result.code}: ${result.msg ?? ""}`);
 		return result.data?.items ?? [];
 	} catch (err) {
@@ -146,12 +169,13 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"Read Feishu chat history (the current chat by default). Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages sent by the bot show only a placeholder; their content is in the conversation context, so read the surrounding user messages. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
+			"Read Feishu chat history (the current chat by default). Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages from other bots are returned with their extracted text; dwell's own reply cards show only a placeholder (normally their content is in your context) unless you pass ownCards: true, e.g. after compaction or when the user asks what an earlier card said. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
 		parameters: Type.Object({
 			count: Type.Optional(Type.Number({ description: "Number of messages to read (default 20, max 50)" })),
 			around: Type.Optional(Type.String({ description: "Message id (starts with om_): read half before and half after it; take it from this tool's previous output" })),
 			chat: Type.Optional(Type.String({ description: "Chat id (starts with oc_): read another chat (the bot must be a member). Defaults to the current chat" })),
 			sinceHours: Type.Optional(Type.Number({ description: "Only read messages from the last N hours (use with chat)" })),
+			ownCards: Type.Optional(Type.Boolean({ description: "Also extract dwell's own reply cards instead of a placeholder. Use it when earlier card content is no longer in your context (after compaction) or the user asks what a card said" })),
 		}),
 		replay: "safe",
 		executionMode: "sequential",
@@ -214,7 +238,7 @@ function makeReadTool(deps: LarkDeps) {
 				}
 				if (items.length === 0) return { output: [{ type: "text", text: "No readable messages in this chat (none in the time range, or the bot lacks permission)." }] };
 				const chatName = directory !== undefined ? await directory.chatName(nameChat) : undefined;
-				return { output: [{ type: "text", text: await formatItems(items, chatName, directory) }] };
+				return { output: [{ type: "text", text: await formatItems(items, chatName, directory, deps.getSelfAppId?.(), args.ownCards === true) }] };
 			} catch (err) {
 				return { output: [{ type: "text", text: `Read failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
 			}
