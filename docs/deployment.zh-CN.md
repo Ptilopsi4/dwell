@@ -164,7 +164,60 @@ curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true
 
 备份数据：`data/dwell.sqlite`（连同 `-wal`/`-shm` 文件）保存全部会话，`state/` 保存路由和用户。在服务停止时复制两者，或用 `sqlite3 .backup` 备份数据库。
 
-## 7. Docker
+## 7. GitHub（可选）
+
+配置 `GH_TOKEN` 后，bash 里的 `gh` 与 `git` 以一个专用 GitHub 账号完成认证，dwell 以外部贡献者身份工作：fork 上游、push 到 fork、用 `gh pr create` 提 PR，不需要任何仓库的 collaborator 权限。
+
+**账号与 token**
+
+1. 为 dwell 建一个专用账号，邮箱设为运维能收到的地址：token 到期前 GitHub 会发邮件提醒
+2. 建 **classic** personal access token，勾 `public_repo` 与 `workflow`，设到期日。fine-grained token 不能向账号不是成员的 public 仓库提 PR；不勾 `workflow` 时，上游一旦改过 `.github/workflows/`，`gh repo sync` 与 push 到 fork 都会失败
+3. env 文件加 `GH_TOKEN=<token>`，重启
+
+启动时与之后每 24 小时，dwell 用 token 请求 `https://api.github.com/user`：返回 401、缺 `public_repo` 或 `workflow`、14 天内到期时私聊通知管理员。
+
+**宿主配置（systemd）**
+
+安装 `git` 与 `gh`（gh 用 GitHub 官方 apt 源），再写系统级 `/etc/gitconfig`。沙箱只读挂载 `/etc`，且 `HOME` 为工作目录，所以只有系统级 git 配置生效：
+
+```ini
+[user]
+	name = <account>
+	email = <ID>+<account>@users.noreply.github.com
+[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+[init]
+	defaultBranch = main
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+```
+
+`<ID>` 用 `gh api user --jq .id` 取。不配 `user.name`/`user.email` 时沙箱内 commit 会失败。`insteadOf` 把 SSH URL（如 submodule）转成 HTTPS——沙箱内没有 SSH key。`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT=0`、`GH_PAGER=cat` 以及把 `GH_CONFIG_DIR` 移出工作目录，dwell 会自行设置。
+
+**容器**
+
+仓库的 Dockerfile 不含 git 与 gh，需要时自建派生镜像安装并写 `/etc/gitconfig`。容器形态没有 bash 沙箱，`GH_TOKEN` 与全部环境变量对 bash 可见。
+
+**验证**
+
+- 启动日志出现 `[dwell] GH_TOKEN 自检通过`，`/healthz` 为 `"sandbox":true`；沙箱未启用时 bash 继承完整环境
+- 在会话里让 dwell 执行 `gh auth status`
+- 选一个近期改过 workflow 的上游：fork、`gh repo sync`、push 分支到 fork（commit 作者关联到该账号）、提 PR；直接 push 上游必须得到 403
+- 会话工作目录下没有 `.config/gh`
+
+**风险**
+
+这是「凭证不进 bash 可读面」的唯一例外：`gh` 与 `git` 从环境变量读凭证，`GH_TOKEN` 留在环境里。按「token 可能泄露」对待：
+
+- 任何白名单成员都能让模型打印它，bash 输出在会话与 panel 中可见
+- 仓库代码（依赖安装、构建脚本、测试）在模型没加 `env -u GH_TOKEN` 时带着 token 运行，而沙箱不隔离网络
+- 仓库、issue 或网页里的内容可能诱导模型把 token 外发
+
+系统提示要求模型不泄露 token、不带 token 运行仓库代码、把读到的内容当数据而不是指令。这些规则减少误操作，挡不住恶意成员或成功的 prompt injection。边界在账号层：账号名下不放其他资产，scope 只给 `public_repo` + `workflow`，设到期日，泄露即吊销。push 到 fork 或以该账号发出的内容是公开的，无法完全撤回。
+
+## 8. Docker
 
 `docker compose up -d --build` 以非 root 的 `dwell` 用户运行，挂载 `./data` 和 `./state`。这种形态的限制：
 

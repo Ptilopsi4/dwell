@@ -74,6 +74,7 @@ docker compose up -d --build    # ./data → /data，./state → /state
 | `DWELL_STATE` | 状态目录，默认 `./state`（容器内 `/state`）：`users.json`、`sessions.json`、`message-map.json`、`approvals.json`。必须放在 agent 可写的数据目录之外 |
 | `DWELL_TOOL_PATH` | 设置后收窄 bash 工具的 `PATH`（如 `/usr/bin:/bin`），让模型看不到服务器上带凭证的程序 |
 | `DWELL_SANDBOX` | 设为 `off` 关闭 bash 沙箱（见[安全边界](#安全边界)） |
+| `GH_TOKEN` | 专用 GitHub 账号的 classic token（`public_repo` + `workflow`）。设置后 bash 里 `gh`/`git` 已认证，模型以外部贡献者身份工作；token 对 bash 可读。见 [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md#7-github可选) |
 
 ## 飞书使用
 
@@ -153,7 +154,7 @@ bash 命令命中下列模式时会被拦截：`rm -rf`、`ssh`/`scp`/`rsync` �
 层次从硬到软：容器/系统隔离 → bash 沙箱（mount namespace，内核强制）→ 凭证擦除 → 文件工具路径治理 → 请求准入 → bash 危险命令正则。
 
 - 飞书 open_id 白名单准入，白名单外的消息回复固定提示
-- **凭证**：模型 key、飞书凭证、白名单读入内存后从进程环境删除；Linux 下还会把启动时原始环境区（`/proc/<pid>/environ`）里的密钥值覆写为 0 并自检，擦不干净拒绝启动（`test/probe-scrub.ts` 服务器上验证）。续跑任务在擦除完成后才恢复调度，bash 里 `printenv` 和 `cat /proc/$PPID/environ` 都拿不到
+- **凭证**：模型 key、飞书凭证、白名单读入内存后从进程环境删除；Linux 下还会把启动时原始环境区（`/proc/<pid>/environ`）里的密钥值覆写为 0 并自检，擦不干净拒绝启动（`test/probe-scrub.ts` 服务器上验证）。续跑任务在擦除完成后才恢复调度，bash 里 `printenv` 和 `cat /proc/$PPID/environ` 都拿不到。唯一例外是 `GH_TOKEN`：`gh` 与 `git` 从环境变量读凭证，它对 bash 可读，按已暴露对待，边界是专用账号与随时吊销（见 [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md#7-github可选)）
 - **文件工具**：`write`/`edit` 只能写本会话工作目录与系统临时目录；`read` 不能读状态目录、应用目录、数据库和 `/proc`（其余系统路径可读）。相对路径 `..` 逃逸与符号链接都按归一化后的真实路径判定
 - **panel 请求准入**：POST 强制 `Content-Type: application/json`；有 `Origin` 时必须与 `Host` 同源；`Host` 只接受 IP 字面量或 `DWELL_PANEL_HOST`/`DWELL_PANEL_URL` 配置的主机名。防跨站 CSRF 借浏览器打内网 panel，也防 DNS rebinding 读 SSE。本机来源（回环与本机任一接口地址）的请求除 `/healthz` 外一律 403：bash 与 panel 同机，否则 agent 可以自己调 panel 批准危险命令、加管理员、读全部会话
 - **状态文件在 agent 可写域之外**：`users.json`/`sessions.json`/`message-map.json`/`approvals.json` 由文件工具路径治理与 bash 正则双重拦截。bash 仍可用通配符、软链、重定向等变体绕过这些检查；沙箱未启用时它们是减速带，硬边界是部署隔离（容器/系统加固）
