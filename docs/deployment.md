@@ -79,12 +79,13 @@ ProtectSystem=strict
 ReadWritePaths=/opt/dwell
 PrivateTmp=true
 MemoryMax=1200M
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Adjust the node path. `Restart=always` is required: after a storage failure (`session_failed`) dwell exits on purpose and relies on the restart. `PrivateTmp=true` gives the service its own `/tmp`, which is also the `/tmp` that sandboxed bash sees. The sandbox works under `NoNewPrivileges` and `ProtectSystem=strict`. Servers usually run in UTC: set `DWELL_TZ` (e.g. `Asia/Shanghai`) in `.env` so scheduled tasks and the date the model sees follow the intended timezone.
+Adjust the node path. `Restart=always` is required: after a storage failure (`session_failed`) dwell exits on purpose and relies on the restart. `PrivateTmp=true` gives the service its own `/tmp`, which is also the `/tmp` that sandboxed bash sees; systemd empties it when the service stops. `OOMPolicy=continue` keeps the service running when a bash command exceeds `MemoryMax`: only the offending process is killed. The sandbox works under `NoNewPrivileges` and `ProtectSystem=strict`. Servers usually run in UTC: set `DWELL_TZ` (e.g. `Asia/Shanghai`) in `.env` so scheduled tasks and the date the model sees follow the intended timezone.
 
 ```sh
 sudo systemctl daemon-reload
@@ -219,6 +220,23 @@ Install `git` and `gh` (from GitHub's official apt repository), then write the s
 ```
 
 `<ID>` comes from `gh api user --jq .id`. Without `user.name`/`user.email`, commits inside the sandbox fail. The noreply address counts as a verified email of the account, so signed commits show as Verified. The `insteadOf` rules turn SSH URLs (for example in submodules) into HTTPS, since the sandbox has no SSH key. dwell sets `GH_PROMPT_DISABLED`, `GIT_TERMINAL_PROMPT=0`, `GH_PAGER=cat`, and moves `GH_CONFIG_DIR` and `XDG_STATE_HOME` out of the working directory on its own.
+
+**Build checks and CI**
+
+Commands from bash run inside the service's cgroup, so a heavy build competes with dwell for the same `MemoryMax`. Add `OOMPolicy=continue` to the unit (see the template in section 3) so that the kernel kills only the offending process instead of systemd stopping the whole service.
+
+The system prompt keeps local checks light (formatters, linters, builds and tests of the touched packages, under `timeout` and `nice`) and leaves full CI to GitHub Actions on the account's fork: after a push, the model follows the run with `gh run`. Keep Actions enabled on the account; forks have no secrets and the fork's `GITHUB_TOKEN` only reaches the fork. Workflows that only run on `pull_request` or need secrets or self-hosted runners do not run on the fork, and the model reports which checks it could not run.
+
+Toolchains for local checks go on the host: the sandbox mounts `/usr` read-only, so the model cannot install them. Keep their caches out of the working directory. For Go, install the official tarball to `/usr/local/go`, link `go`/`gofmt` into `/usr/bin` (inside `DWELL_TOOL_PATH`), and set the defaults in `/usr/local/go/go.env`, which Go reads before the environment:
+
+```ini
+GOPATH=/tmp/dwell-go/path
+GOCACHE=/tmp/dwell-go/cache
+GOTOOLCHAIN=local
+GOTELEMETRY=off
+```
+
+Add `GOPROXY`/`GOSUMDB` mirrors there when the default proxy is unreachable. `GOTOOLCHAIN=local` stops `go` from downloading other toolchains on its own. Reinstalling Go overwrites `go.env`; write it again after an upgrade.
 
 **Container**
 
