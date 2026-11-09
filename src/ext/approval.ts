@@ -1,7 +1,7 @@
 // 危险命令审批（简版 Mandate）+ 文件工具路径治理 + 审批状态持久化。
 // 窗口键 = (conversationId, sender)：谁触发谁申请，互不搭车。
 // 注意：正则与路径检查是减速带，硬边界是凭证擦除（harness.scrubSecretEnv）+ 部署隔离（容器/systemd）。
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
@@ -211,8 +211,9 @@ export function fileToolViolation(tool: string, path: string, cwd: string): stri
 }
 
 /** 解析到真实路径：取最近一个已存在的祖先 realpath 后拼回余下部分（write 新建文件时终段不存在，祖先足够定去向）。
- *  防 bash 先建软链再走文件工具的逃逸（ln -s /opt/dwell lnk 后 write lnk/state/users.json）；非 ENOENT 异常退回字面路径（减速带非硬墙）。 */
-async function resolveReal(abs: string): Promise<string> {
+ *  防 bash 先建软链再走文件工具的逃逸（ln -s /opt/dwell lnk 后 write lnk/state/users.json）；悬空软链按链接目标继续解析（写入会穿过链接落到目标处），
+ *  非 ENOENT 异常退回字面路径（减速带非硬墙）。 */
+async function resolveReal(abs: string, hops = 0): Promise<string> {
 	let prefix = abs;
 	const rest: string[] = [];
 	for (;;) {
@@ -220,6 +221,8 @@ async function resolveReal(abs: string): Promise<string> {
 			return join(await realpath(prefix), ...rest);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") return abs;
+			const target = hops < 40 ? await readlink(prefix).catch(() => undefined) : undefined;
+			if (target !== undefined) return resolveReal(join(resolve(dirname(prefix), target), ...rest), hops + 1);
 			const parent = dirname(prefix);
 			if (parent === prefix) return abs;
 			rest.unshift(basename(prefix));
@@ -233,7 +236,7 @@ async function resolveReal(abs: string): Promise<string> {
 export async function fileToolViolationReal(tool: string, path: string, cwd: string): Promise<string | undefined> {
 	const real = await resolveReal(resolve(cwd, path));
 	const [rcwd, rtmp, rstate, rappRoot, rdata, rsqlite] = await Promise.all(
-		[resolve(cwd), tmpdir(), STATE_PATH, APP_ROOT, DATA_PATH, SQLITE_FILE].map(resolveReal),
+		[resolve(cwd), tmpdir(), STATE_PATH, APP_ROOT, DATA_PATH, SQLITE_FILE].map((p) => resolveReal(p)),
 	);
 	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite });
 }

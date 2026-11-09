@@ -101,6 +101,9 @@ test("fileToolViolationReal 按真实路径判：cwd 内软链指向禁区时拦
 	} else {
 		t.skip("当前环境无法创建符号链接");
 	}
+	// 悬空软链：目标尚不存在时仍按链接目标判（写入会穿过链接落到禁区）
+	const dangling = await symlink(join(resolve(STATE_DIR), "not-yet", "x.json"), join(work, "dang"), "file").then(() => true, () => false);
+	if (dangling) assert.match((await fileToolViolationReal("write", "dang", work)) ?? "", /limited to/);
 	// 不存在的新建文件：最近已存在祖先是 cwd 本身 → 放行
 	assert.equal(await fileToolViolationReal("write", "new-sub/dir/file.txt", work), undefined);
 	// 相对路径 .. 逃逸到 /proc（Linux：tmpdir 在 /tmp，上溯三级到根；Windows 归一化成盘符路径，由原始路径检查兼顾不到，不测）
