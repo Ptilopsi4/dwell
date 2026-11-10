@@ -547,7 +547,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			};
 			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`);
 		};
-		frame();
+		// subscribe 契约先投当前值再投变更（chord Readable），首帧由它发；手动再发会重复一帧全量 replace
 		cleanups.push(view.subscribe(frame));
 		// 心跳保活（穿透链路）
 		const beat = setInterval(() => res.write(": ping\n\n"), 25_000);

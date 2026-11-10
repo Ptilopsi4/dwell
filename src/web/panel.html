@@ -80,6 +80,8 @@ svg.i.sm { width: 14px; height: 14px; }
 .conv.sel svg { color: var(--primary); }
 .conv .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv .tm { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.conv .run:not([hidden]) { display: inline-flex; flex: none; }
+.conv .run .spin { width: 10px; height: 10px; }
 .conv .pend { font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); line-height: 17px; white-space: nowrap; }
 .conv.arch { opacity: .55; }
 .side-link { display: block; width: 100%; text-align: left; padding: .3rem .6rem; margin-top: .25rem; font-size: 12px; color: var(--faint); background: none; border: 0; cursor: pointer; border-radius: 6px; }
@@ -199,6 +201,8 @@ details.tc[open] summary { background: var(--hover); }
 .md ul { list-style: disc; } .md ul ul { list-style: circle; } .md ol { list-style: decimal; }
 .md li { margin: .2em 0; padding-left: .15em; } .md li::marker { color: var(--faint); }
 .md li > ul, .md li > ol { margin: .15em 0; }
+.md li.task { list-style: none; }
+.md li.task > input[type="checkbox"] { margin: 0 .4em .1em -1.1em; accent-color: var(--primary); }
 .md blockquote { margin: .6em 0; padding: .1em .9em; border-left: 2px solid color-mix(in srgb, var(--primary) 50%, var(--border)); color: var(--muted-foreground); }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
 .md a { color: var(--primary); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--primary) 35%, transparent); }
@@ -504,7 +508,8 @@ function mdInline(src) {
 	const codes = [];
 	let s = src.replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
 	s = esc(s);
-	s = s.replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+	// title 可选段匹配的是 esc 后的 &quot;（replace 在转义之后跑），title 内容已转义，可直接进属性
+	s = s.replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)(\s+&quot;([\s\S]*?)&quot;)?\)/g, (_, t, u, _sep, title) => `<a href="${u}"${title === undefined ? "" : ` title="${title}"`} target="_blank" rel="noopener noreferrer">${t}</a>`);
 	s = s.replace(/(^|[\s(（])((?:https?:\/\/)[^\s<>()（）]+[^\s<>()（）.,;:!?。，；：！？])/g, (_, p, u) => `${p}<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
 	s = s.replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>").replace(/__([^_\n]+?)__/g, "<strong>$1</strong>");
 	s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, "$1<em>$2</em>");
@@ -575,7 +580,10 @@ function mdList(items, from, to) {
 	while (k < to) {
 		let j = k + 1;
 		while (j < to && items[j].indent > base) j++;
-		html += `<li>${items[k].text.split("\n").map(mdInline).join("<br>")}${mdList(items, k + 1, j)}</li>`;
+		// GFM task list：`[ ]`/`[x]` 前缀渲染成禁用 checkbox，不再输出字面标记
+		const task = /^\[([ xX])\]\s+/.exec(items[k].text);
+		const body = items[k].text.slice(task ? task[0].length : 0).split("\n").map(mdInline).join("<br>");
+		html += `<li${task ? ' class="task"' : ""}>${task ? `<input type="checkbox" disabled${task[1] === " " ? "" : " checked"}>` : ""}${body}${mdList(items, k + 1, j)}</li>`;
 		k = j;
 	}
 	return html + (ordered ? "</ol>" : "</ul>");
@@ -587,7 +595,7 @@ document.addEventListener("click", (e) => {
 
 /* ── 发送者真名：按 open_id 批量查，查到后回填所有同 id 的标签 ── */
 const names = new Map();
-let nameQueue = new Set(), nameTimer = 0;
+let nameQueue = new Set(), nameTimer = 0, nameRetry = 0;
 function senderLabel(id, fallback) {
 	if (!id) return fallback;
 	if (names.has(id)) return names.get(id) ?? fallback;
@@ -600,7 +608,13 @@ async function flushNames() {
 	const ids = [...nameQueue].filter((id) => !names.has(id));
 	nameQueue = new Set();
 	if (ids.length === 0) return;
-	const got = await api(`names?ids=${encodeURIComponent(ids.join(","))}`).catch(() => ({}));
+	const got = await api(`names?ids=${encodeURIComponent(ids.join(","))}`).catch(() => null);
+	if (got === null) {
+		// 目录暂不可用：失败不写缓存（缓存 null 表示「确认查无」，不可混淆），退避 30s 后重试这批 id，不热循环
+		clearTimeout(nameRetry);
+		nameRetry = setTimeout(() => { for (const id of ids) nameQueue.add(id); flushNames(); }, 30_000);
+		return;
+	}
 	for (const id of ids) names.set(id, got[id] ?? null);
 	for (const el of document.querySelectorAll(".who[data-sender]")) {
 		const n = names.get(el.dataset.sender);
@@ -656,7 +670,7 @@ async function loadConvs(keep) {
 			const el = document.createElement("button");
 			el.className = "conv" + (c.archived ? " arch" : "");
 			el.dataset.id = String(c.id);
-			el.innerHTML = `${ic(c.type in ICONS ? c.type : "panel", "sm")}<span class="nm"></span><span class="pend" hidden></span><span class="tm"></span>`;
+			el.innerHTML = `${ic(c.type in ICONS ? c.type : "panel", "sm")}<span class="nm"></span><span class="run" hidden><span class="spin"></span></span><span class="pend" hidden></span><span class="tm"></span>`;
 			el.title = `${TYPE_ZH[c.type] ?? c.type} · #${c.id}${c.archived ? " · 已归档" : ""}\n${c.key}`;
 			el.querySelector(".nm").textContent = c.emoji ? `${c.emoji} ${c.shortTitle ?? convTitle(c)}` : (c.shortTitle ?? convTitle(c));
 			el.onclick = () => { drawer(false); if (String(c.id) !== String(convId)) switchConv(c.id); };
@@ -716,6 +730,7 @@ function refreshConvMarks(visible = convs) {
 		const el = $("convlist").querySelector(`.conv[data-id="${c.id}"]`);
 		if (!el) continue;
 		el.querySelector(".tm").textContent = relTime(c.lastTs);
+		el.querySelector(".run").hidden = !c.busy;
 		const n = pendingByConv.get(Number(c.id)) ?? 0;
 		const p = el.querySelector(".pend");
 		p.hidden = n === 0;
