@@ -360,7 +360,16 @@ async function submitAndReply(
 	if (record.status === "queued") return;
 	try {
 		// 回答卡登记锚点：回复这张卡即续接该任务线（群聊免 @），否则 route 必 miss
-		const sent = await channel.stream(target.chatId, { markdown: (s) => streamReplyCore(conversation, submission, s, context) }, { replyTo: target.messageId });
+		// 终态替换须在 stream resolve（SDK flush + finishStreamingCard）之后，否则遗留的流式 patch 会覆盖回旧内容
+		let full = "";
+		const sent = await channel.stream(
+			target.chatId,
+			{ markdown: async (s) => {
+				full = await streamReplyCore(conversation, submission, s, context);
+			} },
+			{ replyTo: target.messageId },
+		);
+		if (full !== "") await finalizeCard(target.chatId, sent.messageId, full);
 		await sessions.anchor(sent.messageId, conversation.id);
 	} catch (err) {
 		// 流式通道失败时退回普通回复
@@ -377,6 +386,7 @@ async function submitAndReply(
 async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMessage, cwd: string, target: ReplyTarget): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	let submission: Awaited<ReturnType<Conversation["submit"]>> | undefined;
+	let streamed = "";
 	try {
 		const sent = await channel.stream(
 			target.chatId,
@@ -400,11 +410,12 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 						return;
 					}
 					await s.setContent(""); // 清占位，主模型流从空白起
-					await streamReplyCore(conversation, submission, s, context);
+					streamed = await streamReplyCore(conversation, submission, s, context);
 				},
 			},
 			{ replyTo: target.messageId },
 		);
+		if (streamed !== "") await finalizeCard(target.chatId, sent.messageId, streamed);
 		await sessions.anchor(sent.messageId, conversation.id);
 	} catch (err) {
 		console.error("[dwell] 媒体流式回复失败:", err);
@@ -427,17 +438,47 @@ function lineLabel(conversationId: number): string | undefined {
 	return `当前会话：${sessions.lineEmoji(conversationId, info.chatId)}`;
 }
 
-/** 主模型流式回复主体：watch pi.live 增量 append，settled 后补齐最终答案。占位阶段的 setContent 由调用方负责。 */
+/** 流式卡保活与镜像累积：飞书流式窗口约 10 分钟无更新即静默失效，>60s 无 append 时补一条状态行续命；
+ *  镜像供终态替换（finalizeCard）使用，保活行本身不进镜像。 */
+function cardKeeper(s: MarkdownStreamController): { append: (text: string) => Promise<void>; full: () => string; stop: () => void } {
+	const chunks: string[] = [];
+	let lastActivity = Date.now();
+	const runStart = lastActivity;
+	let finished = false;
+	const timer = setInterval(() => {
+		if (finished || Date.now() - lastActivity < 60_000) return;
+		lastActivity = Date.now();
+		const secs = Math.round((Date.now() - runStart) / 1000);
+		void s.append(`> ⏳ 仍在运行 · ${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s\n\n`).catch(() => {});
+	}, 15_000);
+	return {
+		append: async (text) => {
+			chunks.push(text);
+			lastActivity = Date.now();
+			await s.append(text);
+		},
+		full: () => chunks.join(""),
+		stop: () => {
+			finished = true;
+			clearInterval(timer);
+		},
+	};
+}
+
+/** 主模型流式回复主体：watch pi.live 的节流 partial，前缀检测 append 增量（轮切换/重试自动重置游标），settled 后补齐最终答案。占位阶段的 setContent 由调用方负责。
+ *  返回卡片全文镜像，调用方用于终态兜底替换（finalizeCard）。 */
 async function streamReplyCore(
 	conversation: Conversation,
 	submission: Awaited<ReturnType<Conversation["submit"]>>,
 	s: MarkdownStreamController,
 	context: typeof BACKGROUND_CONTEXT,
-): Promise<void> {
+): Promise<string> {
+	const keeper = cardKeeper(s);
+	const append = keeper.append;
 	try {
 		{
 			const label = lineLabel(conversation.id as number);
-			if (label !== undefined) await s.append(`${label}\n\n`);
+			if (label !== undefined) await append(`${label}\n\n`);
 			const watch = await conversation.watch(context);
 				let cursor = "";
 				// 工具概述：callId → 摘要（从 transcript 的 assistant toolCall 取参数），done 后报告一次
@@ -477,7 +518,7 @@ async function streamReplyCore(
 						if (!reported.has(slot.callId) && callSummary.has(slot.callId)) {
 								reported.add(slot.callId);
 								// 尾部空行不可省：markdown 引用块（>）会把紧邻的下一行吸入——正文首句会被包进工具概述
-							await s.append(`\n${callSummary.get(slot.callId) ?? ""}\n\n`);
+							await append(`\n${callSummary.get(slot.callId) ?? ""}\n\n`);
 						}
 						// 长命令进展：运行 >3s 且距上次 ≥3s 时，把新增完整输出的最后一行 append 进卡（输出型命令可见进展；无输出命令不扰）
 						if (slot.status === "running") {
@@ -494,7 +535,7 @@ async function streamReplyCore(
 								const fresh = out.slice(prog.baseline, cut);
 								const line = fresh.slice(fresh.lastIndexOf("\n") + 1).trim();
 								if (line !== "") {
-									await s.append(`> ▸ ${line.slice(0, 120)}\n\n`);
+									await append(`> ▸ ${line.slice(0, 120)}\n\n`);
 									prog.lastAppend = now;
 								}
 								prog.baseline = cut;
@@ -504,7 +545,7 @@ async function streamReplyCore(
 						if (slot.status === "done" && !doneMarked.has(slot.callId)) {
 							doneMarked.add(slot.callId);
 							const secs = ((Date.now() - (startedAt.get(slot.callId) ?? Date.now())) / 1000).toFixed(1);
-							await s.append(`> ${slot.entry !== undefined ? "✓" : "✗"} ${slot.name ?? "?"}（${secs}s）
+							await append(`> ${slot.entry !== undefined ? "✓" : "✗"} ${slot.name ?? "?"}（${secs}s）
 
 `);
 						}
@@ -514,12 +555,12 @@ async function streamReplyCore(
 						const text = parts.flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
 						if (text.length === 0) return;
 						if (text.startsWith(cursor) && text.length > cursor.length) {
-							await s.append(text.slice(cursor.length));
+							await append(text.slice(cursor.length));
 							cursor = text;
 						} else if (!text.startsWith(cursor)) {
 							// 新轮或重试：响应从头开始，重置游标并加分隔
 							cursor = text;
-							await s.append(`\n\n${text}`);
+							await append(`\n\n${text}`);
 						}
 					};
 					// 占位卡发送期间 run 可能已推进：先处理初始快照，再监听后续帧
@@ -536,13 +577,13 @@ async function streamReplyCore(
 						final = `处理失败：${settled.status === "unanswered" ? settled.reason : settled.status}`;
 					}
 					if (final.startsWith(cursor) && final.length > cursor.length) {
-						await s.append(final.slice(cursor.length));
+						await append(final.slice(cursor.length));
 					} else if (!final.startsWith(cursor) && final.length > 0) {
 						// cursor 是作废 partial（重试/换轮）：分隔后追加完整最终答案，不丢尾
-						await s.append(`\n\n${final}`);
+						await append(`\n\n${final}`);
 					} else if (final.length === 0 && cursor.length === 0) {
 						// 无任何文本产出（模型连续出错/被中止）：给群里一个明确终态，不留悬空卡
-						await s.append("（本次运行没有产出文本：模型出错或被中止，可重发）");
+						await append("（本次运行没有产出文本：模型出错或被中止，可重发）");
 					}
 			} finally {
 				await watch.stop();
@@ -551,6 +592,32 @@ async function streamReplyCore(
 	} catch (err) {
 		// 流式帧处理失败：卡片已创建，最多丢部分流式效果
 		console.error("[dwell] 流式帧处理失败:", err);
+	} finally {
+		keeper.stop();
+	}
+	return keeper.full();
+}
+
+/** run 结束后的卡片终态替换：流式 element 更新受飞书流式窗口限制，message.patch 不依赖 streaming_mode，
+ *  把卡片全量替换为最终内容；patch 不生效或内容超 30KB 时退回发一条普通消息。 */
+async function finalizeCard(chatId: string, messageId: string, full: string): Promise<void> {
+	try {
+		if (Buffer.byteLength(full, "utf8") <= 28_000) {
+			await channel.updateCard(messageId, {
+				schema: "2.0",
+				config: { update_multi: true },
+				body: { elements: [{ tag: "markdown", content: full }] },
+			});
+			return;
+		}
+	} catch (err) {
+		console.error("[dwell] 终态卡替换失败，退回普通消息:", err);
+	}
+	try {
+		const clipped = full.length > 48_000 ? `${full.slice(0, 48_000)}\n\n…（超长已截断）` : full;
+		await channel.send(chatId, { markdown: clipped }, { replyTo: messageId });
+	} catch (err) {
+		console.error("[dwell] 终态兜底消息发送失败:", err);
 	}
 }
 
@@ -600,11 +667,16 @@ async function openAutonomousCard(conversationId: number, submissionId: Submissi
 		if (conversation === undefined) return;
 		const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
 		const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
+		let streamed = "";
 		const sent = await channel.stream(
 			chatId,
-			{ markdown: async (s) => { await s.append(`${header}\n\n`); await streamReplyCore(conversation, submission, s, context); } },
+			{ markdown: async (s) => {
+				await s.append(`${header}\n\n`);
+				streamed = `${header}\n\n${await streamReplyCore(conversation, submission, s, context)}`;
+			} },
 			anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" },
 		);
+		if (streamed !== "") await finalizeCard(chatId, sent.messageId, streamed);
 		await sessions.anchor(sent.messageId, conversationId as ConversationId);
 	} catch (err) {
 		console.error("[dwell] 自治 run 开卡失败:", err);
@@ -1119,9 +1191,22 @@ async function reattachStreams(): Promise<void> {
 			if (conversation === undefined) continue;
 			console.log(`[dwell] 重启后续跑 #${id}，重挂流式卡`);
 			const anchor = sessions.lastAnchor(id as ConversationId);
-			void channel.stream(chatId, { markdown: (s) => mirrorStream(conversation, s, context) }, anchor === undefined ? undefined : { replyTo: anchor })
-				.then((sent) => sessions.anchor(sent.messageId, id as ConversationId))
-				.catch((err) => console.error(`[dwell] 续跑镜像卡失败 #${id}:`, err instanceof Error ? err.message : err));
+			let streamed = "";
+			void (async () => {
+				try {
+					const sent = await channel.stream(
+						chatId,
+						{ markdown: async (s) => {
+							streamed = await mirrorStream(conversation, s, context);
+						} },
+						anchor === undefined ? undefined : { replyTo: anchor },
+					);
+					if (streamed !== "") await finalizeCard(chatId, sent.messageId, streamed);
+					await sessions.anchor(sent.messageId, id as ConversationId);
+				} catch (err) {
+					console.error(`[dwell] 续跑镜像卡失败 #${id}:`, err instanceof Error ? err.message : err);
+				}
+			})();
 		}
 	} finally {
 		graphState?.dispose();
@@ -1129,10 +1214,12 @@ async function reattachStreams(): Promise<void> {
 }
 
 /** 镜像 live 文本；run 结束（pi.live.run 消失）后从 transcript 补齐最终答案尾段。 */
-async function mirrorStream(conversation: Conversation, s: MarkdownStreamController, context: typeof BACKGROUND_CONTEXT): Promise<void> {
+async function mirrorStream(conversation: Conversation, s: MarkdownStreamController, context: typeof BACKGROUND_CONTEXT): Promise<string> {
+	const keeper = cardKeeper(s);
+	const append = keeper.append;
 	const label = lineLabel(conversation.id as number);
-	if (label !== undefined) await s.append(`${label}\n\n`);
-	await s.append("（服务重启，任务续跑中）\n\n");
+	if (label !== undefined) await append(`${label}\n\n`);
+	await append("（服务重启，任务续跑中）\n\n");
 	const watch = await conversation.watch(context);
 	let cursor = "";
 	let runAlive = true;
@@ -1147,8 +1234,8 @@ async function mirrorStream(conversation: Conversation, s: MarkdownStreamControl
 		const { live, runGone } = textOf(value);
 		if (runGone) runAlive = false;
 		if (live.length === 0) return;
-		if (live.startsWith(cursor) && live.length > cursor.length) await s.append(live.slice(cursor.length));
-		else if (!live.startsWith(cursor)) await s.append(`\n\n${live}`); // 新轮/重试：重置游标加分隔
+		if (live.startsWith(cursor) && live.length > cursor.length) await append(live.slice(cursor.length));
+		else if (!live.startsWith(cursor)) await append(`\n\n${live}`); // 新轮/重试：重置游标加分隔
 		cursor = live;
 	};
 	try {
@@ -1158,6 +1245,7 @@ async function mirrorStream(conversation: Conversation, s: MarkdownStreamControl
 		while (runAlive && Date.now() < deadline) await new Promise((r) => setTimeout(r, 400));
 	} finally {
 		await watch.stop();
+		keeper.stop();
 	}
 	// 最终答案：transcript 最后一段非空 assistant 文本（partial 节流可能落后，补尾段）
 	const entries = (watch.value as unknown as { entries?: { kind?: string; model?: { content?: { type: string; text?: string }[] }[] }[] }).entries ?? [];
@@ -1167,9 +1255,10 @@ async function mirrorStream(conversation: Conversation, s: MarkdownStreamControl
 		const t = (e.model?.[0]?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
 		if (t !== "") final = t;
 	}
-	if (final.startsWith(cursor) && final.length > cursor.length) await s.append(final.slice(cursor.length));
-	else if (final !== "" && !final.startsWith(cursor)) await s.append(`\n\n${final}`);
-	else if (final === "" && cursor === "") await s.append("（本次运行没有产出文本：可能被中止，可重发）");
+	if (final.startsWith(cursor) && final.length > cursor.length) await append(final.slice(cursor.length));
+	else if (final !== "" && !final.startsWith(cursor)) await append(`\n\n${final}`);
+	else if (final === "" && cursor === "") await append("（本次运行没有产出文本：可能被中止，可重发）");
+	return keeper.full();
 }
 
 async function shutdown(): Promise<void> {
