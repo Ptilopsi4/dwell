@@ -85,7 +85,7 @@ OOMPolicy=continue
 WantedBy=multi-user.target
 ```
 
-Adjust the node path. `Restart=always` is required: after a storage failure (`session_failed`) dwell exits on purpose and relies on the restart. `PrivateTmp=true` gives the service its own `/tmp`, which is also the `/tmp` that sandboxed bash sees; systemd empties it when the service stops. `OOMPolicy=continue` keeps the service running when a bash command exceeds `MemoryMax`: only the offending process is killed. The sandbox works under `NoNewPrivileges` and `ProtectSystem=strict`. Servers usually run in UTC: set `DWELL_TZ` (e.g. `Asia/Shanghai`) in `.env` so scheduled tasks and the date the model sees follow the intended timezone.
+Adjust the node path. `Restart=always` is required: after a storage failure (`session_failed`) dwell exits on purpose and relies on the restart. `PrivateTmp=true` gives the service its own `/tmp`, which is also the `/tmp` that sandboxed bash sees; systemd empties it when the service stops. `OOMPolicy=continue` keeps the service running when a bash command exceeds `MemoryMax`: only the offending process is killed. Size `MemoryMax` for the heaviest workload you expect the model to run: a single Go `compile` process can take ~1GB, so a build inside a 1200M cgroup gets its workers killed repeatedly (the model then retries and may eventually pass, but unreliably). Raise `MemoryMax` on beefier machines, or accept that heavy builds belong on the fork's CI. The sandbox works under `NoNewPrivileges` and `ProtectSystem=strict`. Servers usually run in UTC: set `DWELL_TZ` (e.g. `Asia/Shanghai`) in `.env` so scheduled tasks and the date the model sees follow the intended timezone.
 
 ```sh
 sudo systemctl daemon-reload

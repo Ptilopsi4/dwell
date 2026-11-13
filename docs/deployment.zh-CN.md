@@ -85,7 +85,7 @@ OOMPolicy=continue
 WantedBy=multi-user.target
 ```
 
-node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`，服务停止时 systemd 会清空它。`OOMPolicy=continue` 让 bash 命令超出 `MemoryMax` 时只杀掉该进程，服务继续运行。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
+node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`，服务停止时 systemd 会清空它。`OOMPolicy=continue` 让 bash 命令超出 `MemoryMax` 时只杀掉该进程，服务继续运行。`MemoryMax` 要按预期让模型跑的最重负载预留：单个 Go `compile` 进程可吃 ~1GB，1200M 的 cgroup 里跑构建会反复杀掉 worker（模型重试后可能侥幸通过，但不可靠）；机器宽裕就调高 `MemoryMax`，或接受重型构建归属 fork 上的 CI。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
 
 ```sh
 sudo systemctl daemon-reload
