@@ -19,6 +19,7 @@
 | [Anthropic Messages](../templates/models.anthropic-messages.json) | Anthropic Messages API，`claude-sonnet-4-6`，`ANTHROPIC_API_KEY` |
 | [智谱 Coding Plan](../templates/models.zai.json) | 主模型与视觉连接独立，`ZAI_CODING_CN_API_KEY` |
 | [DeepSeek](../templates/models.deepseek.json) | 关闭视觉，`DEEPSEEK_API_KEY` |
+| [OpenCode Go](../templates/models.opencode-go.json) | DeepSeek V4.1 Flash 文本与图片，`OPENCODE_GO_API_KEY` |
 
 每份模板都是完整、可编辑的配置。dwell 只加载选定文件，不做模板继承、注册或自动发现。
 
@@ -47,6 +48,8 @@
 ### 视觉
 
 省略 `vision` 时，只有主连接解析后的 `input` 包含 `image` 才复用主模型。`vision: null` 关闭识图。显式视觉连接必须声明图片能力，可以使用独立的端点、模型与凭证变量。缺少视觉 key 时保留图片、不做识别。
+
+OpenCode Go 模板复用标准 Chat Completions adapter。SDK 为持久会话添加稳定的会话头，每次独立图片描述也有自己的单次会话 ID；模板设置 dwell 的 User-Agent。Go 仍受套餐额度与 coding agent 使用范围约束，价格未知不代表 API 无限或免费。参见[官方 Go 指南](https://opencode.ai/docs/console/go/)。
 
 ### 凭证与连接变更
 

@@ -176,7 +176,7 @@ test("resolved connection serialization preserves capabilities, endpoint, compat
 
 test("all flat templates are complete loadable configurations with no literal credentials", (t) => {
 	const names = readdirSync(resolve("templates")).filter((name) => name.startsWith("models.") && name.endsWith(".json"));
-	assert.equal(names.length, 5);
+	assert.equal(names.length, 6);
 	for (const name of names) {
 		const raw = JSON.parse(readFileSync(resolve("templates", name), "utf8"));
 		const config = load(t, raw);
@@ -234,6 +234,23 @@ function streamFixture(api: ModelApi, name = "lookup", interrupted = false): Res
 }
 
 for (const api of ["openai-completions", "openai-responses", "anthropic-messages"] as const) {
+	test(`${api}: standard OpenCode connections retain each caller's session and client identity`, async (t) => {
+		const config = load(t, { main: { ...MAIN, api, baseUrl: api === "anthropic-messages" ? "https://opencode.ai/inference/go/anthropic" : "https://opencode.ai/inference/go/openai/v1", headers: { "User-Agent": "dwell/synthetic" } }, vision: null });
+		const { models, model } = createModelClient(config.main, "synthetic-key");
+		const seen: Request[] = [];
+		const fetch: typeof globalThis.fetch = async (input, init) => {
+			seen.push(new Request(input, init));
+			return streamFixture(api);
+		};
+		for (const sessionId of ["session-a", "session-a", "session-b"]) {
+			const result = await models.completeSimple(model, { messages: [{ role: "user", content: "Read the supplied fixture", timestamp: 1 }] }, { fetch, sessionId, cacheRetention: "none", maxTokens: 64, maxRetries: 0 });
+			assert.equal(result.errorMessage, undefined);
+		}
+		assert.deepEqual(seen.map((request) => request.headers.get("x-opencode-session")), ["session-a", "session-a", "session-b"]);
+		assert.ok(seen.every((request) => request.headers.get("User-Agent") === "dwell/synthetic"));
+		assert.ok(seen.every((request) => request.url.startsWith(config.main.baseUrl + "/")));
+	});
+
 	test(`${api}: custom URL/model, captured key, and tool schemas reach the protocol adapter`, async (t) => {
 		const env: NodeJS.ProcessEnv = { DWELL_MODEL_API_KEY: "synthetic-captured-key" };
 		const config = load(t, { main: { ...MAIN, api, baseUrl: "http://127.0.0.1:12345/proxy", headers: { "X-Dwell-Test": "metadata" } }, vision: null });

@@ -148,3 +148,25 @@ test("custom vision uses the shared connection and opaque model ID", async (t) =
 	assert.equal(request.headers.get("Authorization"), "Bearer custom-captured-key");
 	assert.equal((await request.json()).model, "private-image-alias");
 });
+
+test("one-shot vision on OpenCode receives a distinct session and the configured client identity", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-vision-session-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const path = join(dir, "models.json");
+	await writeFile(path, JSON.stringify({ main: { api: "openai-completions", baseUrl: "https://opencode.ai/inference/go/openai/v1", model: "private-vision-alias", apiKeyEnv: "PRIVATE_VISION_KEY", input: ["text", "image"], headers: { "User-Agent": "dwell/synthetic-vision" }, cost: null } }));
+	const config = loadModelsConfig({ DWELL_MODELS_FILE: path });
+	const requests: Request[] = [];
+	const fetchMock = mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+		requests.push(new Request(input, init));
+		return visionResponse();
+	});
+	t.after(() => fetchMock.mock.restore());
+	const describe = makeImageDescriber(config.vision, "synthetic-vision-key")!;
+	assert.equal(await describe("aW1hZ2U=", "image/png"), "A red test image.");
+	assert.equal(await describe("aW1hZ2U=", "image/png"), "A red test image.");
+	const sessions = requests.map((request) => request.headers.get("x-opencode-session"));
+	for (const session of sessions) assert.match(session!, /^[0-9a-f]{8}-[0-9a-f-]{27}$/);
+	assert.notEqual(sessions[0], sessions[1]);
+	assert.ok(requests.every((request) => request.headers.get("User-Agent") === "dwell/synthetic-vision"));
+	assert.ok(requests.every((request) => request.url === "https://opencode.ai/inference/go/openai/v1/chat/completions"));
+});

@@ -19,6 +19,7 @@ Copy one of these templates to a private configuration location, then point `DWE
 | [Anthropic Messages](../templates/models.anthropic-messages.json) | Anthropic Messages API, `claude-sonnet-4-6`, `ANTHROPIC_API_KEY` |
 | [Zhipu Coding Plan](../templates/models.zai.json) | Separate main and vision connections, `ZAI_CODING_CN_API_KEY` |
 | [DeepSeek](../templates/models.deepseek.json) | Vision disabled, `DEEPSEEK_API_KEY` |
+| [OpenCode Go](../templates/models.opencode-go.json) | DeepSeek V4.1 Flash for text and images, `OPENCODE_GO_API_KEY` |
 
 Each template is a complete editable configuration. dwell loads the selected file without template inheritance, registration, or automatic discovery.
 
@@ -47,6 +48,8 @@ Other connections default to text input, `reasoning: false`, `contextWindow: 327
 ### Vision
 
 Omitting `vision` reuses the main connection only if its resolved `input` includes `image`. Set `vision: null` to disable recognition. An explicit vision connection must declare image support and may use its own endpoint, model, and credential variable. A missing vision key saves images without recognition.
+
+The OpenCode Go template uses the standard Chat Completions adapter. The SDK supplies a stable session header for durable conversations, and each independent image description receives a one-shot session ID. The template sets dwell's User-Agent. Go usage remains subject to the subscription's limits and supported coding-agent use; unknown pricing does not mean unlimited or free API usage. See the [official Go guide](https://opencode.ai/docs/console/go/).
 
 ### Credentials and connection changes
 

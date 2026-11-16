@@ -1,5 +1,6 @@
 // Runtime assembly; model connections are shared with vision and evaluations.
 import { mkdir, open as openFile, readFile, realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -394,7 +395,8 @@ export function makeImageDescriber(connection: ResolvedModelConnection | undefin
 				},
 			],
 		});
-		const answer = await models.completeSimple(model, context, { maxTokens: 1024, signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal === undefined ? [] : [signal])]) });
+		// Each description is an independent one-shot conversation, including any provider retries.
+		const answer = await models.completeSimple(model, context, { sessionId: randomUUID(), maxTokens: 1024, signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal === undefined ? [] : [signal])]) });
 		signal?.throwIfAborted();
 		if (answer.errorMessage !== undefined) throw new Error(answer.errorMessage);
 		const text = answer.content.filter((part) => part.type === "text").map((part) => part.text).join("");
