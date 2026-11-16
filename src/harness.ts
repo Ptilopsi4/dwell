@@ -15,7 +15,7 @@ import { makeWorkController } from "./ext/work.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import { scanLiveTasks } from "./ext/schedule.ts";
 import { makeWorkspaceExtension, registerLegacyWorkspaces, setWorkspaceApprovalGetter } from "./workspace.ts";
-import type { SandboxState } from "./sandbox.ts";
+import { npmCacheEnv, type SandboxState } from "./sandbox.ts";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, DWELL_TZ, STATE_DIR } from "./state.ts";
 import { configuredSecretEnv, createModelClient, loadModelsConfig, type ResolvedModelConnection } from "./models.ts";
 import { RuntimeTelemetry } from "./telemetry.ts";
@@ -172,6 +172,7 @@ const DwellExtension = defineExtension({
 	name: "dwell",
 	sections: [
 		section("preamble", preambleText, { tag: false }),
+		section("runtime", () => `The host runs Node ${process.versions.node}. Prefer the project's existing runtime and validation commands before installing another toolchain. Node can run erasable TypeScript directly with node file.ts; local ESM imports need file extensions, and JSON imports need with { type: "json" }. Verify the final files with the runtime the user will run. Respect the requested output boundary, including files and caches created by validation commands.`, { tag: false }),
 		// 时间感知：粒度到天，一天只变一次，避免每轮重写 pi.system 打掉 prompt cache；相对时间交给 dwell.schedule 的 delayMinutes
 		section("date", () => `Current date: ${currentDateLine(DWELL_TZ)}.`, { tag: false }),
 	],
@@ -287,7 +288,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
 		return GuardedExecutionEnv.create({
 			cwd: resolve(cwd ?? DEFAULT_CWD),
-			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
+			shellEnv: { ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
 			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
 			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
 		}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
@@ -296,7 +297,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	const telemetry = new RuntimeTelemetry();
 	await telemetry.start();
 	try {
-		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context }, context);
+		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } } }, context);
 	} catch (error) { await telemetry.close().catch(() => {}); throw error; }
 	telemetryByHarness.set(harness, telemetry);
 	harness.subscribeClose(() => { void telemetry.flush().catch(() => {}); });

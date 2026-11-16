@@ -9,6 +9,7 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { OpenAIResponsesCompatSchema, OpenAICompletionsCompatSchema, AnthropicMessagesCompatSchema } from "@earendil-works/pi-ai/providers/compat-schema";
 import { ThinkingLevelMapSchema, ModelPromptCacheSchema, ModelInputLimitsSchema } from "@earendil-works/pi-ai/providers/model-schema";
 import { Value } from "typebox/value";
+import { terminalModelError } from "./model-failure.ts";
 
 export type ModelApi = "openai-responses" | "openai-completions" | "anthropic-messages";
 type Metadata = Pick<Model<Api>, "name" | "reasoning" | "input" | "contextWindow" | "maxTokens" | "compat" | "headers" | "thinkingLevelMap" | "promptCache" | "inputLimits">;
@@ -199,7 +200,8 @@ function internalToolName(name: string): string {
 }
 
 function mapAssistantTools(message: AssistantMessage, map: (name: string) => string): AssistantMessage {
-	return { ...message, content: message.content.map((part) => part.type === "toolCall" ? { ...part, name: map(part.name) } : part) };
+	const errorMessage = message.stopReason === "error" && message.errorMessage ? terminalModelError(message) : undefined;
+	return { ...message, ...(errorMessage === undefined ? {} : { errorMessage }), content: message.content.map((part) => part.type === "toolCall" ? { ...part, name: map(part.name) } : part) };
 }
 
 function wireToolContext(context: TranscriptContext): TranscriptContext {

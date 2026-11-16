@@ -381,7 +381,8 @@ for (const api of ["openai-completions", "openai-responses", "anthropic-messages
 			return Response.json(api === "anthropic-messages" ? { type: "error", error: { type: "invalid_request_error", message: "Synthetic rejection" } } : { error: { type: "invalid_request_error", message: "Synthetic rejection" } }, { status: 400 });
 		} });
 		assert.equal(failed.stopReason, "error");
-		assert.match(failed.errorMessage ?? "", /Synthetic rejection/);
+		assert.equal(failed.errorMessage, "Model request configuration rejected (HTTP 400)");
+		assert.doesNotMatch(failed.errorMessage ?? "", /Synthetic rejection/);
 		assert.equal(requests, 1);
 		const controller = new AbortController();
 		let admitted!: () => void;

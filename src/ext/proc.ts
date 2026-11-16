@@ -16,6 +16,7 @@ import { creatorVia, type RunVia } from "./approval.ts";
 import { scanLiveTasks } from "./schedule.ts";
 import { STATE_DIR } from "../state.ts";
 import { workIdentity, type WorkIdentity } from "./work.ts";
+import { npmCacheEnv } from "../sandbox.ts";
 
 export const PROC_TASK_KIND = "dwell.proc-run";
 
@@ -336,7 +337,7 @@ export const makeProcTask = (deps: ProcDeps) =>
 					child = spawn(shell.path, ["-c", task.input.command], {
 						cwd,
 						detached: process.platform !== "win32",
-							env: { ...process.env, ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
+						env: { ...process.env, ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
 						stdio: ["ignore", "pipe", "pipe"],
 						windowsHide: true,
 					});

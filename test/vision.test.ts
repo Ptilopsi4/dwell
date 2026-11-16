@@ -95,7 +95,12 @@ test("vision provider errors reach the caller for media degradation", async (t) 
 	t.after(() => fetchMock.mock.restore());
 	const describe = makeImageDescriber(legacyConfig().vision, "test-key");
 	assert.ok(describe);
-	await assert.rejects(describe("aW1hZ2U=", "image/png"), /Vision access denied/);
+	await assert.rejects(describe("aW1hZ2U=", "image/png"), (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.message, "Model authentication failed (HTTP 401)");
+		assert.doesNotMatch(error.message, /Vision access denied/);
+		return true;
+	});
 });
 
 test("custom vision uses the shared connection and opaque model ID", async (t) => {

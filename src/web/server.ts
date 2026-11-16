@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationId, EntryRecord, Harness } from "@earendil-works/pi-durable";
 import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
@@ -26,6 +26,7 @@ import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
 import type { RuntimeTelemetrySnapshot } from "../telemetry.ts";
+import { modelFailure } from "../model-failure.ts";
 
 export interface PanelRuntime {
 	telemetry?: RuntimeTelemetrySnapshot;
@@ -217,6 +218,14 @@ type LiveDoc = {
 };
 type UsageDoc = { models?: Record<string, { totalTokens?: number; cost?: { total?: number } }> };
 type AgentDoc = { model?: { provider: string; modelId: string } };
+
+/** Provider diagnostics can contain request data; only classified messages reach the panel. */
+export function presentPanelEntry(entry: EntryRecord): EntryRecord {
+	if (entry.kind !== "pi.assistant" || entry.model === undefined) return entry;
+	return { ...entry, model: entry.model.map((message) => message.role === "assistant" && message.stopReason === "error"
+		? { ...message, errorMessage: modelFailure(message.errorMessage ?? "").message }
+		: message) };
+}
 
 /** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
@@ -598,15 +607,15 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		let sent: string[] = [];
 		const frame = (): void => {
 			if (closed) return;
-			const v = view.value as unknown as { entries: { id: unknown }[]; docs?: Record<string, unknown> };
+			const v = view.value as unknown as { entries: EntryRecord[]; docs?: Record<string, unknown> };
 			const ids = v.entries.map((e) => String(e.id));
 			const append = sent.length > 0 && sent.length <= ids.length && ids[0] === sent[0] && ids[sent.length - 1] === sent[sent.length - 1];
-			const entries = append ? v.entries.slice(sent.length) : v.entries;
+			const entries = (append ? v.entries.slice(sent.length) : v.entries).map(presentPanelEntry);
 			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
 			const slim = live?.run === undefined ? null : {
 				tools: (live.tools ?? []).map((t) => ({ callId: t.callId, name: t.name, status: t.status })),
 				text: (live.generation?.message?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join(""),
-				retry: live.generation?.retry?.error,
+				retry: live.generation?.retry?.error === undefined ? undefined : modelFailure(live.generation.retry.error).message,
 			};
 			sent = ids;
 			const usage = Object.values((v.docs?.["pi.usage"] as UsageDoc | undefined)?.models ?? {});

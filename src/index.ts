@@ -27,6 +27,7 @@ import { makeSendExtension, type FileSendInput } from "./ext/send.ts";
 import { makeScheduleExtension } from "./ext/schedule.ts";
 import { backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, reconcileBackgroundStops } from "./ext/background.ts";
 import { makeProcExtension, pruneProcLogs } from "./ext/proc.ts";
+import { modelFailure } from "./model-failure.ts";
 
 type ReplyTarget = { chatId: string; messageId: string; destination?: ConversationDestination };
 
@@ -1535,6 +1536,7 @@ async function runFailureReason(conversationId: number, settled: SubmissionRecor
 	const reason = await runtimeBudgets(harness)?.stopReason(conversationId, budgetId);
 	const labels = { model_limit: "模型请求次数达到上限", tool_limit: "工具调用次数达到上限", execution_limit: "执行时间达到上限", unknown_budget: "无法恢复原运行预算", storage_error: "无法可靠保存运行预算" };
 	if (reason !== undefined) return `运行预算已停止任务：${labels[reason]}`;
+	if (settled.status === "unanswered" && settled.reason === "model_error") return modelFailure(typeof settled.detail === "string" ? settled.detail : "").message;
 	return settled.status === "unanswered" ? settled.reason : settled.status;
 }
 
