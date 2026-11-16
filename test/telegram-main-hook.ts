@@ -16,6 +16,7 @@ export interface MainFixtureEvent {
 const modelReplies: ModelReply[] = JSON.parse(process.env.DWELL_TEST_REPLIES ?? "[]");
 const updateBatches: unknown[][] = [];
 const rejectedReplies = new Set<number>();
+const deletedReplies = new Set<number>();
 const released = new Set<string>();
 const waitingModels = new Map<string, () => void>();
 let waitingUpdates: ((updates: unknown[]) => void) | undefined;
@@ -73,6 +74,7 @@ process.on("message", (message: { kind?: string; replies?: ModelReply[]; updates
 		waitingModels.delete(message.token!);
 	}
 	if (message.kind === "reject-replies") for (const id of message.messageIds!) rejectedReplies.add(id);
+	if (message.kind === "delete-replies") for (const id of message.messageIds!) deletedReplies.add(id);
 	if (message.kind === "updates") {
 		if (waitingUpdates !== undefined) {
 			const resolve = waitingUpdates;
@@ -148,8 +150,9 @@ globalThis.fetch = async (input, init) => {
 	if (url.origin === "https://api.telegram.org" && /^\/bot100:SYNTHETIC_TEST_TOKEN\/[a-zA-Z]+$/.test(url.pathname)) {
 		const method = url.pathname.split("/").at(-1)!;
 		if (["getMe", "getWebhookInfo", "getUpdates", "getFile", "sendMessage", "editMessageText", "answerCallbackQuery"].includes(method)) {
-			const replyTo = (body.reply_parameters as { message_id?: number } | undefined)?.message_id;
-			if (method === "sendMessage" && replyTo !== undefined && rejectedReplies.has(replyTo)) {
+			const reply = body.reply_parameters as { message_id?: number; allow_sending_without_reply?: boolean } | undefined;
+			const replyTo = reply?.message_id;
+			if (method === "sendMessage" && replyTo !== undefined && (rejectedReplies.has(replyTo) || deletedReplies.has(replyTo) && !reply?.allow_sending_without_reply)) {
 				report({ kind: "telegram", method, body });
 				return Response.json({ ok: false, error_code: 400, description: "Bad Request: message to be replied not found" }, { status: 400 });
 			}

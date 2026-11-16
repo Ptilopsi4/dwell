@@ -117,7 +117,7 @@ test("main restores the original approval card and recovers one actor-authorized
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 123, firstRestart);
 		const continuationPlaceholder = f.requests("telegram", "sendMessage").find((event) => `tg:100:-300:${event.messageId}` === continuation.body.messageId)!;
 		assert.equal(continuationPlaceholder.body.message_thread_id, 9);
-		assert.deepEqual(continuationPlaceholder.body.reply_parameters, { message_id: card.messageId });
+		assert.deepEqual(continuationPlaceholder.body.reply_parameters, { message_id: card.messageId, allow_sending_without_reply: true });
 		assert.deepEqual(await f.kill(), [null, "SIGKILL"]);
 		const checkpoint = await f.snapshot();
 		const replyId = String(continuation.body.id);
@@ -204,7 +204,7 @@ test("main recovers a real background child and delivers one autonomous report t
 		assert.equal(sends.length, 2, "The child stays private; only the original run and its autonomous parent report open placeholders");
 		assert.equal(sends[1].generation, 2);
 		assert.equal(sends[1].body.message_thread_id, 9);
-		assert.deepEqual(sends[1].body.reply_parameters, { message_id: sends[0].messageId });
+		assert.deepEqual(sends[1].body.reply_parameters, { message_id: sends[0].messageId, allow_sending_without_reply: true });
 		assert.ok(sends[1].messageId! > sends[0].messageId!, "The fake Telegram service must retain allocated IDs across process restarts");
 		assert.equal(reported.body.message_id, sends[1].messageId);
 		await f.stop();
@@ -260,7 +260,7 @@ test("main visibly relays real panel HTTP input before its model run and recover
 		const placeholder = f.requests("telegram", "sendMessage").find((event) => `tg:100:-300:${event.messageId}` === tracking.body.messageId)!;
 		assert.equal(placeholder.body.text, "正在处理…");
 		assert.equal(placeholder.body.message_thread_id, 9);
-		assert.deepEqual(placeholder.body.reply_parameters, { message_id: visible.messageId });
+		assert.deepEqual(placeholder.body.reply_parameters, { message_id: visible.messageId, allow_sending_without_reply: true });
 		assert.deepEqual(await f.kill(), [null, "SIGKILL"]);
 		const before = await f.snapshot();
 		const receiptId = String(tracking.body.id);

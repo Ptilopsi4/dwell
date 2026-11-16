@@ -265,7 +265,7 @@ test("Telegram chunks plain text without breaking surrogates and attaches button
 		assert.ok(String(body.text).length <= 4096);
 		assert.equal(/[\uD800-\uDBFF]$/.test(String(body.text)), false);
 		assert.equal(body.parse_mode, undefined);
-		assert.deepEqual(body.reply_parameters, { message_id: 2 });
+		assert.deepEqual(body.reply_parameters, { message_id: 2, allow_sending_without_reply: true });
 	}
 	assert.equal(bodies[0]!.reply_markup, undefined);
 	assert.deepEqual(bodies.at(-1)!.reply_markup, { inline_keyboard: [[{ text: "approve", callback_data: "opaque" }]] });
@@ -346,7 +346,7 @@ test("Telegram close aborts a queued throttle wait and prevents further sends", 
 
 test("Telegram ambiguous send failures have no raw cause and are never blindly retried", async (t) => {
 	const f = await fixture(t, { respond: () => { throw new Error(`https://api.telegram.org/bot${token}/sendMessage`, { cause: new Error(token) }); } });
-	await assert.rejects(f.bot.send(destination, "hello"), (error: unknown) => {
+	await assert.rejects(f.bot.send(destination, "hello", { replyTo: "tg:123:42:2" }), (error: unknown) => {
 		assert.ok(error instanceof TelegramError);
 		assert.equal(error.uncertain, true);
 		assert.equal(error.cause, undefined);
@@ -354,6 +354,30 @@ test("Telegram ambiguous send failures have no raw cause and are never blindly r
 		return true;
 	});
 	assert.equal(f.requests.filter((r) => r.method === "sendMessage").length, 1);
+});
+
+test("Telegram missing reply anchors preserve delivery in the same chat and forum topic without retries", async (t) => {
+	let messageId = 0;
+	const f = await fixture(t, { respond: ({ body }) => {
+		const reply = body instanceof FormData ? JSON.parse(String(body.get("reply_parameters"))) : body.reply_parameters as { allow_sending_without_reply?: boolean };
+		return reply?.allow_sending_without_reply === true ? ok({ message_id: ++messageId })
+			: Response.json({ ok: false, error_code: 400, description: "Bad Request: message to be replied not found" }, { status: 400 });
+	} });
+	for (const target of [destination, { ...destination, chatId: "-42", threadId: "88" }]) {
+		const replyTo = telegramMessageKey(target, 2);
+		await f.bot.send(target, "The source message was deleted.", { replyTo });
+		await f.bot.sendFile(target, Buffer.from("result"), "result.txt", { replyTo });
+	}
+	const requests = f.requests.filter((request) => ["sendMessage", "sendDocument"].includes(request.method));
+	assert.equal(requests.length, 4);
+	for (const [index, { body }] of requests.entries()) {
+		const address = body instanceof FormData ? Object.fromEntries(body.entries()) : body;
+		assert.equal(address.chat_id, index < 2 ? "42" : "-42");
+		assert.equal(String(address.message_thread_id ?? ""), index < 2 ? "" : "88");
+	}
+	const rejected = await fixture(t, { respond: () => failure(400) });
+	await assert.rejects(rejected.bot.send(destination, "Unrelated invalid request", { replyTo: "tg:123:42:2" }), (error: unknown) => error instanceof TelegramError && error.code === 400 && !error.uncertain);
+	assert.equal(rejected.requests.filter((request) => request.method === "sendMessage").length, 1);
 });
 
 test("Telegram reply anchors reject other bots and chats; edits and callbacks honor API bounds", async (t) => {
@@ -374,7 +398,7 @@ test("Telegram file upload sends multipart data and binds destination/reply; ove
 	assert.ok(request.body instanceof FormData);
 	assert.equal(request.body.get("chat_id"), "42");
 	assert.equal(request.body.get("message_thread_id"), "88");
-	assert.equal(request.body.get("reply_parameters"), '{"message_id":2}');
+	assert.equal(request.body.get("reply_parameters"), '{"message_id":2,"allow_sending_without_reply":true}');
 	const file = request.body.get("document") as File;
 	assert.equal(file.name, "notes.txt");
 	assert.equal(await file.text(), "hello");

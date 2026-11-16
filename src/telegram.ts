@@ -318,7 +318,8 @@ export class TelegramBot {
 		this.#validateDestination(destination);
 		return { chat_id: destination.chatId,
 			...(destination.threadId !== undefined ? { message_thread_id: Number(destination.threadId) } : {}),
-			...(replyTo ? { reply_parameters: { message_id: this.#numericMessage(destination, replyTo) } } : {}) };
+			// Reply anchors always belong to this chat; a deleted anchor must not discard the result.
+			...(replyTo ? { reply_parameters: { message_id: this.#numericMessage(destination, replyTo), allow_sending_without_reply: true } } : {}) };
 	}
 	#markup(buttons?: TelegramButton[][]): Record<string, unknown> | undefined {
 		if (!buttons) return undefined;

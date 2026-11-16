@@ -104,6 +104,7 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 		replies: (replies: ModelReply[]) => child.send({ kind: "models", replies }),
 		release: (token: string) => child.send({ kind: "model-release", token }),
 		rejectReplies: (messageIds: number[]) => child.send({ kind: "reject-replies", messageIds }),
+		deleteReplies: (messageIds: number[]) => child.send({ kind: "delete-replies", messageIds }),
 		updates: (updates: JsonRecord[]) => child.send({ kind: "updates", updates }),
 		requests: (kind: MainFixtureEvent["kind"], method?: string) => events.filter((event) => event.kind === kind && (method === undefined || event.method === method)),
 	};

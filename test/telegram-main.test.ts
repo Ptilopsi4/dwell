@@ -132,7 +132,7 @@ test("main Telegram entry enforces admission and delivers real Harness results t
 		const topicSends = f.requests("telegram", "sendMessage").filter((event) => event.body.chat_id === "-300");
 		assert.equal(topicSends.length, 1);
 		assert.equal(topicSends[0].body.message_thread_id, 9);
-		assert.deepEqual(topicSends[0].body.reply_parameters, { message_id: 7 });
+		assert.deepEqual(topicSends[0].body.reply_parameters, { message_id: 7, allow_sending_without_reply: true });
 		const routes = JSON.parse(await readFile(join(f.directory, "state", "sessions.json"), "utf8")) as Record<string, { owner: string; destination: JsonRecord }>;
 		assert.equal(Object.keys(routes).length, 2);
 		for (const route of Object.values(routes)) { assert.equal(route.owner, "tg:200"); assert.equal(route.destination.botId, "100"); }
@@ -211,7 +211,7 @@ test("main Telegram entry advances past failed unsupported-media notices and acc
 		const failedNotices = f.requests("telegram", "sendMessage");
 		assert.equal(failedNotices.length, 2);
 		for (const notice of failedNotices) assert.equal(notice.body.text, "目前支持文本、图片和文件消息。");
-		assert.deepEqual(failedNotices.map((event) => event.body.reply_parameters), [{ message_id: 40 }, { message_id: 41 }]);
+		assert.deepEqual(failedNotices.map((event) => event.body.reply_parameters), [{ message_id: 40, allow_sending_without_reply: true }, { message_id: 41, allow_sending_without_reply: true }]);
 		const next = f.events.length;
 		f.updates([message(42, "Continue with this ordinary private input.")]);
 		await f.until((event) => event.method === "editMessageText" && event.body.text === "The next private input completed.", next);

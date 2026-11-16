@@ -27,8 +27,8 @@ test("main Telegram presents a real background wait and later report in the orig
 			assert.equal(sent.body.chat_id, "-300");
 			assert.equal(sent.body.message_thread_id, 9);
 		}
-		assert.deepEqual(sends[0].body.reply_parameters, { message_id: 301 });
-		assert.deepEqual(sends[1].body.reply_parameters, { message_id: sends[0].messageId });
+		assert.deepEqual(sends[0].body.reply_parameters, { message_id: 301, allow_sending_without_reply: true });
+		assert.deepEqual(sends[1].body.reply_parameters, { message_id: sends[0].messageId, allow_sending_without_reply: true });
 		assert.doesNotMatch(JSON.stringify(f.requests("telegram")), /空回复|没有产出文本|处理失败/);
 		assert.equal(f.requests("model").length, 4);
 		assert.equal(f.requests("unexpected").length, 0);

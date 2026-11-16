@@ -972,7 +972,7 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 		await telegramInbox.output(id, "done");
 	} catch (error) {
 		const row = await telegramInbox.input(id).catch(() => undefined);
-		const uncertain = row?.output === "sending" || (error instanceof TelegramError && error.uncertain);
+		const uncertain = error instanceof TelegramError ? error.uncertain : row?.output === "sending";
 		if (row !== undefined) await telegramInbox.output(id, uncertain ? "uncertain" : "failed").catch(() => {});
 		console.error(`[dwell] Telegram 投递${uncertain ? "状态不确定，未自动重发" : "失败"}（${id}）:`, error);
 	} finally { telegramReplies.delete(id); }
