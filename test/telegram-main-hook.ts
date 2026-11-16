@@ -65,6 +65,12 @@ TelegramInbox.prototype.prepared = async function (id, content) {
 	await prepared.call(this, id, content);
 	report({ kind: "checkpoint", method: "telegram.prepared", body: { id } });
 };
+const enqueue = TelegramInbox.prototype.enqueue;
+TelegramInbox.prototype.enqueue = async function (id, receipt) {
+	const input = { ...receipt };
+	if (process.env.DWELL_TEST_LEGACY_INPUT === "1") delete input.authorityVia;
+	await enqueue.call(this, id, input);
+};
 
 process.on("message", (message: { kind?: string; replies?: ModelReply[]; updates?: unknown[]; messageIds?: number[]; token?: string }) => {
 	if (message.kind === "models") modelReplies.push(...message.replies!);

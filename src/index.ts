@@ -434,7 +434,8 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		}
 		if (destination.kind === "telegram") {
 			const id = msg.requestId!;
-			await telegramInbox.enqueue(id, { conversationId: conversation.id as number, sender: msg.senderId, destination, replyTo: msg.messageId, requestId: id, raw: msg });
+			const authorityVia = sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : "telegram";
+			await telegramInbox.enqueue(id, { conversationId: conversation.id as number, sender: msg.senderId, authorityVia, destination, replyTo: msg.messageId, requestId: id, raw: msg });
 			telegramWorkers.wake();
 			return;
 		}
@@ -457,13 +458,15 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 }
 
 /** 统一的输入提交（媒体/文本两条路径共用：transcript 记 sender，requestId 幂等，steer）。 */
-function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage) {
+function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage, authorityVia?: RunVia) {
+	const via = msg.platform ?? "feishu";
+	const authority = authorityVia ?? (sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : via);
 	return conversation.submit(
 		{
 			type: "input",
 			content,
 			// transcript 记录 sender（审计/分账基础；model 仍只看 content）
-			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via: msg.platform ?? "feishu" } },
+			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }) } },
 			requestId: msg.requestId ?? msg.messageId,
 			whenBusy: "steer",
 		},
@@ -933,8 +936,9 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	await withTelegramAdmission(row.conversationId, async () => {
 		if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
 		if (!users.isAllowed(row.sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); return; }
-		await setRunAttributionIfIdle(row.conversationId, row.sender, "telegram");
-		const submission = await submitInput(conversation, content, msg);
+		const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : "telegram");
+		await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
+		const submission = await submitInput(conversation, content, msg, authorityVia);
 		await telegramInbox.admitted(id, submission.id as number);
 		void replyTelegram(id, conversation, submission);
 	});
@@ -1043,8 +1047,10 @@ async function reattachTelegramReplies(): Promise<void> {
 		if (submission === undefined) {
 			const requestId = row.requestId ?? (id.startsWith("tg-update:") ? id : undefined);
 			if (requestId === undefined) { await telegramInbox.output(id, "failed"); continue; }
-			await setRunAttributionIfIdle(row.conversationId, row.sender, sessions.destinationOf(row.conversationId).kind);
-			submission = await conversation.submit({ type: "input", content: row.content, requestId, whenBusy: "steer", entry: { kind: "chat.message", data: { sender: row.sender, via: id.startsWith("tg-panel:") ? "panel" : "telegram" } } }, BACKGROUND_CONTEXT);
+			const via = id.startsWith("tg-panel:") ? "panel" : "telegram";
+			const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : via);
+			await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
+			submission = await conversation.submit({ type: "input", content: row.content, requestId, whenBusy: "steer", entry: { kind: "chat.message", data: { sender: row.sender, via, ...(authorityVia === via ? {} : { authorityVia }) } } }, BACKGROUND_CONTEXT);
 			await telegramInbox.admitted(id, submission.id as number);
 		}
 		void replyTelegram(id, conversation, submission);
@@ -1058,7 +1064,7 @@ async function sendTelegramApproval(destination: TelegramDestination, scope: num
 	try {
 		if (!await claimApprovalNotification(key, pending.requestId)) return;
 		const sent = await telegram.send(destination, `需要批准 · ${match}\n任务 #${scope}\n${command.slice(0, 2500)}`, {
-			...(sessions.destinationOf(scope).kind === "telegram" ? { replyTo: sessions.lastAnchor(scope as ConversationId) } : {}),
+			...(sameDestination(sessions.destinationOf(scope), destination) ? { replyTo: sessions.lastAnchor(scope as ConversationId) } : {}),
 			buttons: [[{ text: "批准 10 分钟", data: telegramApprovalData(pending.requestId, "approve", 10) }, { text: "批准 30 分钟", data: telegramApprovalData(pending.requestId, "approve", 30) }, { text: "拒绝", data: telegramApprovalData(pending.requestId, "deny") }]],
 		});
 		await setPendingApprovalCard(key, pending, telegramChatKey(destination.botId, destination.chatId), sent.messageId, destination);
@@ -1480,7 +1486,7 @@ const feishuBridge: FeishuBridge = {
 		const requestId = `panel-${sent.messageId}`;
 		const receiptId = destination.kind === "telegram" ? `tg-panel:${destination.botId}:${sent.messageId}` : undefined;
 		if (receiptId !== undefined && destination.kind === "telegram") {
-			await telegramInbox.prepare(receiptId, { conversationId: id, sender: panelUser, destination, replyTo: sent.messageId, requestId }, async () => content);
+			await telegramInbox.prepare(receiptId, { conversationId: id, sender: panelUser, authorityVia: "panel", destination, replyTo: sent.messageId, requestId }, async () => content);
 		}
 		const submission = await conversation.submit({
 			type: "input",

@@ -3,12 +3,13 @@ import { copyJson } from "@earendil-works/chord";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
 import type { NormalizedMessage, TelegramDestination } from "./pipeline.ts";
 import { sameDestination } from "./pipeline.ts";
-import type { ApprovalRevocation, PendingApproval } from "./ext/approval.ts";
+import type { ApprovalRevocation, PendingApproval, RunVia } from "./ext/approval.ts";
 import type { TelegramCallback } from "./telegram.ts";
 
 export type TelegramInputReceipt = {
 	conversationId: number;
 	sender: string;
+	authorityVia?: RunVia;
 	destination: TelegramDestination;
 	replyTo: string;
 	content: string;

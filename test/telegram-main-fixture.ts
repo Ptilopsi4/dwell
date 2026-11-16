@@ -16,7 +16,7 @@ export function message(id: number, text: string, overrides: JsonRecord = {}): J
 		from: { id: 200, first_name: "Member" }, text, ...overrides } };
 }
 
-export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; failActivity?: boolean } = {}) {
+export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; legacyTelegramInput?: boolean; failActivity?: boolean } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-telegram-main-"));
 	// Production rejects model configuration in the system temporary directory.
 	const privateRoot = resolve(import.meta.dirname, "../.pi");
@@ -42,6 +42,7 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 			env: { PATH: process.env.PATH, TZ: "UTC", DWELL_TZ: "UTC", DWELL_DATA: join(directory, "data"), DWELL_STATE: join(directory, "state"), DWELL_MODELS_FILE: modelsFile,
 				DWELL_MODEL_API_KEY: "synthetic-acceptance-key", TELEGRAM_BOT_TOKEN: "100:SYNTHETIC_TEST_TOKEN", DWELL_ALLOW: "tg:200,tg:201", DWELL_TELEGRAM_CHATS: "-300", DWELL_SANDBOX: "off",
 				DWELL_TEST_TRANSPORT_STATE: join(directory, "transport.json"), DWELL_TEST_REPLIES: JSON.stringify(replies),
+				...(options.legacyTelegramInput ? { DWELL_TEST_LEGACY_INPUT: "1" } : {}),
 				...(options.failActivity ? { DWELL_TEST_ACTIVITY_FAILURE: "1" } : {}),
 				...(options.panel ? { DWELL_TEST_PANEL: "1", DWELL_PANEL_PORT: "17788", DWELL_PANEL_HOST: "127.0.0.1", DWELL_PANEL_TRUST_LOCAL: "1", DWELL_PANEL_USER: "tg:200" } : {}) },
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -80,7 +81,8 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 			const inbox = doc === undefined ? { inputs: {}, commands: {} } : (await storage.document(doc.id, "current", context))!.value as { inputs: Record<string, TelegramInputReceipt>; commands: JsonRecord };
 			const submissions = (await storage.scanSubmissions({}, 1000, undefined, context)).items;
 			const tasks = (await storage.scanTasks({}, 1000, undefined, context)).items;
-			return { inbox, submissions, tasks };
+			const entries = await Promise.all(submissions.map(async (submission) => submission.entry === undefined ? undefined : (await storage.entry(submission.entry, context))?.entry));
+			return { inbox, submissions, tasks, entries: entries.filter((entry) => entry !== undefined) };
 		} finally { await storage.close(context); }
 	}
 	async function close(passed: boolean): Promise<void> {

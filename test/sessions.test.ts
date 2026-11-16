@@ -33,6 +33,7 @@ async function routingSetup(prepare: (cwd: string) => Promise<void> = async () =
 			return conversation;
 		},
 		async conversation(id: ConversationId) { return conversations.get(id); },
+		async snapshot() { return undefined; },
 	} as unknown as Harness;
 	const prepared: string[] = [];
 	const sessions = new Sessions(harness, async (cwd) => {
@@ -42,8 +43,44 @@ async function routingSetup(prepare: (cwd: string) => Promise<void> = async () =
 	});
 	const file = join(state, "sessions.json");
 	Object.assign(sessions, { file, mapFile: join(state, "message-map.json") });
-	return { sessions, conversations, prepared, file, get created() { return created; } };
+	return { sessions, conversations, prepared, file, harness, get created() { return created; } };
 }
+
+for (const target of ["private", "group", "topic"] as const) test(`Telegram ${target} retains its canonical send anchor and all reply mappings across reload`, async () => {
+	const t = await routingSetup();
+	const conversation = await t.sessions.forDirect("oc_fixture", "tg:200");
+	const chatId = target === "private" ? "200" : "-300";
+	Object.assign(t.sessions, { destinations: new Map([[conversation.id, { kind: "telegram", botId: "100", chatId, ...(target === "topic" ? { threadId: "9" } : {}) }]]) });
+	await t.sessions.rename(conversation.id, "Canonical Telegram task");
+	const foreign = target === "private" ? "tg:100:201:1" : "tg:100:200:1";
+	await t.sessions.anchor(foreign, conversation.id);
+	assert.equal(t.sessions.lastAnchor(conversation.id), undefined, "A foreign chat cannot supply the canonical send anchor");
+	const canonical = `tg:100:${chatId}:2`;
+	await t.sessions.anchor(canonical, conversation.id);
+	for (const anchor of [`tg:999:${chatId}:3`, `${foreign.slice(0, -1)}4`]) await t.sessions.anchor(anchor, conversation.id);
+	assert.equal(t.sessions.lastAnchor(conversation.id), canonical);
+	assert.equal(t.sessions.follow(foreign), conversation.id);
+	const reloaded = new Sessions(t.harness, async () => {});
+	Object.assign(reloaded, { file: t.file, mapFile: join(t.file, "..", "message-map.json") });
+	await reloaded.load();
+	assert.equal(reloaded.lastAnchor(conversation.id), canonical);
+	assert.equal(reloaded.follow(foreign), conversation.id);
+	assert.equal(reloaded.follow(`tg:999:${chatId}:3`), conversation.id);
+});
+
+test("a pure panel task keeps its latest private notification anchor across reload", async () => {
+	const t = await routingSetup();
+	const conversation = await t.sessions.createPanelConversation("Notification task");
+	await t.sessions.anchor("om_feishu_notice", conversation.id);
+	await t.sessions.anchor("tg:100:200:9", conversation.id);
+	assert.equal(t.sessions.lastAnchor(conversation.id), "tg:100:200:9");
+	const reloaded = new Sessions(t.harness, async () => {});
+	Object.assign(reloaded, { file: t.file, mapFile: join(t.file, "..", "message-map.json") });
+	await reloaded.load();
+	assert.equal(reloaded.lastAnchor(conversation.id), "tg:100:200:9");
+	assert.equal(reloaded.follow("om_feishu_notice"), conversation.id);
+	assert.equal(reloaded.follow("tg:100:200:9"), conversation.id);
+});
 
 for (const kind of ["direct", "group", "thread"] as const) {
 	test(`concurrent ${kind} messages share one new conversation and preserve its first owner`, async () => {

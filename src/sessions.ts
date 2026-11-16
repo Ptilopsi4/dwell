@@ -133,10 +133,12 @@ export class Sessions {
 		return this.messageMap.get(replyToMessageId);
 	}
 
-	/** 该任务线最近一条锚点消息（panel 往群里发消息时回复它，标明归属）。 */
+	/** Private approval replies stay followable without replacing the canonical Telegram chat's send anchor. */
 	lastAnchor(conversationId: ConversationId): string | undefined {
+		const destination = this.destinationOf(conversationId);
+		const prefix = destination.kind === "telegram" ? `tg:${destination.botId}:${destination.chatId}:` : undefined;
 		let last: string | undefined;
-		for (const [messageId, id] of this.messageMap) if (id === conversationId) last = messageId;
+		for (const [messageId, id] of this.messageMap) if (id === conversationId && (prefix === undefined || messageId.startsWith(prefix))) last = messageId;
 		return last;
 	}
 
