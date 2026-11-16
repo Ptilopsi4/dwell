@@ -323,6 +323,8 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 .work-section ul { padding-inline-start: 1.2rem; }
 .work-copy { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
 .work-result { margin-top: .6rem; color: var(--destructive); }
+.work-review-link { display: block; margin-top: .5rem; }
+.work-review-body { min-width: 0; }
 #workList { max-height: 60vh; overflow: auto; }
 </style>
 </head>
@@ -956,6 +958,8 @@ function appendEntry(entry) {
 		for (const call of calls) {
 			const row = addToolRow(call);
 			row._waitCandidate = calls.length === 1 && call.name === "dwell.task.wait";
+			row._readyCandidate = calls.length === 1 && call.name === "dwell.work" && call.arguments?.action === "ready";
+			row._answerEntryId = entry.id;
 		}
 		if (model?.stopReason === "error" || model?.stopReason === "aborted") {
 			T.group = null;
@@ -970,7 +974,9 @@ function appendEntry(entry) {
 	}
 	if (entry.kind === "pi.tool-result") {
 		const row = T.calls.get(model?.toolCallId) ?? addToolRow({ id: model?.toolCallId, name: model?.toolName ?? "tool", arguments: {} });
-		const err = model?.isError === true || (entry.data?.diagnostics ?? []).length > 0;
+		const diagnostics = entry.data?.diagnostics ?? [];
+		const err = model?.isError === true || diagnostics.some((diagnostic) => diagnostic.severity === "error");
+		const warnings = diagnostics.filter((diagnostic) => diagnostic.severity === "warn");
 		const out = contentText(model?.content);
 		row._out = out;
 		row.classList.toggle("bad", err);
@@ -978,7 +984,7 @@ function appendEntry(entry) {
 		st.className = "st " + (err ? "bad" : "ok");
 		st.innerHTML = ic(err ? "x" : "check", "sm");
 		const lines = out === "" ? 0 : out.replace(/\n$/, "").split("\n").length;
-		const meta = [lines > 0 ? `${lines} 行` : "无输出", model?.durationMs >= 1000 ? `${(model.durationMs / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
+		const meta = [lines > 0 ? `${lines} 行` : "无输出", warnings.length > 0 ? `${warnings.length} 条警告` : "", model?.durationMs >= 1000 ? `${(model.durationMs / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
 		row.querySelector(".tm").textContent = meta;
 		if (!err) addDownload(row);
 		if (row.open) fillToolBody(row);
@@ -986,6 +992,27 @@ function appendEntry(entry) {
 			const notice = document.createElement("div");
 			notice.className = "note";
 			notice.textContent = "后台任务处理中，完成后会继续。";
+			log.appendChild(notice);
+			T.group = null;
+			T.lastKind = "note";
+		}
+		const ready = entry.workReady;
+		if (row._readyCandidate && !err && entry.byTaskId !== undefined && model?.toolName === "dwell.work" && model.details?.workReady === true && ready?.answerEntryId === row._answerEntryId && ready.workId === model.details.workId && ready.verified === model.details.verified && typeof ready.text === "string") {
+			const notice = document.createElement("div");
+			notice.className = "note";
+			const body = document.createElement("div");
+			body.className = "work-review-body";
+			body.textContent = ready.text;
+			const review = document.createElement("button");
+			review.type = "button";
+			review.className = "btn work-review-link";
+			review.dataset.variant = "outline";
+			review.dataset.size = "sm";
+			review.textContent = "查看工作与验收";
+			const reviewConversation = Number(convId);
+			review.onclick = () => openWork(reviewConversation, ready.workId);
+			body.appendChild(review);
+			notice.appendChild(body);
 			log.appendChild(notice);
 			T.group = null;
 			T.lastKind = "note";

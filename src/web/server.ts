@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, EntryRecord, Harness } from "@earendil-works/pi-durable";
-import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
+import { LiveDoc as PiLiveDoc, ToolResultEntry } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
 import { UploadError, type SaveUpload } from "../uploads.ts";
@@ -19,7 +19,8 @@ import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, s
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
-import { acceptWork, getWork } from "../ext/work.ts";
+import { acceptWork, getWork, workReadyAnswer } from "../ext/work.ts";
+import { workReadyNotice } from "../answer.ts";
 import { beginNewGoal } from "../new-goal.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
@@ -225,6 +226,26 @@ export function presentPanelEntry(entry: EntryRecord): EntryRecord {
 	return { ...entry, model: entry.model.map((message) => message.role === "assistant" && message.stopReason === "error"
 		? { ...message, errorMessage: modelFailure(message.errorMessage ?? "").message }
 		: message) };
+}
+
+/** The browser receives a ready notice only after its receipt's task and answer match. */
+export async function presentPanelAnswerEntry(harness: Pick<Harness, "commit">, conversationId: number, entry: EntryRecord): Promise<EntryRecord & { workReady?: { answerEntryId: number; workId: string; verified: boolean; summary?: string; text: string } }> {
+	const { workReady: _storedNotice, ...stored } = entry as EntryRecord & { workReady?: unknown };
+	const presented = presentPanelEntry(stored);
+	const result = entry.model?.[0];
+	const diagnostics = ToolResultEntry.is(entry) ? entry.data?.diagnostics : undefined;
+	if (entry.kind !== "pi.tool-result" || entry.conversationId !== conversationId || entry.byTaskId === undefined || result?.role !== "toolResult" || result.toolName !== "dwell.work" || result.isError || diagnostics?.some((diagnostic) => diagnostic.severity === "error")) return presented;
+	const details = result.details;
+	if (typeof details !== "object" || details === null || !("workReady" in details) || details.workReady !== true) return presented;
+	const answerEntryId = await harness.commit(async (tx) => {
+		const task = await tx.task(entry.byTaskId!);
+		const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
+		return task?.kind === "pi.tool" && task.conversationId === conversationId && input?.kind === "model" && input.callId === result.toolCallId ? input.assistant : undefined;
+	}, BACKGROUND_CONTEXT);
+	if (answerEntryId === undefined) return presented;
+	const ready = await workReadyAnswer(harness, conversationId, answerEntryId);
+	if (ready === undefined || !("workId" in details) || ready.workId !== details.workId || !("verified" in details) || ready.verified !== details.verified) return presented;
+	return { ...presented, workReady: { ...ready, answerEntryId, text: workReadyNotice(ready.verified, ready.summary) } };
 }
 
 /** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
@@ -615,12 +636,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			return;
 		}
 		let sent: string[] = [];
-		const frame = (): void => {
+		const frame = async (): Promise<void> => {
 			if (closed) return;
 			const v = view.value as unknown as { entries: EntryRecord[]; docs?: Record<string, unknown> };
 			const ids = v.entries.map((e) => String(e.id));
 			const append = sent.length > 0 && sent.length <= ids.length && ids[0] === sent[0] && ids[sent.length - 1] === sent[sent.length - 1];
-			const entries = (append ? v.entries.slice(sent.length) : v.entries).map(presentPanelEntry);
+			const entries = await Promise.all((append ? v.entries.slice(sent.length) : v.entries).map((entry) => presentPanelAnswerEntry(harness, convId, entry)));
+			if (closed) return;
 			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
 			const slim = live?.run === undefined ? null : {
 				tools: (live.tools ?? []).map((t) => ({ callId: t.callId, name: t.name, status: t.status })),
@@ -638,7 +660,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`);
 		};
 		// subscribe 契约先投当前值再投变更（chord Readable），首帧由它发；手动再发会重复一帧全量 replace
-		cleanups.push(view.subscribe(frame));
+		let frameWork = Promise.resolve();
+		cleanups.push(view.subscribe(() => {
+			frameWork = frameWork.then(frame).catch((error) => {
+				console.error("[dwell] panel 回答呈现失败:", error);
+				res.end();
+			});
+		}));
 		// 心跳保活（穿透链路）
 		const beat = setInterval(() => res.write(": ping\n\n"), 25_000);
 		cleanups.push(() => clearInterval(beat));
