@@ -12,6 +12,8 @@ import { probeSandbox, resolveSpawnShell } from "./sandbox.ts";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
+import { beginNewGoal, NewGoalDoc } from "./new-goal.ts";
+import { getWork } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
@@ -391,6 +393,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 					approvalRequestId: pendingApprovals.get(windowKey(conversation.id as number, msg.senderId))?.requestId ?? "",
 					...(expiresAt === undefined ? {} : { windowExpiresAt: expiresAt }),
 					...(content.split(/\s+/)[0] === "/deny" ? { denial: captureApprovalRevocation(conversation.id as number, users.isAdmin(msg.senderId) ? undefined : msg.senderId) } : {}),
+					...(content.split(/\s+/)[0] === "/newgoal" ? { newGoalWorkId: (await getWork(harness, conversation.id as number)).current ?? null } : {}),
 				});
 				if (commandReceipt.done) return;
 				if (["/allow", "/disallow"].includes(commandReceipt.command.split(/\s+/)[0]) && users.commandApplied(msg.requestId)) {
@@ -1047,7 +1050,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 	switch (cmd) {
 		case "/help": {
 			if (msg.platform === "telegram") {
-				await replyTo(target, "/ask@bot 内容：群聊提问，或回复 bot 继续\n/new：开启新任务线\n/cancel：中止当前任务（线主/管理员）\n/approve [分钟]：批准危险命令\n/deny：关闭批准窗口\n/status：查看运行中任务（管理员）\n/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员\n/whoami：查看你的 ID 和当前聊天 ID", conversation);
+				await replyTo(target, "/ask@bot 内容：群聊提问，或回复 bot 继续\n/new：开启新任务线\n/newgoal：开启新目标，保留聊天历史\n/cancel：中止当前任务（线主/管理员）\n/approve [分钟]：批准危险命令\n/deny：关闭批准窗口\n/status：查看运行中任务（管理员）\n/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员\n/whoami：查看你的 ID 和当前聊天 ID", conversation);
 				break;
 			}
 			const sent = await channel.send(target.chatId, { card: helpCard() }, { replyTo: target.messageId });
@@ -1057,6 +1060,20 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 		case "/whoami":
 			await replyTo(target, `你的 ID：${msg.senderId}${users.isAdmin(msg.senderId) ? "（管理员）" : ""}${target.destination?.kind === "telegram" ? `；聊天 ID：${target.destination.chatId}` : ""}`);
 			break;
+		case "/newgoal": {
+			if (!isOwner && !admin) {
+				await replyTo(target, "这是他人的任务线，仅线主或管理员可开启新目标。");
+				return;
+			}
+			const requestId = `command:${msg.requestId ?? msg.messageId}`;
+			const previous = receipt === undefined ? (await harness.snapshot(NewGoalDoc, conversation.id, context))?.requests[requestId] : undefined;
+			const expectedWorkId = receipt === undefined ? previous === undefined ? (await getWork(harness, convId)).current ?? null : previous.workId : receipt.newGoalWorkId ?? null;
+			let result;
+			try { result = await beginNewGoal(harness, { conversationId: convId, expectedWorkId, operator: msg.senderId, requestId }); }
+			catch (error) { await replyTo(target, (error as Error).message); return; }
+			await replyTo(target, result.changed ? "已开启新目标。聊天历史、旧任务记录和预算保留，请发送新的目标。" : "当前没有工作目标，请直接发送新的目标。", conversation);
+			break;
+		}
 		case "/new":
 			if (!isOwner && !admin) {
 				await replyTo(target, "这是他人的任务线，仅线主或管理员可重置。");
@@ -1244,6 +1261,7 @@ function helpCard(): Record<string, unknown> {
 		body: { elements: [
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新对话（清空本任务线上下文）"),
+				cmd("/newgoal", "开启新目标，保留聊天历史与旧任务记录（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),

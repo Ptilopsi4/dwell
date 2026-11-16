@@ -357,6 +357,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
+				<button id="newGoalBtn">开启新目标</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -856,6 +857,15 @@ function appendEntry(entry) {
 	const log = $("log");
 	const model = entry.model?.[0];
 	const ts = model?.timestamp;
+	if (entry.kind === "work.new_goal") {
+		const d = document.createElement("div");
+		d.className = "day";
+		d.textContent = "已开启新目标 · 聊天历史保留";
+		log.appendChild(d);
+		T.group = null;
+		T.lastKind = "day";
+		return;
+	}
 	if (entry.kind === "context.reset") {
 		// 展示型分隔回：上下文已清空（panel/飞书 /new 或 panel 重置触发）
 		const d = document.createElement("div");
@@ -1242,6 +1252,16 @@ $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
 	try { await api("reset", { conv: Number(convId) }); } catch (err) { toast(err.message, true); }
 }, "确认清空上下文?");
+$("newGoalBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
+	closeMenu();
+	const id = Number(convId);
+	try {
+		const work = await api(`work?id=${id}`);
+		const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+		const result = await api("work/newgoal", { id, workId: work.current ?? null, requestId });
+		toast(result.changed ? "已开启新目标，聊天历史保留。请发送新的目标。" : "当前没有工作目标，请直接发送新的目标。");
+	} catch (err) { toast(err.message, true); }
+}, "保留历史并开启新目标?");
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 }, "确认停止?");

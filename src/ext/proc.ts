@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import { creatorVia, type RunVia } from "./approval.ts";
 import { scanLiveTasks } from "./schedule.ts";
 import { STATE_DIR } from "../state.ts";
+import { workIdentity, type WorkIdentity } from "./work.ts";
 
 export const PROC_TASK_KIND = "dwell.proc-run";
 
@@ -35,6 +36,7 @@ export type ProcInput = {
 	readonly notify: boolean;
 	readonly creator: string;
 	readonly creatorVia?: RunVia;
+	readonly work?: WorkIdentity | null;
 	readonly conversationId: number;
 };
 
@@ -391,7 +393,7 @@ export const makeProcTask = (deps: ProcDeps) =>
 							? formatProcExitReport(input.name, ck.code, ck.lost, Math.round((runtime.now() - ck.startedAt) / 1000), tail, runtime.taskId as number)
 							: `[Background process ${input.name}] taskId: ${runtime.taskId}. ${ck.note}\n${tail}`;
 						const submission = await conversation.submit(
-								{ type: "input", content, requestId: `proc:${String(runtime.taskId)}:exit`, whenBusy: "followUp", entry: { kind: "chat.message", data: { sender: input.creator, via: "proc", ...(creatorVia(input.creator, input.creatorVia) === undefined ? {} : { authorityVia: creatorVia(input.creator, input.creatorVia)! }) } } },
+							{ type: "input", content, requestId: `proc:${String(runtime.taskId)}:exit`, whenBusy: "followUp", entry: { kind: "chat.message", data: { sender: input.creator, via: "proc", work: input.work ?? null, ...(creatorVia(input.creator, input.creatorVia) === undefined ? {} : { authorityVia: creatorVia(input.creator, input.creatorVia)! }) } } },
 							context,
 						);
 						await runtime.commit(() => ({ status: "running", checkpoint: { phase: "announce", submissionId: submission.id as number } }), context);
@@ -471,7 +473,7 @@ function makeProcTool(deps: ProcDeps, ProcRun: ReturnType<typeof makeProcTask>) 
 				if (live.some((t) => (t.input as ProcInput).name === name && (t.input as ProcInput).conversationId === api.conversationId)) return { ok: false, error: `${name} is already running; use status to list processes or stop to end one.` };
 				const cap = procCapViolation(live.filter((t) => (t.input as ProcInput).conversationId === api.conversationId).length, live.length);
 				if (cap !== undefined) return { ok: false, error: cap };
-					const taskId = await tx.createTask(ProcRun, { name, command, notify: args.notify !== false, creator: deps.senderOf(api.conversationId as number) ?? "", ...(deps.viaOf?.(api.conversationId) === undefined ? {} : { creatorVia: deps.viaOf!(api.conversationId)! }), conversationId: api.conversationId as number }, { ownership: { kind: "conversation" }, background: true });
+				const taskId = await tx.createTask(ProcRun, { name, command, notify: args.notify !== false, creator: deps.senderOf(api.conversationId as number) ?? "", ...(deps.viaOf?.(api.conversationId) === undefined ? {} : { creatorVia: deps.viaOf!(api.conversationId)! }), work: (await workIdentity(tx, api.conversationId)) ?? null, conversationId: api.conversationId as number }, { ownership: { kind: "conversation" }, background: true });
 				return { ok: true, taskId: taskId as number };
 			}, context);
 			if (!created.ok) return text(created.error, true);

@@ -11,6 +11,7 @@ import { AgentDoc, createRegistry, defineExtension, Harness, section, type Curso
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard } from "./ext/approval.ts";
 import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
+import { makeWorkController } from "./ext/work.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import { scanLiveTasks } from "./ext/schedule.ts";
 import { makeWorkspaceExtension, registerLegacyWorkspaces, setWorkspaceApprovalGetter } from "./workspace.ts";
@@ -258,6 +259,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		limits,
 		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
 	});
+	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown });
 	setApprovalBudgetGetter((conversationId) => budgets.captureApproval(conversationId));
 	setWorkspaceApprovalGetter((conversationId) =>
 		[...pendingApprovals.values()].some((pending) => pending.targets?.includes(conversationId)) ||
@@ -270,6 +272,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	registry.install(budgets.extension);
 	registry.install(makeWorkspaceExtension(() => harness));
 	registry.install(makeApprovalExtension(() => harness));
+	registry.install(work.extension);
 	for (const extension of extraExtensions) registry.install(extension);
 	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
 	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
@@ -288,6 +291,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 			data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 	};
 	harness = await Harness.open(storage, { models, registry, env, onReport }, context);
+	harness.subscribeClose(() => { void work.close(); });
 	budgetsByHarness.set(harness, budgets);
 	try {
 		await checkResumableModels(harness, models);
@@ -308,9 +312,11 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 			await checkModelConfigBoundary(MODEL_CONFIG.path, roots);
 		}
 		await budgets.attach(harness);
+		await work.attach(harness);
 		await registerLegacyWorkspaces(harness);
 	} catch (error) {
 		await budgets.close();
+		await work.close();
 		await harness.close(context);
 		throw error;
 	}

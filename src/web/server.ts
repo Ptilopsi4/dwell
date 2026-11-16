@@ -19,6 +19,8 @@ import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, s
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
+import { acceptWork, getWork } from "../ext/work.ts";
+import { beginNewGoal } from "../new-goal.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
@@ -340,6 +342,34 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		}
 		if (req.method === "GET" && url.pathname === "/api/reports") {
 			json(res, 200, recentReports());
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/work") {
+			const id = Number(url.searchParams.get("id"));
+			if (!Number.isSafeInteger(id) || id <= 0) throw new HttpError(400, "有效的会话 ID 为必填项");
+			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+			json(res, 200, await getWork(harness, id));
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/work/newgoal") {
+			const body = await readBody(req);
+			const id = Number(body?.id);
+			const workId = body?.workId;
+			const requestId = body?.requestId;
+			if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
+			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+			try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
+			catch (error) { throw new HttpError(409, (error as Error).message); }
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/api/work/accept") {
+			const body = await readBody(req);
+			const id = Number(body?.id);
+			const workId = typeof body?.workId === "string" ? body.workId : "";
+			if (!Number.isSafeInteger(id) || id <= 0 || workId === "") throw new HttpError(400, "会话 ID 和工作记录 ID 为必填项");
+			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+			try { json(res, 200, await acceptWork(harness, id, workId, feishu.operator())); }
+			catch (error) { throw new HttpError(409, error instanceof Error ? error.message : "无法确认验收"); }
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/users") {

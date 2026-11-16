@@ -10,6 +10,7 @@ import { creatorVia, decisionInput, removeApprovalTarget, type RunVia } from "./
 import { canonicalWorkspace, checkBackgroundWorkspace, markBackgroundWorkspaceStopped, prepareBackgroundWorkspace, readOnlyWorkspaceTool, registerBackgroundWorkspace, releaseStoppedWorkspace, workspaceStartViolation, WorkspaceDoc } from "../workspace.ts";
 import { DEFAULT_CWD } from "../state.ts";
 import { resolve } from "node:path";
+import { inheritWork, workIdentity, type WorkIdentity } from "./work.ts";
 
 export const BACKGROUND_ANCHOR_KIND = "dwell.background-anchor";
 export const BACKGROUND_REPORTER_KIND = "dwell.background-reporter";
@@ -107,7 +108,7 @@ export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => 
 				await checkBackgroundWorkspace(tx, parent, child);
 				const taskId = await tx.createTask(
 					Reporter,
-					{ name, parent, child, message: content, creator: approval?.sender ?? deps.senderOf(parent) ?? "", ...actorVia(deps, parent, approval?.via), followUp: false, ...(approval === undefined ? {} : { approval }) },
+					{ name, parent, child, message: content, creator: approval?.sender ?? deps.senderOf(parent) ?? "", ...actorVia(deps, parent, approval?.via), work: (await workIdentity(tx, child, approval?.budgetId)) ?? null, followUp: false, ...(approval === undefined ? {} : { approval }) },
 					{ ownership: { kind: "conversation" }, background: true, conversationId: parent as ConversationId },
 				);
 				if (approval !== undefined && receipts !== undefined) receipts.receipts[approval.deliveryId] = taskId as number;
@@ -239,7 +240,7 @@ export async function reconcileBackgroundStops(harness: Harness): Promise<void> 
 	}, BACKGROUND_CONTEXT);
 }
 
-type ReporterInput = { name: string; parent: number; child: number; message: string; creator: string; creatorVia?: RunVia; followUp: boolean; approval?: BackgroundApprovalDelivery };
+type ReporterInput = { name: string; parent: number; child: number; message: string; creator: string; creatorVia?: RunVia; work?: WorkIdentity | null; followUp: boolean; approval?: BackgroundApprovalDelivery };
 type ReporterState = { phase: "deliver" } | { phase: "report"; report?: string };
 
 function actorVia(deps: BackgroundDeps, parent: number, override?: RunVia): { creatorVia?: RunVia } {
@@ -249,7 +250,7 @@ function actorVia(deps: BackgroundDeps, parent: number, override?: RunVia): { cr
 
 function actorEntry(input: ReporterInput) {
 	const via = creatorVia(input.creator, input.creatorVia);
-	return { kind: "chat.message", data: { sender: input.creator, via: "background", ...(via === undefined ? {} : { authorityVia: via }) } };
+	return { kind: "chat.message", data: { sender: input.creator, via: "background", work: input.work ?? null, ...(via === undefined ? {} : { authorityVia: via }) } };
 }
 
 /** 报告任务：把消息投给子会话，等答案，再以 followUp 回报父会话。requestId 保证重启后不重发。导出供测试直接建任务。 */
@@ -285,7 +286,7 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 					return;
 				}
 				const submission = await child.submit(
-					{ type: "input", content, requestId: `bg:${String(runtime.taskId)}`, whenBusy: input.approval !== undefined || input.followUp ? "followUp" : "steer", entry: input.approval === undefined ? actorEntry(input) : { kind: input.approval.budgetId === undefined ? "dwell.approval.legacy" : "dwell.approval", data: { sender: input.approval.sender, via: input.approval.via ?? creatorVia(input.creator, input.creatorVia) ?? "feishu", ...(input.approval.budgetId === undefined ? {} : { budgetId: input.approval.budgetId }) } } },
+					{ type: "input", content, requestId: `bg:${String(runtime.taskId)}`, whenBusy: input.approval !== undefined || input.followUp ? "followUp" : "steer", entry: input.approval === undefined ? actorEntry(input) : { kind: input.approval.budgetId === undefined ? "dwell.approval.legacy" : "dwell.approval", data: { sender: input.approval.sender, via: input.approval.via ?? creatorVia(input.creator, input.creatorVia) ?? "feishu", work: input.work ?? null, ...(input.approval.budgetId === undefined ? {} : { budgetId: input.approval.budgetId }) } } },
 					context,
 				);
 				const settled = await submission.wait(context);
@@ -399,7 +400,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					const cap = backgroundCapViolation(live.filter((t) => (t.conversationId as number) === (api.conversationId as number)).length, live.length);
 					if (cap !== undefined) return cap;
 					await checkBackgroundWorkspace(tx, api.conversationId, existing.conversationId, api.taskId);
-					const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: existing.conversationId, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), followUp: args.followUp === true }, { ownership: { kind: "conversation" }, background: true });
+					const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: existing.conversationId, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), work: (await workIdentity(tx, existing.conversationId)) ?? null, followUp: args.followUp === true }, { ownership: { kind: "conversation" }, background: true });
 					await prepareBackgroundWorkspace(tx, api.conversationId, existing.conversationId, reporter);
 					return undefined;
 				}, context);
@@ -425,6 +426,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 				const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
 				// 子会话由锚持有：复制父 agent（cwd/模型/工具），再收掉递归派生工具
 				const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+				await inheritWork(tx, api.conversationId, child.id);
 				await configure(tx, child.id, {
 					// 移除后台/定时/托管进程扩展对象：子代理不能递归派生，也不起后台进程（任务定义随扩展走，子会话也不会跑这几类任务）
 					extensions: { remove: [...deps.forbidden()] },
@@ -435,7 +437,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 						`Do the job you were given, then end with a concise, self-contained summary of the result: your final answer is reported back to the main agent verbatim.`,
 				});
 				doc.agents[name] = { conversationId: child.id as number };
-				const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: child.id as number, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), followUp: false }, { ownership: { kind: "conversation" }, background: true });
+				const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: child.id as number, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), work: (await workIdentity(tx, child.id)) ?? null, followUp: false }, { ownership: { kind: "conversation" }, background: true });
 				await registerBackgroundWorkspace(tx, api.conversationId, child.id, mode, workspace, reporter);
 				return { ok: true, child: child.id as number };
 			}, context);
