@@ -16,6 +16,7 @@ import { getWork } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
+import { createTelegramStreamPresenter } from "./telegram-stream.ts";
 import { formatTelegramText } from "./telegram-format.ts";
 import { TelegramInbox, TelegramInputWorkers, telegramApprovalData, telegramApprovalMatch, type TelegramCommandReceipt, type TelegramInputReceipt } from "./telegram-entry.ts";
 import { Directory } from "./feishu/directory.ts";
@@ -942,11 +943,20 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 async function replyTelegram(id: string, conversation: Conversation, submission: Awaited<ReturnType<Conversation["submit"]>>): Promise<void> {
 	if (telegram === undefined || telegramReplies.has(id)) return;
 	telegramReplies.add(id);
+	let watch: Awaited<ReturnType<Conversation["watch"]>> | undefined;
+	let preview: ReturnType<typeof createTelegramStreamPresenter> | undefined;
+	let stoppingPreview: Promise<void> | undefined;
+	const stopPreview = (): Promise<void> => stoppingPreview ??= (async () => {
+		try { await watch?.stop(); }
+		catch { console.error("[dwell] Telegram 实时状态订阅关闭失败，将尝试投递最终结果"); }
+		await preview?.stop();
+	})();
 	try {
 		// A queued input can become a later generation with a different answer. Delay its
 		// placeholder until settlement so inputs merged into one answer share one reply.
 		let settled: Awaited<ReturnType<typeof submission.wait>> | undefined;
-		if ((await submission.status(BACKGROUND_CONTEXT)).status === "queued") {
+		const initial = await submission.status(BACKGROUND_CONTEXT);
+		if (initial.status === "queued") {
 			settled = await submission.wait(BACKGROUND_CONTEXT);
 			if (settled === undefined) throw new Error("Telegram 输入不存在");
 			if (settled.status === "done" && settled.type === "input" && !await telegramInbox.claimAnswer(id, settled.answer as number)) return;
@@ -961,7 +971,28 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 			await telegramInbox.output(id, "tracking", messageId);
 			await sessions.anchor(messageId, conversation.id);
 		}
+		{
+			try {
+				watch = await conversation.watch(BACKGROUND_CONTEXT);
+				const anchor = messageId;
+				preview = createTelegramStreamPresenter({
+					submissionId: submission.id as number,
+					inputEntryId: (settled?.entry ?? initial.entry) as number | undefined,
+					chatType: row.destination.chatId.startsWith("-") ? "group" : "p2p",
+					edit: (text) => telegram!.edit(row.destination, anchor, text, undefined, { format: "markdown", preview: true }),
+					onEditError: () => console.error("[dwell] Telegram 进度更新失败，已停止中间更新，将尝试投递最终结果"),
+				});
+				if (settled === undefined) {
+					preview.update(watch.value);
+					watch.start(async (value) => { preview!.update(value); });
+				}
+			} catch {
+				await stopPreview();
+				console.error("[dwell] Telegram 实时状态订阅失败，将尝试投递最终结果");
+			}
+		}
 		settled ??= await submission.wait(BACKGROUND_CONTEXT);
+		await stopPreview();
 		if (settled === undefined) throw new Error("Telegram 输入不存在");
 		let answer = "";
 		if (settled.status === "done" && settled.type === "input") {
@@ -971,6 +1002,8 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 			}
 			answer = (await presentAnswer(harness, conversation.id, settled.answer)).text || "（本次运行没有产出文本）";
 		} else answer = `处理失败：${await runFailureReason(conversation.id as number, settled)}`;
+		const execution = preview?.summary(watch?.value, settled.status === "done" && settled.type === "input" ? settled.answer as number : undefined);
+		if (execution) answer += `\n\n${execution}`;
 		if (answer.length <= 4096 && formatTelegramText(answer, "markdown").length === 1) await telegram.edit(row.destination, messageId, answer, undefined, { format: "markdown" });
 		else {
 			await telegram.edit(row.destination, messageId, "处理完成，结果见以下分段消息。");
@@ -984,7 +1017,7 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 		const uncertain = error instanceof TelegramError ? error.uncertain : row?.output === "sending";
 		if (row !== undefined) await telegramInbox.output(id, uncertain ? "uncertain" : "failed").catch(() => {});
 		console.error(`[dwell] Telegram 投递${uncertain ? "状态不确定，未自动重发" : "失败"}（${id}）:`, error);
-	} finally { telegramReplies.delete(id); }
+	} finally { await stopPreview(); telegramReplies.delete(id); }
 }
 
 async function presentTelegramSubmission(conversation: Conversation, submission: Awaited<ReturnType<Conversation["submit"]>>, target: ReplyTarget): Promise<void> {

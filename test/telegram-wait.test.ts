@@ -16,7 +16,8 @@ test("main Telegram presents a real background wait and later report in the orig
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([message(301, "/ask@AcceptanceBot Wait topic acceptance", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
 		await f.until((event) => event.method === "model.waiting" && event.body.token === "late-child");
-		await f.until((event) => event.method === "editMessageText" && event.body.text === BACKGROUND_WAIT_NOTICE);
+		const waiting = await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(`${BACKGROUND_WAIT_NOTICE}\n\n执行记录`));
+		assert.match(String(waiting.body.text), /dwell.task.wait.*已完成/);
 		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:301" && event.body.state === "done");
 		assert.equal(f.requests("model").length, 3, "The wait must settle without asking the provider for another answer");
 		f.release("late-child");

@@ -270,7 +270,8 @@ test("main Telegram approval buttons reject another member and admit one continu
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([message(20, "/ask@AcceptanceBot Remove the disposable fixture after approval.", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
 		const card = await f.until((event) => event.method === "sendMessage" && event.body.reply_markup !== undefined);
-		await f.until((event) => event.method === "editMessageText" && event.body.text === "Approval is required before continuing.");
+		const pending = await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith("Approval is required before continuing.\n\n执行记录"));
+		assert.match(String(pending.body.text), /bash.*失败或中断/);
 		assert.equal(await readFile(join(disposable, "marker.txt"), "utf8"), "The blocked command must not execute.");
 		assert.equal(f.requests("model").length, 2);
 		const blocked = (f.requests("model")[1].body.input as JsonRecord[]).find((item) => item.type === "function_call_output");

@@ -4,7 +4,7 @@ import { Server } from "node:http";
 import { TelegramInbox } from "../src/telegram-entry.ts";
 
 export type JsonRecord = Record<string, unknown>;
-export type ModelReply = ({ text: string } | { tool: string; arguments: JsonRecord } | { error: string; status: number }) & { wait?: string; match?: string };
+export type ModelReply = ({ text: string } | { tool: string; arguments: JsonRecord } | { error: string; status: number }) & { wait?: string; match?: string; partial?: { text: string; wait: string } };
 export interface MainFixtureEvent {
 	kind: "telegram" | "model" | "unexpected" | "checkpoint";
 	method?: string;
@@ -97,7 +97,7 @@ function updates(signal: AbortSignal): Promise<Response> {
 	});
 }
 
-function modelResponse(reply: ModelReply): Response {
+function modelResponse(reply: ModelReply, signal: AbortSignal): Response {
 	if ("error" in reply) return new Response(reply.error, { status: reply.status, headers: { "content-type": "application/json" } });
 	const id = `fixture-${nextId("responseId")}`;
 	const item = "text" in reply
@@ -120,7 +120,30 @@ function modelResponse(reply: ModelReply): Response {
 		{ type: "response.output_item.done", output_index: 0, item },
 		{ type: "response.completed", response: { id, status: "completed", output: [item], usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 } } },
 	);
-	return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+	const encode = (values: JsonRecord[]) => new TextEncoder().encode(values.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+	if ("text" in reply && reply.partial !== undefined) {
+		const partial = reply.partial;
+		if (!reply.text.startsWith(partial.text)) throw new Error("Fixture partial must prefix the final text");
+		const index = events.findIndex((event) => event.type === "response.output_text.delta");
+		const stream = new ReadableStream<Uint8Array>({
+			async start(controller) {
+				controller.enqueue(encode([...events.slice(0, index), { ...events[index], delta: partial.text }]));
+				if (!released.has(partial.wait)) await new Promise<void>((resolve, reject) => {
+					const abort = () => { waitingModels.delete(partial.wait); reject(new Error("Fixture partial stream aborted")); };
+					waitingModels.set(partial.wait, () => { signal.removeEventListener("abort", abort); resolve(); });
+					if (signal.aborted) abort();
+					else signal.addEventListener("abort", abort, { once: true });
+					report({ kind: "checkpoint", method: "model.stream.waiting", body: { token: partial.wait } });
+				});
+				if (signal.aborted) throw new Error("Fixture partial stream aborted");
+				const rest = reply.text.slice(partial.text.length);
+				controller.enqueue(encode([...(rest ? [{ ...events[index], delta: rest }] : []), ...events.slice(index + 1)]));
+				controller.close();
+			},
+		});
+		return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+	}
+	return new Response(encode(events), { headers: { "content-type": "text/event-stream" } });
 }
 
 globalThis.fetch = async (input, init) => {
@@ -145,7 +168,7 @@ globalThis.fetch = async (input, init) => {
 				report({ kind: "checkpoint", method: "model.waiting", body: { token } });
 			});
 		}
-		return modelResponse(reply);
+		return modelResponse(reply, signal);
 	}
 	if (url.origin === "https://api.telegram.org" && /^\/bot100:SYNTHETIC_TEST_TOKEN\/[a-zA-Z]+$/.test(url.pathname)) {
 		const method = url.pathname.split("/").at(-1)!;
