@@ -1,12 +1,64 @@
 // 消息管线判定：从 index.ts 抽出的无副作用判定（准入/空内容/降级路由/命令识别），副作用与顺序留在 index.ts。
-import type { NormalizedMessage } from "./feishu/channel.ts";
+export type TelegramDestination = { kind: "telegram"; botId: string; chatId: string; threadId?: string };
+export type ConversationDestination = { kind: "panel" } | { kind: "feishu"; chatId: string } | TelegramDestination;
+
+export interface ResourceDescriptor {
+	type: "image" | "file" | "audio" | "video" | "sticker";
+	fileKey: string;
+	fileName?: string;
+	durationMs?: number;
+	coverImageKey?: string;
+}
+
+export interface MentionInfo {
+	key: string;
+	openId?: string;
+	userId?: string;
+	name?: string;
+	isBot?: boolean;
+}
+
+export interface NormalizedMessage {
+	messageId: string;
+	chatId: string;
+	chatType: "p2p" | "group";
+	senderId: string;
+	senderName?: string;
+	content: string;
+	rawContentType: string;
+	resources: ResourceDescriptor[];
+	mentions: MentionInfo[];
+	mentionAll: boolean;
+	mentionedBot: boolean;
+	rootId?: string;
+	threadId?: string;
+	replyToMessageId?: string;
+	createTime: number;
+	raw?: unknown;
+	platform?: "feishu" | "telegram";
+	destination?: ConversationDestination;
+	requestId?: string;
+}
+
+export function messageDestination(msg: NormalizedMessage): ConversationDestination {
+	if (msg.destination !== undefined) return msg.destination;
+	if (msg.platform === "telegram") throw new Error("Telegram input requires an explicit destination");
+	return { kind: "feishu", chatId: msg.chatId };
+}
+
+export function sameDestination(a: ConversationDestination, b: ConversationDestination): boolean {
+	if (a.kind === "panel") return b.kind === "panel";
+	if (a.kind === "feishu") return b.kind === "feishu" && a.chatId === b.chatId;
+	return b.kind === "telegram" && a.botId === b.botId && a.chatId === b.chatId && a.threadId === b.threadId;
+}
 
 /** 命令表精确匹配首个空白分隔词：未知斜杠文本（如路径「/usr/bin 下有什么」）当普通输入交模型，不回「未知命令」。 */
 export const KNOWN_COMMANDS = new Set(["/help", "/whoami", "/new", "/status", "/cancel", "/approve", "/deny", "/allow", "/disallow"]);
 
-/** 群聊准入：话题内与回复已锚定消息视为显式指向（免 @），平消息仍需 @bot；非群聊不限。 */
+/** Telegram requires a transport-verified trigger; Feishu also admits topics and anchored replies. */
 export function groupAdmits(msg: NormalizedMessage, isAnchored: (messageId: string) => boolean): boolean {
 	if (msg.chatType !== "group" || msg.mentionedBot) return true;
+	if (msg.platform === "telegram" || msg.destination?.kind === "telegram") return false;
 	if (msg.threadId !== undefined) return true;
 	return msg.replyToMessageId !== undefined && isAnchored(msg.replyToMessageId);
 }

@@ -1,12 +1,13 @@
 import { realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
-export type PathBases = { cwd: string; tmp: string; state: string; appRoot: string; data: string; sqlite: string; modelConfig?: string };
+export type PathBases = { cwd: string; tmp: string; state: string; appRoot: string; data: string; sqlite: string; modelConfig?: string; readScope?: string };
 
 const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
 
 /** Inputs are already normalized, and all bases use the same physical namespace. */
 export function filePathViolation(tool: string, path: string, bases: PathBases): string | undefined {
+	if (bases.readScope !== undefined && !within(path, bases.readScope)) return "Access is limited to this session's working directory.";
 	if (path === bases.modelConfig) return "Access to the selected model configuration is not allowed.";
 	if (within(path, "/proc") || within(path, bases.state) || path.startsWith(bases.sqlite)
 		|| (within(path, bases.appRoot) && !within(path, bases.data))) {

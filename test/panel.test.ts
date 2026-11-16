@@ -5,7 +5,14 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload, isLocalSource, localAddresses, resolveDownload } from "../src/web/server.ts";
+import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload as upload, isLocalSource, localAddresses, resolveDownload } from "../src/web/server.ts";
+import { Uploads } from "../src/uploads.ts";
+
+const writer = await Uploads.open(tmpdir(), () => ({ enabled: false }));
+async function ingestUpload(cwd: string | undefined, name: unknown, data: unknown, describer: Parameters<typeof upload>[3]) {
+	if (cwd !== undefined) await writer.register(cwd);
+	return upload(cwd, name, data, describer, writer.save);
+}
 
 const HOSTS = new Set(["localhost", "10.0.0.5"]);
 
@@ -85,7 +92,7 @@ test("resolveDownload：cwd 内文件 200（real/name/size）", async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "hello");
 	// 期望值走 realpath：macOS 的 /var 是 /private/var 软链
-	assert.deepEqual(await resolveDownload(cwd, "a.txt"), { status: 200, real: await realpath(join(cwd, "a.txt")), size: 5, name: "a.txt" });
+	assert.deepEqual(await resolveDownload(cwd, "a.txt"), { status: 200, real: await realpath(join(cwd, "a.txt")), size: 5, name: "a.txt", buffer: Buffer.from("hello") });
 });
 
 test("resolveDownload：无 cwd 404 / 空 path 400 / 越界 403 / 目录与不存在 404", async (t) => {
@@ -127,7 +134,7 @@ test("ingestUpload：缺 name/data 400、空数据 400、超 10MB 413", async (t
 	assert.equal((await ingestUpload(cwd, "big.bin", Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"), null)).status, 413);
 });
 
-test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describer）", async (t) => {
+test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describer）", { skip: process.platform === "win32" }, async (t) => {
 	const cwd = await tempCwd(t);
 	const seen: string[] = [];
 	const result = await ingestUpload(cwd, "shot.png", PNG_BYTES.toString("base64"), async (base64, mime) => {
@@ -138,7 +145,7 @@ test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describ
 	if (result.status !== 200) return;
 	assert.equal(result.kind, "image");
 	assert.equal(result.size, PNG_BYTES.length);
-	assert.match(result.path, /^uploads\/[0-9a-f]{8}-shot\.png$/);
+	assert.match(result.path, /^uploads\/[0-9a-f]{32}-shot\.png$/);
 	assert.equal(result.part, `[图片1 ${result.path}]\n一张绿色按钮截图`);
 	assert.deepEqual(seen, [`image/png:${PNG_BYTES.toString("base64")}`]);
 	// 落盘文件确实存在且内容一致
@@ -147,14 +154,14 @@ test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describ
 	assert.ok(PNG_BYTES.equals(await readFile(join(cwd, "uploads", files[0]), null)));
 });
 
-test("ingestUpload：文本 → kind file，文件落在 cwd/uploads", async (t) => {
+test("ingestUpload：文本 → kind file，文件落在 cwd/uploads", { skip: process.platform === "win32" }, async (t) => {
 	const cwd = await tempCwd(t);
 	const result = await ingestUpload(cwd, "notes.txt", Buffer.from("hello dwell").toString("base64"), null);
 	assert.equal(result.status, 200);
 	if (result.status !== 200) return;
 	assert.equal(result.kind, "file");
 	assert.equal(result.size, 11);
-	assert.match(result.path, /^uploads\/[0-9a-f]{8}-notes\.txt$/);
-	assert.match(result.part, /^\[文件1\] [0-9a-f]{8}-notes\.txt（0\.0KB）已保存到 uploads\/[0-9a-f]{8}-notes\.txt，可用 read 工具读取。$/);
+	assert.match(result.path, /^uploads\/[0-9a-f]{32}-notes\.txt$/);
+	assert.match(result.part, /^\[文件1\] [0-9a-f]{32}-notes\.txt（0\.0KB）已保存到 uploads\/[0-9a-f]{32}-notes\.txt，可用 read 工具读取。$/);
 	assert.equal(await readFile(join(cwd, "uploads", result.path.slice("uploads/".length)), "utf8"), "hello dwell");
 });

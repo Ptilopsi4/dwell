@@ -1,9 +1,8 @@
 // Panel HTTP 服务：无内置鉴权（部署侧自行保证网络边界，可用 DWELL_PANEL_HOST 绑定内网接口），SSE 推流（transcript + live 状态），静态页面。
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createReadStream } from "node:fs";
-import { readFile, realpath, stat } from "node:fs/promises";
-import { join, dirname, resolve, basename } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
@@ -12,7 +11,10 @@ import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-d
 import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
-import { clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
+import { UploadError, type SaveUpload } from "../uploads.ts";
+import { FileError } from "@earendil-works/pi-durable/env";
+import { readWorkspaceFile } from "../guarded-env.ts";
+import { clampMinutes, conversationScope, fileGuardBases, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
@@ -32,6 +34,7 @@ interface PanelOptions {
 	describer: () => ImageDescriber | null;
 	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 延迟读取探测结果） */
 	sandbox: () => boolean;
+	saveUpload: SaveUpload;
 }
 
 /** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
@@ -126,17 +129,17 @@ export function isLocalSource(remote: string | undefined, localAddrs: ReadonlySe
 }
 
 /** GET /api/file 判定：限本会话 cwd 内的普通文件。cwd 缺失（root 会话不设 cwd）绝不能退回 process.cwd()——那是应用根。 */
-export async function resolveDownload(cwd: string | undefined, path: string): Promise<{ status: 200; real: string; size: number; name: string } | { status: 400 | 403 | 404; error: string }> {
+export async function resolveDownload(cwd: string | undefined, path: string): Promise<{ status: 200; real: string; size: number; name: string; buffer: Buffer } | { status: 400 | 403 | 404 | 413; error: string }> {
 	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
 	if (path === "") return { status: 400, error: "path required" };
 	if ((await sendPathViolation(path, cwd)) !== undefined) return { status: 403, error: "只能下载本会话工作目录内的文件" };
 	try {
-		// 判定过的真实路径再 stat，缩小「判定后换软链」的窗口（与 dwell.lark.send 同一纪律）
-		const real = await realpath(resolve(cwd, path));
-		const st = await stat(real);
-		if (!st.isFile()) return { status: 404, error: "不是普通文件" };
-		return { status: 200, real, size: st.size, name: basename(real) };
-	} catch {
+		const result = await readWorkspaceFile(path, fileGuardBases(cwd), 30 * 1024 * 1024, BACKGROUND_CONTEXT);
+		return { status: 200, ...result, size: result.buffer.length };
+	} catch (error) {
+		if (error instanceof FileError && error.code === "is_directory") return { status: 404, error: "不是普通文件" };
+		if (error instanceof FileError && error.code === "permission_denied") return { status: 403, error: "只能下载本会话工作目录内的文件" };
+		if (error instanceof FileError && error.code === "invalid") return { status: 413, error: "文件超过 30MB 限制或不是普通文件" };
 		return { status: 404, error: "文件不存在" };
 	}
 }
@@ -159,15 +162,22 @@ export async function ingestUpload(
 	name: unknown,
 	data: unknown,
 	describer: ImageDescriber | null,
-): Promise<{ status: 200; path: string; kind: "image" | "file"; size: number; part: string } | { status: 400 | 404 | 413; error: string }> {
+	save: SaveUpload,
+): Promise<{ status: 200; path: string; kind: "image" | "file"; size: number; part: string } | { status: 400 | 404 | 409 | 413 | 500 | 501; error: string }> {
 	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
 	if (typeof name !== "string" || name === "" || typeof data !== "string") return { status: 400, error: "name 与 data(base64) 必填" };
 	const buffer = Buffer.from(data, "base64");
 	if (buffer.length === 0) return { status: 400, error: "空文件" };
 	if (buffer.length > 10 * 1024 * 1024) return { status: 413, error: "超过 10MB 上限" };
 	const kind = sniffImageMime(buffer) !== null ? "image" : "file";
-	const { saved, part } = await ingestBuffer(buffer, { kind, index: 1, tag: `${randomBytes(4).toString("hex")}-`, name }, cwd, describer);
-	return { status: 200, path: saved, kind, size: buffer.length, part };
+	try {
+		const { saved, part } = await ingestBuffer(buffer, { kind, index: 1, tag: `${randomBytes(16).toString("hex")}-`, name }, cwd, describer, save);
+		return { status: 200, path: saved, kind, size: buffer.length, part };
+	} catch (err) {
+		if (!(err instanceof UploadError)) throw err;
+		const error = err.status === 409 ? "工作目录或上传目标发生变化，附件未保存，请重试。" : err.status === 501 ? "当前平台不支持安全附件上传。" : "附件保存失败，请检查磁盘和目录权限后重试。";
+		return { status: err.status, error };
+	}
 }
 
 async function readBody(req: IncomingMessage, maxBytes = 100_000): Promise<Record<string, unknown> | undefined> {
@@ -200,7 +210,7 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, port, describer, sandbox }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, port, describer, sandbox, saveUpload }: PanelOptions): void {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -289,16 +299,17 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			if (list.length === 0) {
 				// 本地/空库兜底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null, notify: false, emoji: null }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", platform: "panel", lastTs: 0, chatId: null, notify: false, emoji: null }];
 			}
 			// 后台任务子会话：挂在父会话下（type "task"；名字取父会话名册，停止后名册删除即从侧栏消失）
 			for (const [child, parent] of [...conversationScope.entries()]) {
-				if (!list.some((c) => c.id === parent)) continue;
+				const parentRow = list.find((c) => c.id === parent);
+				if (parentRow === undefined) continue;
 				const doc = await harness.snapshot(BackgroundDoc, parent as ConversationId, BACKGROUND_CONTEXT);
 				const name = Object.entries(doc?.agents ?? {}).find(([, v]) => v.conversationId === child)?.[0];
 				if (name === undefined) continue;
 				const busy = (await harness.snapshot(PiLiveDoc, child as ConversationId, BACKGROUND_CONTEXT))?.run !== undefined;
-				list.push({ id: child, key: `bg:${name}`, owner: "", name: `🧵 ${name}`, archived: false, type: "task", lastTs: 0, chatId: null, notify: false, emoji: null, parent, busy });
+				list.push({ id: child, key: `bg:${name}`, owner: "", name: `🧵 ${name}`, archived: false, type: "task", platform: parentRow.platform, lastTs: 0, chatId: null, notify: false, emoji: null, parent, busy });
 			}
 			const titled = await within(
 				Promise.all(list.map(async (c) => {
@@ -410,9 +421,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const result = await resolveDownload(cwd, url.searchParams.get("path") ?? "");
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
 			res.writeHead(200, downloadHeaders(result.name, result.size));
-			createReadStream(result.real)
-				.on("error", (err) => res.destroy(err))
-				.pipe(res);
+			res.end(result.buffer);
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/upload") {
@@ -422,7 +431,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const conversation = Number.isFinite(conv) ? await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT) : undefined;
 			if (conversation === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
-			const result = await ingestUpload(cwd, body?.name, body?.data, describer());
+			const result = await ingestUpload(cwd, body?.name, body?.data, describer(), saveUpload);
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
 			json(res, 200, { path: result.path, kind: result.kind, size: result.size, part: result.part });
 			return;

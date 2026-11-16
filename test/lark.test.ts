@@ -117,6 +117,24 @@ test("panel 会话（无对应 chat）给明确提示", async () => {
 	assert.match(out(r as never), /panel task.*no Feishu chat/);
 });
 
+test("Telegram conversations cannot read Feishu history even as an administrator", async () => {
+	let clientAccesses = 0;
+	const deps: LarkDeps = {
+		getClient: () => { clientAccesses++; throw new Error("must not access Feishu"); },
+		getDirectory: () => undefined,
+		chatOf: () => undefined,
+		destinationOf: () => ({ kind: "telegram", botId: "1", chatId: "2" }),
+		senderOf: () => "tg:123",
+		isAdmin: () => true,
+	};
+	for (const args of [{}, { chat: "oc_other" }, { around: "om_other" }]) {
+		const r = await toolOf(deps).execute(args, api, context);
+		assert.equal((r as { isError?: boolean }).isError, true);
+		assert.match(out(r as never), /Feishu chat history is unavailable in Telegram/);
+	}
+	assert.equal(clientAccesses, 0);
+});
+
 test("API 错误返回 isError", async () => {
 	const deps = {
 		getClient: () => ({
@@ -232,6 +250,24 @@ test("image：表情包/非图片/无描述器/消息不存在各给诚实提示
 	await run({ message_id: "om_x", msg_type: "text" }, async () => "", /not an image/);
 	await run({ message_id: "om_img", msg_type: "image", body: { content: JSON.stringify({ image_key: "k" }) } }, null, /No vision model is configured/);
 	await run(undefined, async () => "", /does not exist or the bot cannot read it/);
+});
+
+test("Telegram conversations cannot look up Feishu images even as an administrator", async () => {
+	let clientAccesses = 0;
+	const extension = makeLarkExtension({
+		getClient: () => { clientAccesses++; throw new Error("must not access Feishu"); },
+		getDirectory: () => undefined,
+		chatOf: () => undefined,
+		destinationOf: () => ({ kind: "telegram", botId: "1", chatId: "2" }),
+		senderOf: () => "tg:123",
+		isAdmin: () => true,
+	});
+	const tool = extension.tools?.find((tool) => tool.name === "dwell.lark.image");
+	assert.ok(tool);
+	const r = await tool.execute({ message: "om_other" }, api, context);
+	assert.equal((r as { isError?: boolean }).isError, true);
+	assert.match(out(r as never), /Feishu image lookup is unavailable in Telegram/);
+	assert.equal(clientAccesses, 0);
 });
 
 // ── dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话 ──

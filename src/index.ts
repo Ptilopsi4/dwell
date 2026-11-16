@@ -1,6 +1,7 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
-import { readFile, realpath } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
+import { Uploads } from "./uploads.ts";
+import { readWorkspaceFile } from "./guarded-env.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, type Conversation, type ConversationId, type Harness, type SubmissionId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
@@ -15,8 +16,9 @@ import { connectChannel, downloadMessageResource, matchMention, type CardActionE
 import { emptyReply, fallbackRoute, groupAdmits, messageAction } from "./pipeline.ts";
 import { Directory } from "./feishu/directory.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
-import { approvals, clampMinutes, conversationScope, decisionInput, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, scopeOf, setApprovalCallback, splitTargets, takeDecision, windowKey, type PendingApproval } from "./ext/approval.ts";
+import { approvals, clampMinutes, conversationScope, decisionInput, fileGuardBases, loadApprovalState, makePathGuardExtension, persistApprovals, pendingApprovals, runSender, runVia, scopeOf, setApprovalCallback, splitTargets, takeDecision, windowKey, type PendingApproval } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
+import { makeSendExtension } from "./ext/send.ts";
 import { makeScheduleExtension } from "./ext/schedule.ts";
 import { backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension } from "./ext/background.ts";
 import { makeProcExtension } from "./ext/proc.ts";
@@ -25,6 +27,7 @@ type ReplyTarget = { chatId: string; messageId: string };
 
 let harness: Harness;
 let sessions: Sessions;
+let uploads: Uploads;
 let channel: LarkChannel;
 const users = new Users();
 let directory: Directory;
@@ -123,6 +126,7 @@ async function main(): Promise<void> {
 			getClient: () => channel?.rawClient,
 			getDirectory: () => directory,
 			chatOf: (id) => sessions.chatOf(scopeOf(id)),
+			destinationOf: (id) => sessions.destinationOf(scopeOf(id)),
 			getDescriber: () => imageDescriber,
 			isAdmin: (id) => users.isAdmin(id),
 			senderOf: (id) => runSender.get(scopeOf(id)),
@@ -131,6 +135,17 @@ async function main(): Promise<void> {
 			sendToChat: async (id, input) => {
 				const scope = scopeOf(id);
 				const sent = await sendToConversationChat(scope, input);
+				if (sent !== undefined) await sessions.anchor(sent.messageId, scope as ConversationId);
+				return sent;
+			},
+		}),
+		makeSendExtension({
+			destinationOf: (id) => sessions.destinationOf(scopeOf(id)),
+			send: async (id, input) => {
+				const scope = scopeOf(id);
+				const sent = await sendToConversationChat(scope, input.image
+					? { image: { source: input.buffer } }
+					: { file: { source: input.buffer, fileName: input.fileName } });
 				if (sent !== undefined) await sessions.anchor(sent.messageId, scope as ConversationId);
 				return sent;
 			},
@@ -145,7 +160,9 @@ async function main(): Promise<void> {
 		backgroundExt,
 		procExt,
 	], onReport);
-	sessions = new Sessions(harness);
+	uploads = await Uploads.open(resolve(DATA_DIR, "work"), () => sandboxState);
+	await uploads.register(DEFAULT_CWD);
+	sessions = new Sessions(harness, (cwd) => uploads.register(cwd));
 	await sessions.load();
 	// 后台子会话 → 父会话映射重建（审批窗口按父线开；重启后 approval 扩展立即能用）
 	await rebuildConversationScope();
@@ -213,7 +230,7 @@ async function main(): Promise<void> {
 	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
-		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled });
+		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled, saveUpload: uploads.save });
 		if (process.env.DWELL_PANEL_ONLY === "1") {
 			console.log("[dwell] panel-only 模式（未连接飞书）");
 			if (githubEnabled()) void githubCheck();
@@ -400,6 +417,7 @@ async function mediaStreamAndReply(conversation: Conversation, msg: NormalizedMe
 					const attachment = await describeResources(msg, cwd, {
 						download: (fileKey, type) => downloadMessageResource(channel, msg.messageId, fileKey, type),
 						describer: imageDescriber,
+						save: uploads.save,
 					});
 					const text = msg.content.trim();
 					submission = await submitInput(conversation, text === "" ? attachment : `${text}\n\n${attachment}`, msg);
@@ -1031,12 +1049,10 @@ const feishuBridge: FeishuBridge = {
 			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd;
 			if (cwd === undefined) throw new Error("该会话没有工作目录");
 			for (const a of attachments) {
-				// 读判定过的真实路径而非字面路径（与 dwell.lark.send 同一纪律）；图片走图片消息，其余走文件消息
-				const real = await realpath(resolve(cwd, a.path));
-				const buffer = await readFile(real);
+				const { buffer, name } = await readWorkspaceFile(a.path, fileGuardBases(cwd), 30 * 1024 * 1024, BACKGROUND_CONTEXT);
 				const input: SendInput = sniffImageMime(buffer) !== null && buffer.length <= 10 * 1024 * 1024
 					? { image: { source: buffer } }
-					: { file: { source: buffer, fileName: basename(real) } };
+					: { file: { source: buffer, fileName: name } };
 				const sent = await sendToConversationChat(id, input);
 				if (sent === undefined) throw new Error("该会话没有对应的飞书 chat");
 				await sessions.anchor(sent.messageId, conversation.id);

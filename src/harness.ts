@@ -5,7 +5,7 @@ import { join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentDoc, createRegistry, defineExtension, Harness, section, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -13,7 +13,7 @@ import { makeApprovalExtension, setModelConfigGuard } from "./ext/approval.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import { scanLiveTasks } from "./ext/schedule.ts";
 import type { SandboxState } from "./sandbox.ts";
-import { DATA_DIR, DEFAULT_CWD, DWELL_TZ } from "./state.ts";
+import { APP_ROOT, DATA_DIR, DEFAULT_CWD, DWELL_TZ, STATE_DIR } from "./state.ts";
 import { configuredSecretEnv, createModelClient, loadModelsConfig, type ResolvedModelConnection } from "./models.ts";
 
 export const MODEL_CONFIG = loadModelsConfig();
@@ -226,6 +226,8 @@ export async function checkResumableModels(harness: Pick<Harness, "commit">, mod
 export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
+	await mkdir(DEFAULT_CWD, { recursive: true });
+	await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
 	if (MODEL_CONFIG.path !== undefined) await checkModelConfigBoundary(MODEL_CONFIG.path);
 	setModelConfigGuard(MODEL_CONFIG.path);
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
@@ -241,14 +243,15 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 
 	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
 	// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
-	const env = async ({ cwd }: { cwd?: string }) => {
+	const env = async ({ cwd, readScope }: { cwd?: string; readScope?: string }) => {
 		if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
-		return new NodeExecutionEnv({
+		return GuardedExecutionEnv.create({
 			cwd: resolve(cwd ?? DEFAULT_CWD),
 			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
 			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
 			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
-		});
+		}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
+			data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 	};
 	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
 	try {
