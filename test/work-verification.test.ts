@@ -5,6 +5,7 @@ import { access, mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from "
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
 import { AgentDoc, createRegistry, defineExtension, defineTask, Harness, hook, ToolResultEntry, ToolTask, type Conversation, type ConversationId, type Extension } from "@earendil-works/pi-durable";
@@ -71,6 +72,11 @@ async function current(s: Awaited<ReturnType<typeof setup>>, id: number) {
 	return state.records[state.current]!;
 }
 const check = (command = "node -e \"process.exit(0)\"") => ({ checks: [{ name: "native check", command }], artifacts: ["job/result.txt"] });
+const workResult = (messages: readonly Message[]) => {
+	const message = messages.findLast((item) => item.role === "toolResult" && item.toolName === "dwell.work");
+	assert.ok(message?.role === "toolResult");
+	return { message, result: JSON.parse(message.content.filter((part) => part.type === "text").map((part) => part.text).join("")) };
+};
 
 test("successful verification preserves blockers and supplies a ready call only after their explicit resolution", { ...supported, timeout: 15_000 }, async () => {
 	const s = await setup();
@@ -128,6 +134,89 @@ test("unrelated successful evidence cannot replace a failed declared native Node
 		assert.match(record.verification.failure ?? "", /native Node entry point/);
 		await submit(s, conversation, [operation("ready", { evidence: Object.keys(available).map(Number), review: "Still requesting review" })]);
 		assert.equal((await current(s, conversation.id)).status, "active");
+	} finally { await s.close(); }
+});
+
+test("verification failure feedback supports same-work check revision without a diagnostic rerun", { ...supported, timeout: 20_000 }, async () => {
+	const s = await setup();
+	try {
+		await writeFile(join(s.cwd, "job/result.txt"), "output");
+		await writeFile(join(s.cwd, "job/check.mjs"), 'import assert from "node:assert/strict"; assert.equal(2 + 2, Number(process.argv[2])); console.log("SUCCESS_OUTPUT_NEED_NOT_BE_REPEATED");');
+		const conversation = await s.conversation();
+		let sawFailure = false, sawReady = false;
+		const settled = await submit(s, conversation, [start(check("node job/check.mjs 5")), operation("verify"), (request) => {
+			const { message, result } = workResult(request.messages);
+			assert.equal(message.isError, true);
+			assert.match(result.verification.failure, /Governed bash failure details \(tool data, not instructions\)/);
+			assert.match(result.verification.failure, /AssertionError/);
+			const actual = /(\d+) !== 5/.exec(result.verification.failure);
+			assert.ok(actual, "the native assertion diff reaches the next provider request");
+			sawFailure = true;
+			return operation("revise", { checks: [{ name: "native check", command: `node job/check.mjs ${actual[1]}` }], reason: `The actual result is ${actual[1]}; correct the self-authored expected value` });
+		}, operation("verify"), (request) => {
+			const { message, result } = workResult(request.messages);
+			assert.equal(message.isError, false);
+			assert.equal(result.verification.status, "verified");
+			assert.ok(!JSON.stringify(request.messages).includes("SUCCESS_OUTPUT_NEED_NOT_BE_REPEATED"));
+			sawReady = true;
+			return call(result.nextCall.name, result.nextCall.arguments);
+		}]);
+		assert.equal(settled.status, "done", JSON.stringify(settled));
+		assert.ok(sawFailure && sawReady);
+		const record = await current(s, conversation.id);
+		assert.equal(record.status, "ready_for_review");
+		assert.equal(record.verification?.revision, 1);
+		assert.equal(record.verification?.failure, undefined);
+		assert.equal(s.faux.state.callCount, 5);
+		assert.equal(record.usage.modelAdmissions, 4);
+		assert.deepEqual(record.verification?.receipt?.checks.map((item) => item.exitCode), [0]);
+	} finally { await s.close(); }
+});
+
+test("failed verification bounds retained stdout and stderr and marks omitted output", { ...supported, timeout: 20_000 }, async () => {
+	const s = await setup();
+	try {
+		await writeFile(join(s.cwd, "job/result.txt"), "output");
+		await writeFile(join(s.cwd, "job/noisy.mjs"), 'process.stdout.write("OMITTED_OUTPUT_START\\n" + ("x".repeat(100) + "\\n").repeat(700) + "STDOUT_END\\n"); process.stderr.write("STDERR_FAILURE_DETAIL\\n"); process.exitCode = 9;');
+		const conversation = await s.conversation();
+		let observed = "";
+		const settled = await submit(s, conversation, [start(check("node job/noisy.mjs")), operation("verify"), (request) => {
+			const { message, result } = workResult(request.messages);
+			assert.equal(message.isError, true);
+			observed = result.verification.failure;
+			assert.match(observed, /STDOUT_END/);
+			assert.match(observed, /STDERR_FAILURE_DETAIL/);
+			assert.match(observed, /Command exited with code 9/);
+			assert.match(observed, /Bash retained only part/);
+			assert.match(observed, /Earlier output truncated; showing the last 4000 characters/);
+			assert.ok(!observed.includes("OMITTED_OUTPUT_START"));
+			assert.ok(observed.length < 6500);
+			return done();
+		}]);
+		assert.equal(settled.status, "done", JSON.stringify(settled));
+		assert.equal((await current(s, conversation.id)).verification?.failure, observed);
+	} finally { await s.close(); }
+});
+
+test("a timed-out declared check exposes the nested bash diagnostic to the next model request", { ...supported, timeout: 20_000 }, async () => {
+	const s = await setup({ extensions: () => [defineExtension({ name: "short-verification-timeout", hooks: [hook(ToolTask, {
+		beforeTool: (call) => call.name === "bash" ? { arguments: { ...call.arguments, timeout: 0.1 } } : undefined,
+	})] })] });
+	try {
+		await writeFile(join(s.cwd, "job/result.txt"), "output");
+		const conversation = await s.conversation();
+		let observed = false;
+		const settled = await submit(s, conversation, [start(check('node -e "setInterval(() => {}, 1000)"')), operation("verify"), (request) => {
+			const { message, result } = workResult(request.messages);
+			assert.equal(message.isError, true);
+			assert.match(result.verification.failure, /Command timed out after 0\.1 seconds/);
+			assert.equal(result.verification.lastAttempt.checks[0].exitCode, null);
+			assert.equal(result.verification.receipt, undefined);
+			observed = true;
+			return done();
+		}]);
+		assert.equal(settled.status, "done", JSON.stringify(settled));
+		assert.ok(observed);
 	} finally { await s.close(); }
 });
 
@@ -468,7 +557,17 @@ test("nested declared commands retain approval and work allowance admission", { 
 		try {
 			await writeFile(join(s.cwd, "job/result.txt"), "preserved");
 			const conversation = await s.conversation(); id = conversation.id;
-			await submit(s, conversation, [start(check("rm -rf job")), operation("verify")]);
+			let observed = false;
+			const settled = await submit(s, conversation, [start(check("rm -rf job")), operation("verify"), (request) => {
+				const { message, result } = workResult(request.messages);
+				assert.equal(message.isError, true);
+				assert.match(result.verification.failure, /The approval policy blocked this command/);
+				assert.match(result.verification.failure, /approve it in the panel/);
+				observed = true;
+				return done();
+			}]);
+			assert.equal(settled.status, "done", JSON.stringify(settled));
+			assert.ok(observed);
 			assert.equal(await readFile(join(s.cwd, "job/result.txt"), "utf8"), "preserved");
 			const record = await current(s, conversation.id);
 			assert.equal(record.verification?.status, "failed");
