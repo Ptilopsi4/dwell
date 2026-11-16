@@ -15,22 +15,22 @@
 	--secondary: #f0f1f4; --secondary-foreground: #3b3d45;
 	--muted: #f3f4f6; --muted-foreground: #6c707a;
 	--accent: #eceef2; --accent-foreground: #1c1d21;
-	--destructive: #d93f4c; --border: #e5e6ea; --input: #e1e3e8; --ring: #5e5ce6;
+	--destructive: #c33341; --destructive-foreground: #ffffff; --border: #e5e6ea; --input: #e1e3e8; --ring: #5e5ce6;
 	--side: #f5f6f8; --raised: #ffffff; --hover: rgb(0 0 0 / .045); --sel: rgb(0 0 0 / .07);
-	--ok: #1f9d63; --warn: #c27c0e; --faint: #9a9ea8;
+	--ok: #1f9d63; --warn: #c27c0e; --faint: #666b75;
 	--shadow: 0 1px 2px rgb(0 0 0 / .05), 0 4px 16px rgb(0 0 0 / .06);
 	--radius: .5rem;
 }
 :root.dark {
 	--background: #101114; --foreground: #e3e4e8; --card: #16171b; --card-foreground: #e3e4e8;
 	--popover: #1b1c21; --popover-foreground: #e3e4e8;
-	--primary: #7b79f2; --primary-foreground: #ffffff;
+	--primary: #7b79f2; --primary-foreground: #101114;
 	--secondary: #23242a; --secondary-foreground: #c9cad1;
 	--muted: #1c1d22; --muted-foreground: #8b8e98;
 	--accent: #222329; --accent-foreground: #e3e4e8;
-	--destructive: #f06b74; --border: #24252b; --input: #2c2d34; --ring: #7b79f2;
+	--destructive: #f06b74; --destructive-foreground: #101114; --border: #24252b; --input: #2c2d34; --ring: #7b79f2;
 	--side: #0c0d10; --raised: #17181c; --hover: rgb(255 255 255 / .04); --sel: rgb(255 255 255 / .07);
-	--ok: #4cc38a; --warn: #e2a93b; --faint: #5f626b;
+	--ok: #4cc38a; --warn: #e2a93b; --faint: #8b8e98;
 	--shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
 }
 html, body { height: 100%; }
@@ -121,7 +121,7 @@ svg.i.sm { width: 14px; height: 14px; }
 .menu button:hover { background: var(--hover); }
 .menu button.danger { color: var(--destructive); }
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 2px; }
-.confirm-inline { color: var(--destructive) !important; font-weight: 600; }
+.confirm-inline { background: var(--destructive) !important; color: var(--destructive-foreground) !important; font-weight: 600; }
 
 main { flex: 1; overflow-y: auto; }
 #log { padding-top: 1.5rem; padding-bottom: 2.5rem; }
@@ -1279,9 +1279,11 @@ $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 }, "确认停止?");
 // 后台任务子会话：只中止子会话的当前 run，子代理留在名册里可继续 send（移除走模型的 dwell.task stop）；不影响父线
 $("stopTaskBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
-	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
-	toast("已中止当前运行");
-	loadConvs(true);
+	try {
+		await api("abort", { conv: Number(convId) });
+		toast("已中止当前运行");
+		await loadConvs(true);
+	} catch (error) { toast(error.message, true); }
 }, "中止当前运行?");
 async function setArchived(archived) {
 	try { await api("archive", { id: Number(convId), archived }); await loadConvs(true); } catch (e) { toast(e.message, true); }
