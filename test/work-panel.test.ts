@@ -41,5 +41,10 @@ test("work acceptance requires the trusted panel route and records its operator 
 	const saved = await (await fetch(base + `/api/work?id=${conversation.id}`)).json();
 	assert.equal(saved.records[record.id].status, "accepted");
 	assert.equal(saved.records[record.id].acceptedBy, "tg:700");
-	assert.equal((await fetch(base + "/api/work/accept", { method: "POST", headers: { "content-type": "application/json" }, body })).status, 409);
+	const duplicate = await fetch(base + "/api/work/accept", { method: "POST", headers: { "content-type": "application/json" }, body });
+	assert.equal(duplicate.status, 409);
+	assert.match((await duplicate.json()).error, /工作状态已变化，请刷新记录/);
+	const missing = await fetch(base + "/api/work/accept", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: conversation.id, workId: "missing" }) });
+	assert.equal(missing.status, 409);
+	assert.match((await missing.json()).error, /工作记录不存在，请刷新记录/);
 });

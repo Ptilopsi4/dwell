@@ -314,6 +314,16 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 .rnote { margin: 0 0 .5rem; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
 .role { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 5px; background: var(--secondary); color: var(--muted-foreground); }
 .role.admin { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary); }
+.work-record { border-top: 1px solid var(--border); padding: .75rem 0; font-size: 14px; }
+.work-record > summary { cursor: pointer; overflow-wrap: anywhere; line-height: 1.6; }
+.work-record .role { display: inline-block; margin-inline-start: .4rem; }
+.work-section { margin-top: .8rem; }
+.work-section h3 { margin: 0 0 .25rem; font-size: 13px; font-weight: 600; }
+.work-section p, .work-section ul { margin: .25rem 0; }
+.work-section ul { padding-inline-start: 1.2rem; }
+.work-copy { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.work-result { margin-top: .6rem; color: var(--destructive); }
+#workList { max-height: 60vh; overflow: auto; }
 </style>
 </head>
 <body>
@@ -356,6 +366,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="archiveBtn">归档</button>
 				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
+				<button id="workBtn">工作记录与验收</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
 					<button id="newGoalBtn">开启新目标</button>
 				<hr>
@@ -390,7 +401,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 	</div>
 </div>
 
-<dialog class="dialog" id="sheet">
+<dialog class="dialog" id="sheet" aria-labelledby="sheetTitle">
 	<form class="dlg-body" method="dialog">
 		<h6 id="sheetTitle"></h6>
 		<div id="sheetBody"></div>
@@ -1274,6 +1285,7 @@ $("newGoalBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 		toast(result.changed ? "已开启新目标，聊天历史保留。请发送新的目标。" : "当前没有工作目标，请直接发送新的目标。");
 	} catch (err) { toast(err.message, true); }
 }, "保留历史并开启新目标?");
+$("workBtn").onclick = () => { closeMenu(); openWork(Number(convId)); };
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 }, "确认停止?");
@@ -1428,6 +1440,88 @@ async function openUsers() {
 	$("uAddAdmin").onclick = () => add("admin");
 }
 $("usersBtn").onclick = openUsers;
+
+/* Work acceptance reuses the trusted host API; no model request or verification command is run here. */
+async function openWork(id, selectedWorkId) {
+	$("sheetTitle").textContent = "工作记录与验收";
+	$("sheetBody").innerHTML = `<p class="rnote">对照目标、验收标准与检查结果审阅产物，再确认验收。需要修改时，关闭此窗口并在任务线发送要求。</p>
+		<div id="workList" aria-live="polite"></div>
+		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" type="button" id="refreshWork">刷新记录</button><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
+	const list = $("workList");
+	const refresh = $("refreshWork");
+	const load = async (focusWorkId = selectedWorkId) => {
+		refresh.disabled = true;
+		list.textContent = "正在读取工作记录…";
+		try {
+			const work = await api(`work?id=${id}`);
+			if (!list.isConnected) return;
+			list.replaceChildren();
+			const records = Object.values(work.records).sort((a, b) => Number(b.id === work.current) - Number(a.id === work.current) || b.createdAt - a.createdAt);
+			if (records.length === 0) list.textContent = work.inherited ? "这是后台子任务，工作记录保存在父任务线。" : "暂无工作记录。普通聊天不需要创建工作记录。";
+			for (const record of records) {
+				const row = document.createElement("details");
+				row.className = "work-record";
+				row.open = record.id === (focusWorkId ?? work.current);
+				const heading = document.createElement("summary");
+				heading.textContent = record.goal;
+				const status = document.createElement("span");
+				status.className = "role";
+				status.textContent = ({ active: "进行中", ready_for_review: "待验收", accepted: "已验收" })[record.status];
+				heading.appendChild(status);
+				row.appendChild(heading);
+				const section = (title, value) => {
+					const group = document.createElement("section"); group.className = "work-section";
+					const label = document.createElement("h3"); label.textContent = title; group.appendChild(label);
+					if (Array.isArray(value)) {
+						const lines = document.createElement("ul");
+						for (const text of value) { const line = document.createElement("li"); line.className = "work-copy"; line.textContent = text; lines.appendChild(line); }
+						group.appendChild(lines);
+					} else { const text = document.createElement("p"); text.className = "work-copy"; text.textContent = value; group.appendChild(text); }
+					row.appendChild(group);
+				};
+				section("验收标准", record.acceptance);
+				if (record.progress) section("进度说明", record.progress);
+				if (record.blockers.length) section("待解决事项", record.blockers);
+				const verification = record.verification;
+				if (verification) {
+					section("产物范围", verification.contract.artifacts);
+					const receipt = verification.receipt;
+					section("验证记录", receipt ? receipt.checks.map((check) => `${check.name}：退出码 ${check.exitCode}`) : "尚无成功的验证回执。");
+					if (receipt) section("验证时间", `${new Date(receipt.verifiedAt).toLocaleString()} · ${receipt.manifest.files} 个文件 · ${receipt.manifest.bytes} 字节`);
+					if (verification.status !== "verified") section("验证状态", verification.failure || "需要重新运行验证。");
+				} else section("验证状态", "未声明验证契约，请自行核对产物与证据。");
+				if (record.review) section("交付说明（Agent）", record.review);
+				if (record.evidence.length) section("补充证据", record.evidence.map((entry) => `工具回执 #${entry}`));
+				if (record.stopped) section("任务已停止", "工作预算已耗尽，可保留本记录并开启新目标。");
+				if (record.status === "accepted") section("验收记录", `${record.acceptedBy} · ${new Date(record.acceptedAt).toLocaleString()}`);
+				if (record.status === "ready_for_review") {
+					const note = document.createElement("p"); note.className = "rnote work-section";
+					note.textContent = verification ? "确认时会重新核对文件版本；不会再次执行检查命令。通过检查仍需要你判断是否符合要求。" : "这项工作没有验证契约。确认前请自行核对产物与证据。";
+					row.appendChild(note);
+					const accept = document.createElement("button"); accept.type = "button"; accept.className = "btn"; accept.dataset.size = "sm"; accept.textContent = "确认验收";
+					const result = document.createElement("p"); result.className = "work-result work-copy"; result.setAttribute("role", "status");
+					accept.onclick = (event) => armConfirm(event.currentTarget, async () => {
+						accept.disabled = true; refresh.disabled = true; result.textContent = "正在确认验收…";
+						try {
+							await api("work/accept", { id, workId: record.id });
+							toast("已记录验收。");
+							if (list.isConnected) await load(record.id);
+						} catch (error) {
+							const detail = /^\d{3} /.test(error.message) ? error.message.replace(/^\d{3} /, "") : "验收请求未完成，结果尚未确认。";
+							result.textContent = `${detail} 请刷新记录确认状态。`;
+						} finally { accept.disabled = false; refresh.disabled = false; }
+					}, verification ? "确认产物符合要求？" : "确认验收未验证的工作？");
+					row.append(accept, result);
+				}
+				list.appendChild(row);
+			}
+		} catch (error) { if (list.isConnected) list.textContent = `读取失败：${error.message} 请点击“刷新记录”重试。`; }
+		finally { refresh.disabled = false; }
+	};
+	refresh.onclick = () => load();
+	if (!$("sheet").open) $("sheet").showModal();
+	await load();
+}
 
 /* ── 运行告警：服务端保留最近 50 条（重启即清），已读位置只存本浏览器 ── */
 let reports = [];

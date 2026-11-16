@@ -398,7 +398,17 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			if (!Number.isSafeInteger(id) || id <= 0 || workId === "") throw new HttpError(400, "会话 ID 和工作记录 ID 为必填项");
 			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
 			try { json(res, 200, await acceptWork(harness, id, workId, feishu.operator())); }
-			catch (error) { throw new HttpError(409, error instanceof Error ? error.message : "无法确认验收"); }
+			catch (error) {
+				const messages: Record<string, string> = {
+					"Work record not found": "工作记录不存在，请刷新记录。",
+					"Work must be ready for review before acceptance": "工作状态已变化，请刷新记录。只有待验收的工作才能确认验收。",
+					"Run verify successfully before requesting review or accepting this work": "缺少有效的验证回执，请让 Agent 完成验证后重新提交验收。",
+					"Verified artifacts changed; run verify again before review or acceptance": "验证后的产物已发生变化，请让 Agent 重新验证后再提交验收。",
+					"Work verification changed during acceptance": "验收期间验证记录已更新，请刷新记录后重新核对。",
+				};
+				console.error("[dwell] 工作验收未通过:", error);
+				throw new HttpError(409, messages[error instanceof Error ? error.message : ""] ?? "无法确认验收，请检查工作区和产物后重试。");
+			}
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/users") {
