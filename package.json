@@ -8,6 +8,7 @@
   },
   "scripts": {
     "smoke": "node --env-file-if-exists=.env src/smoke.ts",
+    "eval": "node --env-file-if-exists=.env eval/run.ts",
     "backup": "node src/backup.ts",
     "check": "tsc --noEmit",
     "test": "node --test --test-concurrency=2 \"test/*.test.ts\"",
