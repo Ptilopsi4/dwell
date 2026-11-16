@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { NormalizedMessage, TelegramDestination } from "./pipeline.ts";
 import { stateFile, writeStateJson } from "./state.ts";
+import { formatTelegramText, type TelegramTextFormat } from "./telegram-format.ts";
 
 export interface TelegramIdentity { id: string; username: string }
 export interface TelegramCallback {
@@ -156,6 +157,7 @@ export class TelegramBot {
 	#cooldown = 0;
 	#queues = new Map<string, Promise<unknown>>();
 	#lastSend = new Map<string, number>();
+	#invalidEntityErrors = new WeakSet<TelegramError>();
 	#now: () => number;
 	#sleep: (ms: number, signal: AbortSignal) => Promise<void>;
 	private constructor(options: ConnectOptions, identity: TelegramIdentity) {
@@ -257,6 +259,8 @@ export class TelegramBot {
 				if (attempt < 2 && (retryAfter ?? 1) <= 60) continue;
 			}
 			const error = new TelegramError(`Telegram API 请求失败（${code}）`, { code, retryAfter });
+			if (code === 400 && typeof payload.description === "string"
+				&& /\bentit(?:y|ies)\b|\bENTITY_BOUNDS_INVALID\b/i.test(payload.description)) this.#invalidEntityErrors.add(error);
 			if (code === 401 || code === 409) this.#fail(error);
 			throw error;
 		}
@@ -336,35 +340,43 @@ export class TelegramBot {
 		void operation.finally(() => { if (this.#queues.get(key) === operation) this.#queues.delete(key); }).catch(() => {});
 		return operation;
 	}
+	async #messageApi<T>(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string): Promise<T> {
+		try { return await this.#api<T>(method, body, true, destination); }
+		catch (error) {
+			if (body instanceof FormData || !Array.isArray(body.entities) || !body.entities.length
+				|| !(error instanceof TelegramError) || !this.#invalidEntityErrors.has(error)) throw error;
+			// Only an explicit entity rejection proves the first mutation did not succeed.
+			const { entities: _entities, ...plain } = body;
+			return this.#api<T>(method, plain, true, destination);
+		}
+	}
 	async #sendOne(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string): Promise<string> {
-		const result = await this.#queued(destination, () => this.#api<{ message_id: number }>(method, body, true, destination));
+		const result = await this.#queued(destination, () => this.#messageApi<{ message_id: number }>(destination, body, method));
 		if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new TelegramError("Telegram 未返回有效消息锚点", { uncertain: true });
 		return telegramMessageKey(destination, result.message_id);
 	}
-	async send(destination: TelegramDestination, text: string, options: { replyTo?: string; buttons?: TelegramButton[][] } = {}): Promise<TelegramSent> {
+	async send(destination: TelegramDestination, text: string, options: { replyTo?: string; buttons?: TelegramButton[][]; format?: TelegramTextFormat } = {}): Promise<TelegramSent> {
 		if (!text) throw new TelegramError("Telegram 消息不能为空");
 		const address = this.#address(destination, options.replyTo);
 		const markup = this.#markup(options.buttons);
-		const chunks: string[] = [];
-		for (let start = 0; start < text.length;) {
-			let end = Math.min(start + 4096, text.length);
-			// A conservative UTF-16 limit also keeps surrogate pairs intact.
-			if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
-			chunks.push(text.slice(start, end)); start = end;
-		}
+		const chunks = formatTelegramText(text, options.format ?? "plain");
 		const messageIds: string[] = [];
 		for (let i = 0; i < chunks.length; i++) messageIds.push(await this.#sendOne(destination, {
-			...address, text: chunks[i], ...(i === chunks.length - 1 && markup ? { reply_markup: markup } : {}),
+			...address, text: chunks[i]!.text, ...(chunks[i]!.entities.length ? { entities: chunks[i]!.entities } : {}),
+			...(i === chunks.length - 1 && markup ? { reply_markup: markup } : {}),
 		}, "sendMessage"));
 		return { messageId: messageIds.at(-1)!, messageIds };
 	}
-	async edit(destination: TelegramDestination, messageId: string, text: string, buttons?: TelegramButton[][]): Promise<void> {
+	async edit(destination: TelegramDestination, messageId: string, text: string, buttons?: TelegramButton[][], options: { format?: TelegramTextFormat; preview?: boolean } = {}): Promise<void> {
 		if (!text || text.length > 4096) throw new TelegramError("Telegram 编辑消息长度超出限制");
 		const markup = this.#markup(buttons);
-		await this.#queued(destination, () => this.#api("editMessageText", {
-			...this.#address(destination), message_id: this.#numericMessage(destination, messageId), text,
+		const chunks = formatTelegramText(text, options.format ?? "plain");
+		if (chunks.length !== 1 && !options.preview) throw new TelegramError("Telegram 编辑消息长度超出限制");
+		await this.#queued(destination, () => this.#messageApi(destination, {
+			...this.#address(destination), message_id: this.#numericMessage(destination, messageId), text: chunks[0]!.text,
+			...(chunks[0]!.entities.length ? { entities: chunks[0]!.entities } : {}),
 			...(markup ? { reply_markup: markup } : {}),
-		}, true, destination));
+		}, "editMessageText"));
 	}
 	async sendFile(destination: TelegramDestination, buffer: Buffer, fileName: string, options: { replyTo?: string; image?: boolean } = {}): Promise<TelegramSent> {
 		if (buffer.length > (options.image ? 10 * 1024 * 1024 : UPLOAD_LIMIT)) throw new TelegramError("Telegram 上传文件超出大小限制");

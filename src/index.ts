@@ -16,6 +16,7 @@ import { getWork } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
+import { formatTelegramText } from "./telegram-format.ts";
 import { TelegramInbox, TelegramInputWorkers, telegramApprovalData, telegramApprovalMatch, type TelegramCommandReceipt, type TelegramInputReceipt } from "./telegram-entry.ts";
 import { Directory } from "./feishu/directory.ts";
 import { mirrorRestoredSubmission } from "./feishu/recovery.ts";
@@ -962,11 +963,11 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 			}
 			answer = (await presentAnswer(harness, conversation.id, settled.answer)).text || "（本次运行没有产出文本）";
 		} else answer = `处理失败：${await runFailureReason(conversation.id as number, settled)}`;
-		if (answer.length <= 4096) await telegram.edit(row.destination, messageId, answer);
+		if (answer.length <= 4096 && formatTelegramText(answer, "markdown").length === 1) await telegram.edit(row.destination, messageId, answer, undefined, { format: "markdown" });
 		else {
 			await telegram.edit(row.destination, messageId, "处理完成，结果见以下分段消息。");
 			await telegramInbox.output(id, "sending");
-			const sent = await telegram.send(row.destination, answer, { replyTo: messageId });
+			const sent = await telegram.send(row.destination, answer, { replyTo: messageId, format: "markdown" });
 			for (const anchor of sent.messageIds) await sessions.anchor(anchor, conversation.id);
 		}
 		await telegramInbox.output(id, "done");
@@ -1363,7 +1364,7 @@ async function sendToConversationChat(conversationId: number, input: SendInput):
 		if (telegram === undefined || !telegramChatAllowed(destination)) return undefined;
 		const replyTo = sessions.lastAnchor(conversationId as ConversationId);
 		let sent;
-		if ("markdown" in input || "text" in input) sent = await telegram.send(destination, "markdown" in input ? input.markdown : input.text, { replyTo });
+		if ("markdown" in input || "text" in input) sent = await telegram.send(destination, "markdown" in input ? input.markdown : input.text, { replyTo, format: "markdown" in input ? "markdown" : "plain" });
 		else if ("file" in input || "image" in input) {
 			const source = "file" in input ? input.file.source : input.image.source;
 			if (!Buffer.isBuffer(source)) throw new Error("Telegram 文件发送需要已校验的文件内容");
@@ -1408,7 +1409,7 @@ const feishuBridge: FeishuBridge = {
 		// 飞书侧以「From admin:」前缀 + 整段斜体呈现，和成员自己的消息区分；逐段包斜体（markdown 强调不跨空行）
 		const ital = (t: string) => t.split(/\n{2,}/).map((p) => (p.trim() !== "" ? `*${p}*` : p)).join("\n\n");
 		const visible = `From admin: ${text.trim() === "" ? "（附件）" : text}`;
-		const sent = await sendToConversationChat(id, { markdown: destination.kind === "telegram" ? visible : ital(visible) });
+		const sent = await sendToConversationChat(id, destination.kind === "telegram" ? { text: visible } : { markdown: ital(visible) });
 		if (sent === undefined) throw new Error("该会话聊天入口不可用");
 		await sessions.anchor(sent.messageId, conversation.id);
 		sessions.touchActivity(conversation.id);

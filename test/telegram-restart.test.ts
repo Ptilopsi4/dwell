@@ -223,7 +223,7 @@ test("main recovers a real background child and delivers one autonomous report t
 });
 
 test("main visibly relays real panel HTTP input before its model run and recovers the original topic placeholder after a crash", { timeout: 60_000 }, async (t) => {
-	const content = "Continue this topic with the message sent through the local panel.";
+	const content = "Continue this topic with **literal asterisks** and `literal backticks` sent through the local panel.";
 	const answer = "The panel input completed in its original Telegram topic.";
 	const f = await mainFixture(t, [
 		{ text: "The topic is ready for panel input." },
@@ -251,6 +251,7 @@ test("main visibly relays real panel HTTP input before its model run and recover
 		assert.equal(response.status, 200);
 		assert.deepEqual(await response.json(), { ok: true, via: "telegram" });
 		const visible = await f.until((event) => event.method === "sendMessage" && event.body.text === `From admin: ${content}`, sendStart);
+		assert.equal(visible.body.entities, undefined, "Panel input remains a literal user relay");
 		await f.until(isWaiting("panel-before-kill"), sendStart);
 		const tracking = await f.until((event) => event.method === "telegram.output" && String(event.body.id).startsWith("tg-panel:") && event.body.state === "tracking", sendStart);
 		const panelModelIndex = f.events.findIndex((event, index) => index >= sendStart && event.kind === "model" && JSON.stringify(event.body.input).includes(content));

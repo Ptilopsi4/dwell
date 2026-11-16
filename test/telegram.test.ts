@@ -273,6 +273,117 @@ test("Telegram chunks plain text without breaking surrogates and attaches button
 	assert.equal(sent.messageId, sent.messageIds.at(-1));
 });
 
+test("Telegram send and edit use rendered text and entities while explicit plain mode preserves literals", async (t) => {
+	const f = await fixture(t);
+	await f.bot.send(destination, "**bold** [link](https://example.com)", { format: "markdown" });
+	await f.bot.edit(destination, "tg:123:42:3", "*edited* `code`", undefined, { format: "markdown" });
+	await f.bot.send(destination, "**literal**", { format: "plain" });
+	await f.bot.edit(destination, "tg:123:42:3", "*literal*", undefined, { format: "plain" });
+	const bodies = f.requests.filter((r) => ["sendMessage", "editMessageText"].includes(r.method)).map((r) => r.body as Record<string, unknown>);
+	assert.equal(bodies[0]!.text, "bold link");
+	assert.deepEqual(bodies[0]!.entities, [{ type: "bold", offset: 0, length: 4 }, { type: "text_link", url: "https://example.com", offset: 5, length: 4 }]);
+	assert.equal(bodies[1]!.text, "edited code");
+	assert.deepEqual(bodies[1]!.entities, [{ type: "italic", offset: 0, length: 6 }, { type: "code", offset: 7, length: 4 }]);
+	assert.equal(bodies[2]!.text, "**literal**");
+	assert.equal(bodies[3]!.text, "*literal*");
+	assert.equal(bodies[2]!.entities, undefined);
+	assert.equal(bodies[3]!.entities, undefined);
+	for (const body of bodies) assert.equal(body.parse_mode, undefined);
+});
+
+test("Telegram defaults preserve approval commands and relayed user text without Markdown interpretation", async (t) => {
+	const f = await fixture(t);
+	const text = "待审批命令：rm -rf '**/cache/**'\n输入文本：**literal** <raw>";
+	await f.bot.send(destination, text);
+	await f.bot.edit(destination, "tg:123:42:3", text);
+	for (const request of f.requests.filter((r) => ["sendMessage", "editMessageText"].includes(r.method))) {
+		const body = request.body as Record<string, unknown>;
+		assert.equal(body.text, text);
+		assert.equal(body.entities, undefined);
+		assert.equal(body.parse_mode, undefined);
+	}
+});
+
+test("Telegram intermediate previews may edit only the first rendered chunk without sending extras", async (t) => {
+	const f = await fixture(t);
+	const text = `**preview**\n\n${Array.from({ length: 500 }, () => "---").join("\n\n")}`;
+	assert.ok(text.length < 4096);
+	await assert.rejects(f.bot.edit(destination, "tg:123:42:3", text, undefined, { format: "markdown" }), /长度/);
+	await f.bot.edit(destination, "tg:123:42:3", text, undefined, { format: "markdown", preview: true });
+	const requests = f.requests.filter((r) => ["sendMessage", "editMessageText"].includes(r.method));
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0]!.method, "editMessageText");
+	const body = requests[0]!.body as { text: string; entities: unknown };
+	assert.equal(body.text.length, 4096);
+	assert.ok(body.text.startsWith("preview\n\n────────"));
+	assert.deepEqual(body.entities, [{ type: "bold", offset: 0, length: 7 }]);
+	await assert.rejects(f.bot.edit(destination, "tg:123:42:3", "x".repeat(4097), undefined, { format: "markdown", preview: true }), /长度/);
+});
+
+test("Telegram chunks the rendered document and keeps long pre entities valid", async (t) => {
+	const f = await fixture(t);
+	const code = `${"x".repeat(4095)}😀${"y".repeat(4096)}`;
+	await f.bot.send(destination, `\`\`\`js\n${code}\n\`\`\``, { buttons: [[{ text: "done", data: "ok" }]], format: "markdown" });
+	const bodies = f.requests.filter((r) => r.method === "sendMessage").map((r) => r.body as { text: string; entities: unknown; reply_markup?: unknown });
+	assert.equal(bodies.length, 3);
+	assert.equal(bodies.map((body) => body.text).join(""), code);
+	for (const body of bodies) assert.deepEqual(body.entities, [{ type: "pre", language: "js", offset: 0, length: body.text.length }]);
+	assert.equal(bodies[0]!.reply_markup, undefined);
+	assert.ok(bodies.at(-1)!.reply_markup);
+});
+
+test("Telegram retries an explicit entity rejection once as plain text inside the same ordered queue", async (t) => {
+	let calls = 0;
+	const f = await fixture(t, { respond: () => ++calls === 1
+		? Response.json({ ok: false, error_code: 400, description: `Bad Request: entity bounds invalid ${token}` }, { status: 400 })
+		: ok({ message_id: calls }) });
+	const buttons = [[{ text: "approve", data: "opaque" }]];
+	await Promise.all([f.bot.send(destination, "**first**", { replyTo: "tg:123:42:2", buttons, format: "markdown" }), f.bot.send(destination, "second")]);
+	const requests = f.requests.filter((r) => r.method === "sendMessage");
+	const bodies = requests.map((r) => r.body as Record<string, unknown>);
+	assert.deepEqual(requests.map((r) => r.at), [10_000, 11_000, 12_000]);
+	assert.deepEqual(bodies.map((body) => body.text), ["first", "first", "second"]);
+	const { entities, ...plain } = bodies[0]!;
+	assert.ok(entities);
+	assert.deepEqual(bodies[1], plain);
+	assert.deepEqual(bodies[1]!.reply_parameters, { message_id: 2, allow_sending_without_reply: true });
+	assert.deepEqual(bodies[1]!.reply_markup, { inline_keyboard: [[{ text: "approve", callback_data: "opaque" }]] });
+});
+
+test("Telegram formatted edits retry rejected entities once while unchanged edits stay idempotent", async (t) => {
+	let calls = 0;
+	const f = await fixture(t, { respond: () => ++calls === 1
+		? Response.json({ ok: false, error_code: 400, description: "Bad Request: can't parse entities" }, { status: 400 }) : ok({}) });
+	await f.bot.edit(destination, "tg:123:42:3", "**edited**", undefined, { format: "markdown" });
+	const bodies = f.requests.filter((r) => r.method === "editMessageText").map((r) => r.body as Record<string, unknown>);
+	assert.equal(bodies.length, 2);
+	assert.equal(bodies[0]!.text, "edited");
+	assert.ok(bodies[0]!.entities);
+	assert.deepEqual(bodies[1], { chat_id: "42", message_id: 3, text: "edited" });
+	const unchanged = await fixture(t, { respond: () => Response.json({ ok: false, error_code: 400, description: "Bad Request: message is not modified" }, { status: 400 }) });
+	await unchanged.bot.edit(destination, "tg:123:42:3", "**edited**", undefined, { format: "markdown" });
+	assert.equal(unchanged.requests.filter((r) => r.method === "editMessageText").length, 1);
+});
+
+test("Telegram entity fallback is bounded and unrelated failures never trigger plain-text retries", async (t) => {
+	const invalid = await fixture(t, { respond: () => Response.json({ ok: false, error_code: 400, description: "Bad Request: ENTITY_BOUNDS_INVALID" }, { status: 400 }) });
+	await assert.rejects(invalid.bot.send(destination, "**bold**", { format: "markdown" }), (error: unknown) => error instanceof TelegramError && error.code === 400);
+	assert.equal(invalid.requests.filter((r) => r.method === "sendMessage").length, 2);
+	const plain = await fixture(t, { respond: () => Response.json({ ok: false, error_code: 400, description: "Bad Request: can't parse entities" }, { status: 400 }) });
+	await assert.rejects(plain.bot.send(destination, "literal"), TelegramError);
+	assert.equal(plain.requests.filter((r) => r.method === "sendMessage").length, 1);
+	const unrelated = await fixture(t, { respond: () => failure(400) });
+	await assert.rejects(unrelated.bot.send(destination, "**bold**", { format: "markdown" }), TelegramError);
+	assert.equal(unrelated.requests.filter((r) => r.method === "sendMessage").length, 1);
+	const limited = await fixture(t, { respond: () => failure(429, 1) });
+	await assert.rejects(limited.bot.send(destination, "**bold**", { format: "markdown" }), TelegramError);
+	assert.equal(limited.requests.filter((r) => r.method === "sendMessage").length, 3);
+	for (const request of limited.requests.filter((r) => r.method === "sendMessage")) assert.ok((request.body as Record<string, unknown>).entities);
+	const uncertain = await fixture(t, { respond: () => { throw new Error(token); } });
+	await assert.rejects(uncertain.bot.send(destination, "**bold**", { format: "markdown" }), (error: unknown) => error instanceof TelegramError && error.uncertain);
+	assert.equal(uncertain.requests.filter((r) => r.method === "sendMessage").length, 1);
+});
+
 test("Telegram send and edit share per-chat throttling across topics", async (t) => {
 	const f = await fixture(t);
 	await Promise.all([f.bot.send(destination, "first"), f.bot.send({ ...destination, threadId: "99" }, "second")]);
