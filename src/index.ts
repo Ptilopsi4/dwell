@@ -1097,16 +1097,9 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "这是他人的任务线，仅线主或管理员可重置。");
 				return;
 			}
-			if (msg.platform === "telegram") {
-				const next = await sessions.forTelegram(msg, msg.requestId!);
-				await sessions.anchor(msg.messageId, next.id);
-				await replyTo(target, "已开启新任务线，原任务线与历史消息保留。", next);
-				break;
-			}
-			await conversation.reset(undefined, context);
-			// 新上下文里落一条展示型分隔回（模型不可见），panel 侧可见「已清空」而非无声空白
-			await conversation.submit({ type: "write", entry: { kind: "context.reset", data: { by: "feishu" } } }, context);
-			await replyTo(target, "已开启新对话。");
+			const next = msg.platform === "telegram" ? await sessions.forTelegram(msg, msg.requestId!) : await sessions.forFeishu(msg, msg.requestId ?? msg.messageId);
+			await sessions.anchor(msg.messageId, next.id);
+			await replyTo(target, "已开启新任务线，原任务线与历史消息保留。", next);
 			break;
 		case "/status": {
 			if (!admin) {
@@ -1278,7 +1271,7 @@ function helpCard(): Record<string, unknown> {
 		header: { title: { tag: "plain_text", content: "dwell 使用说明" }, template: "blue" },
 		body: { elements: [
 			{ tag: "markdown", content: [
-				cmd("/new", "开启新对话（清空本任务线上下文）"),
+				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
 				cmd("/newgoal", "开启新目标，保留聊天历史与旧任务记录（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),

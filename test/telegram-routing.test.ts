@@ -167,7 +167,7 @@ test("a failed JSON projection recovers the committed /new target and canonical 
 		await mkdir(join(t.directory, "sessions.json.tmp"));
 		await assert.rejects(sessions.forTelegram(msg, "tg:100:update:crash"), { code: "EISDIR" });
 		const durable = await t.harness.snapshot(TelegramSessionDoc, context);
-		const committedId = durable!.resets["tg:100:update:crash"].id;
+		const committedId = durable!.resets["telegram:tg:100:update:crash"].id;
 		assert.notEqual(committedId, original.id);
 		assert.equal(await t.count(), 2);
 		const stale = JSON.parse(await readFile(join(t.directory, "sessions.json"), "utf8"));

@@ -6,17 +6,19 @@ import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, defineDoc, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { MODEL } from "./harness.ts";
-import { messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
+import { messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage } from "./pipeline.ts";
 import { DATA_DIR, stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
 type SavedRoute = { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string; destination?: ConversationDestination };
-type TelegramRoute = { id: number; owner: string; destination: TelegramDestination };
-type TelegramRouteState = { routes: Record<string, TelegramRoute>; resets: Record<string, { key: string; id: number }> };
+type BotDestination = Exclude<ConversationDestination, { kind: "panel" }>;
+type BotRoute = { id: number; owner: string; destination: BotDestination };
+type BotRouteState = { routes: Record<string, BotRoute>; resets: Record<string, { key: string; id: number }> };
 
 // Route changes and /new receipts share the conversation's SQLite commit. JSON is a projection.
-export const TelegramSessionDoc = defineDoc<TelegramRouteState>({
+// Keep the original document kind so existing Telegram receipts remain replayable.
+export const TelegramSessionDoc = defineDoc<BotRouteState>({
 	kind: "dwell.telegram-sessions", version: 1, scope: "session",
 	initial: () => ({ routes: {}, resets: {} }),
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 20,
@@ -84,7 +86,7 @@ export class Sessions {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] message-map.json 损坏，replyTo 路由将全部降级:", err);
 		}
 		const telegram = await this.harness.snapshot(TelegramSessionDoc, BACKGROUND_CONTEXT);
-		if (telegram !== undefined) this.projectTelegram(telegram.routes);
+		if (telegram !== undefined) this.projectBotRoutes(telegram.routes);
 		for (const id of new Set(this.convKeys.values())) {
 			const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
 			const cwd = conversation === undefined ? undefined : (await conversation.agent(BACKGROUND_CONTEXT)).cwd;
@@ -306,10 +308,8 @@ export class Sessions {
 		return this.byKey(`${chatId}#t:${threadId}`, senderId, chatId);
 	}
 
-	private projectTelegram(routes: Readonly<Record<string, TelegramRoute>>): void {
-		for (const [key, id] of this.convKeys) {
-			if (this.destinations.get(id)?.kind === "telegram") this.convKeys.delete(key);
-		}
+	private projectBotRoutes(routes: Readonly<Record<string, BotRoute>>): void {
+		// Only durable keys are authoritative; legacy JSON routes are adopted on use.
 		for (const [key, route] of Object.entries(routes)) {
 			const id = route.id as ConversationId;
 			this.convKeys.set(key, id);
@@ -332,43 +332,62 @@ export class Sessions {
 		if (msg.chatId !== chatKey || msg.threadId !== destination.threadId) throw new Error("Telegram routing destination does not match its input");
 		const key = msg.chatType === "p2p" ? chatKey : destination.threadId !== undefined ? `${chatKey}#t:${destination.threadId}` : `${chatKey}#${msg.senderId}`;
 		const cwd = resolve(DATA_DIR, "work", `telegram-${createHash("sha256").update(chatKey).digest("hex")}`);
+		return this.routeBot(key, msg.senderId, destination, cwd, resetRequestId);
+	}
+
+	/** Feishu keeps its legacy lookup path; /new atomically adopts and replaces one default. */
+	forFeishu(msg: NormalizedMessage, resetRequestId?: string): Promise<Conversation> {
+		const destination = messageDestination(msg);
+		if (destination.kind !== "feishu" || destination.chatId !== msg.chatId) return Promise.reject(new Error("Feishu routing destination does not match its input"));
+		const key = msg.chatType === "p2p" ? msg.chatId : msg.threadId !== undefined ? `${msg.chatId}#t:${msg.threadId}` : `${msg.chatId}#${msg.senderId}`;
+		if (resetRequestId === undefined) return this.byKey(key, msg.senderId, msg.chatId);
+		// Join an in-flight create before switching the same key. Other keys remain independent.
+		const run = (this.pendingRoutes.get(key) ?? Promise.resolve()).catch(() => {}).then(() => this.routeBot(key, msg.senderId, destination, resolve(DATA_DIR, "work", msg.chatId), resetRequestId));
+		const pending = run.finally(() => { if (this.pendingRoutes.get(key) === pending) this.pendingRoutes.delete(key); });
+		this.pendingRoutes.set(key, pending);
+		return pending;
+	}
+
+	private async routeBot(key: string, sender: string, destination: BotDestination, cwd: string, resetRequestId?: string): Promise<Conversation> {
 		await this.prepareWorkspace(cwd);
 		const result = await this.harness.commit(async (tx) => {
 			const doc = await tx.doc(TelegramSessionDoc);
-			// Preserve projected Telegram routes when adopting an older state directory.
+			// Preserve projected Telegram routes, but adopt only the Feishu key being reset.
 			for (const [savedKey, id] of this.convKeys) {
-				const savedDestination = this.destinations.get(id);
-				if (savedDestination?.kind !== "telegram" || doc.routes[savedKey] !== undefined) continue;
+				const savedDestination = this.destinationOf(id);
+				if (savedDestination.kind === "panel" || doc.routes[savedKey] !== undefined) continue;
+				if (savedDestination.kind !== "telegram" && (destination.kind !== "feishu" || savedKey !== key)) continue;
 				if (await tx.conversation(id) !== undefined) doc.routes[savedKey] = { id: id as number, owner: this.owners.get(id) ?? "", destination: { ...savedDestination } };
 			}
-			const receipt = resetRequestId === undefined ? undefined : doc.resets[resetRequestId];
+			const requestKey = resetRequestId === undefined ? undefined : `${destination.kind}:${resetRequestId}`;
+			const receipt = requestKey === undefined ? undefined : doc.resets[requestKey] ?? (destination.kind === "telegram" ? doc.resets[resetRequestId!] : undefined);
 			let target: number;
 			if (receipt !== undefined) {
-				if (receipt.key !== key) throw new Error("Telegram /new request was already used for a different route");
+				if (receipt.key !== key) throw new Error("Bot /new request was already used for a different route");
 				const route = Object.values(doc.routes).find((route) => route.id === receipt.id);
-				if (route === undefined || !sameDestination(route.destination, destination)) throw new Error("Telegram /new receipt has no matching destination");
-				if (await tx.conversation(receipt.id as ConversationId) === undefined) throw new Error("Telegram /new conversation is missing");
+				if (route === undefined || !sameDestination(route.destination, destination)) throw new Error("Bot /new receipt has no matching destination");
+				if (await tx.conversation(receipt.id as ConversationId) === undefined) throw new Error("Bot /new conversation is missing");
 				target = receipt.id;
 			} else {
 				const existing = doc.routes[key];
 				if (resetRequestId === undefined && existing !== undefined && await tx.conversation(existing.id as ConversationId) !== undefined) {
-					if (!sameDestination(existing.destination, destination)) throw new Error("Telegram route has a different destination");
+					if (!sameDestination(existing.destination, destination)) throw new Error("Bot route has a different destination");
 					target = existing.id;
 				} else {
 					const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
 					await configure(tx, conversation.id, { model: MODEL, cwd });
 					if (existing !== undefined) doc.routes[`${key}#old:${existing.id}`] = { ...existing, destination: { ...existing.destination } };
 					target = conversation.id as number;
-					doc.routes[key] = { id: target, owner: msg.senderId, destination: { ...destination } };
-					if (resetRequestId !== undefined) doc.resets[resetRequestId] = { key, id: target };
+					doc.routes[key] = { id: target, owner: sender, destination: { ...destination } };
+					if (requestKey !== undefined) doc.resets[requestKey] = { key, id: target };
 				}
 			}
-			return { target, routes: JSON.parse(JSON.stringify(doc.routes)) as Record<string, TelegramRoute> };
+			return { target, routes: JSON.parse(JSON.stringify(doc.routes)) as Record<string, BotRoute> };
 		}, BACKGROUND_CONTEXT);
-		this.projectTelegram(result.routes);
+		this.projectBotRoutes(result.routes);
 		await this.save();
 		const conversation = await this.harness.conversation(result.target as ConversationId, BACKGROUND_CONTEXT);
-		if (conversation === undefined) throw new Error("Telegram conversation is missing after route creation");
+		if (conversation === undefined) throw new Error("Bot conversation is missing after route creation");
 		return conversation;
 	}
 
@@ -381,7 +400,7 @@ export class Sessions {
 		const pending = this.pendingRoutes.get(key);
 		if (pending !== undefined) return pending;
 		// Share lookup and creation so concurrent messages cannot split one route.
-		const resolving = this.resolveKey(key, owner, cwdName).finally(() => { this.pendingRoutes.delete(key); });
+		const resolving = this.resolveKey(key, owner, cwdName).finally(() => { if (this.pendingRoutes.get(key) === resolving) this.pendingRoutes.delete(key); });
 		this.pendingRoutes.set(key, resolving);
 		return resolving;
 	}
