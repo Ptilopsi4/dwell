@@ -25,6 +25,12 @@ import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
+import type { RuntimeTelemetrySnapshot } from "../telemetry.ts";
+
+export interface PanelRuntime {
+	telemetry?: RuntimeTelemetrySnapshot;
+	telegram: { transport: string; workers?: { activeRoutes: number; concurrency: number; stopped: boolean }; inbox: { pending: number; sending: number; tracking: number } };
+}
 
 interface PanelOptions {
 	harness: Harness;
@@ -33,6 +39,8 @@ interface PanelOptions {
 	directory: Directory;
 	feishu: FeishuBridge;
 	telegram?: () => string;
+	runtime?: () => Promise<PanelRuntime>;
+	ready?: () => boolean;
 	port: number;
 	/** Vision is disabled when its selected connection or credential is unavailable. */
 	describer: () => ImageDescriber | null;
@@ -214,7 +222,7 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, telegram, port, describer, sandbox, saveUpload }: PanelOptions): ReturnType<typeof createServer> {
+export function startPanel({ harness, sessions, users, directory, feishu, telegram, runtime, ready, port, describer, sandbox, saveUpload }: PanelOptions): ReturnType<typeof createServer> {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -281,6 +289,18 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		}
 		// /healthz 之后：本机探活可用，其余接口（含静态页与 SSE）不对本机进程开放
 		if (denyLocal && isLocalSource(req.socket.remoteAddress, localAddresses())) throw new HttpError(403, "local source denied");
+		if (req.method === "GET" && url.pathname === "/api/ready") {
+			const ok = (ready?.() ?? true) && healthOf(feishu.status(), 0, sandbox(), telegram?.()).code === 200;
+			res.setHeader("cache-control", "no-store");
+			json(res, ok ? 200 : 503, { ready: ok });
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/runtime") {
+			if (runtime === undefined) throw new HttpError(503, "runtime unavailable");
+			res.setHeader("cache-control", "no-store");
+			json(res, 200, await runtime());
+			return;
+		}
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
 			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }

@@ -8,8 +8,9 @@
   },
   "scripts": {
     "smoke": "node --env-file-if-exists=.env src/smoke.ts",
+    "backup": "node src/backup.ts",
     "check": "tsc --noEmit",
-    "test": "node --test \"test/*.test.ts\"",
+    "test": "node --test --test-concurrency=2 \"test/*.test.ts\"",
     "start": "node --env-file-if-exists=.env src/index.ts"
   },
   "dependencies": {

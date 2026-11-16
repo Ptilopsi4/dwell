@@ -1,6 +1,7 @@
 services:
   dwell:
     build: .
+    init: true
     restart: unless-stopped
     env_file: .env
     volumes:

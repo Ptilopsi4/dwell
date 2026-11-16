@@ -71,6 +71,18 @@ echo "selftest OK"
 }
 
 export type SandboxState = { enabled: boolean; reason?: string; wrapperPath?: string };
+export type SandboxMode = "required" | "auto" | "off";
+
+export function sandboxMode(env: NodeJS.ProcessEnv = process.env): SandboxMode {
+	const value = env.DWELL_SANDBOX ?? (env.NODE_ENV === "production" ? "required" : "auto");
+	if (value !== "required" && value !== "auto" && value !== "off") throw new Error("DWELL_SANDBOX 必须为 required、auto 或 off");
+	return value;
+}
+
+/** A failed production probe must stop startup before any durable task resumes. */
+export function requireSandbox(mode: SandboxMode, state: SandboxState): void {
+	if (mode === "required" && !state.enabled) throw new Error(`DWELL_SANDBOX=required：沙箱不可用，拒绝启动（${state.reason ?? "探测失败"}）`);
+}
 
 /** dwell.proc 直接 spawn 用的 shell：沙箱启用即 wrapper（与 bash 工具同一进沙箱路径）；否则找系统 bash。
  *  NodeExecutionEnv 的默认解析是私有函数，这里用同一套候选（win32：Git Bash 安装位 → PATH；其余：/bin/bash → which）。

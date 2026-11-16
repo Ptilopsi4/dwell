@@ -3,12 +3,12 @@ import { resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantEntry, LiveDoc, type Conversation, type ConversationId, type EntryId, type Harness, type SubmissionId, type SubmissionRecord, type TaskId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
-import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, runtimeBudgets, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
+import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, runtimeBudgets, runtimeTelemetry, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { Uploads } from "./uploads.ts";
 import { readWorkspaceFile } from "./guarded-env.ts";
 import { makeReporter } from "./report.ts";
 import { describeResources, sniffImageMime } from "./media.ts";
-import { probeSandbox, resolveSpawnShell } from "./sandbox.ts";
+import { probeSandbox, requireSandbox, resolveSpawnShell, sandboxMode } from "./sandbox.ts";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } from "./state.ts";
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
@@ -50,6 +50,10 @@ let imageDescriber: ImageDescriber | null = null;
 let uploads: Uploads;
 /** dwell.proc 直接 spawn 用的 shell（沙箱探测后赋值；proc 扩展的 shell getter 延迟读它） */
 let spawnShell: { path: string; sandboxed: boolean } = { path: "", sandboxed: false };
+let panel: ReturnType<typeof startPanel> | undefined;
+let ready = false;
+let shutdownPromise: Promise<void> | undefined;
+let shutdownCode = 0;
 
 async function main(): Promise<void> {
 	// 密钥只在启动期读一次：Directory/Channel 用参数接，provider/web/vision 在 openDwell 内读进闭包。
@@ -218,8 +222,10 @@ async function main(): Promise<void> {
 
 	// 须在沙箱探测前：wrapper 的透传名单按生成期 env 定
 	applyGithubEnv();
-	// bash 沙箱探测在 scrub 之后（probe 自身 spawn 不需要密钥）、任何任务开跑之前；未启用不算错误，回退路径治理 + 危险命令正则
-	const sandbox = await probeSandbox({ dataDir: DATA_DIR, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: process.env.DWELL_SANDBOX === "off" });
+	// Enforce the deployment's isolation requirement before resuming any durable work.
+	const mode = sandboxMode();
+	const sandbox = await probeSandbox({ dataDir: DATA_DIR, stateDir: STATE_DIR, appRoot: APP_ROOT, forceOff: mode === "off" });
+	requireSandbox(mode, sandbox);
 	setSandboxState(sandbox);
 	spawnShell = resolveSpawnShell(sandbox);
 	if (sandbox.enabled) console.log(`[dwell] bash 沙箱已启用（wrapper: ${sandbox.wrapperPath}）`);
@@ -246,13 +252,21 @@ async function main(): Promise<void> {
 	// Web panel（无内置鉴权，请求准入靠 Host/Origin/Content-Type 检查 + 部署侧网络边界）；DWELL_PANEL_ONLY=1 时不连飞书，仅 panel（本地开发/review）
 	const panelPort = Number(process.env.DWELL_PANEL_PORT ?? 0);
 	if (panelPort > 0) {
-		startPanel({ harness, sessions, users, directory, feishu: feishuBridge, telegram: () => telegram?.status() ?? "off", port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled, saveUpload: uploads.save });
+		panel = startPanel({ harness, sessions, users, directory, feishu: feishuBridge, telegram: () => telegram?.status() ?? "off", port: panelPort, describer: () => imageDescriber, sandbox: () => sandboxState.enabled, saveUpload: uploads.save,
+			ready: () => ready && shutdownPromise === undefined,
+			runtime: async () => {
+				const inbox = { pending: 0, sending: 0, tracking: 0 };
+				for (const [, row] of await telegramInbox.recoverable()) if (row.output === "pending" || row.output === "sending" || row.output === "tracking") inbox[row.output]++;
+				return { telemetry: runtimeTelemetry(harness)?.snapshot(), telegram: { transport: telegram?.status() ?? "off", workers: telegramWorkers.status(), inbox } };
+			},
+		});
 	}
 	if (process.env.DWELL_PANEL_ONLY === "1") {
 		console.log("[dwell] panel-only 模式（未连接飞书或 Telegram）");
 		if (githubEnabled()) void githubCheck();
 		await replayApprovalDecisions();
 		harness.resume();
+		ready = true;
 		return;
 	}
 
@@ -262,7 +276,7 @@ async function main(): Promise<void> {
 		channel = await connectChannel({ appId: larkAppId, appSecret: larkAppSecret, onMessage: (msg) => void handleMessage(msg), onCardAction: (evt) => void handleCardAction(evt) });
 	}
 	if (telegramToken) telegram = await TelegramBot.connect({ token: telegramToken, onMessage: handleMessage, onCallback: handleTelegramCallback, onError: (error) => console.error("[dwell] Telegram 连接异常:", error.message),
-		onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); process.exit(1); },
+		onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); void shutdown(1); },
 	});
 	if (!connected() && telegram === undefined) throw new Error("请配置飞书或 TELEGRAM_BOT_TOKEN，或启用 panel-only 模式");
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
@@ -284,6 +298,7 @@ async function main(): Promise<void> {
 	harness.resume();
 	telegramWorkers.start();
 	telegram?.start();
+	ready = true;
 	console.log(`[dwell] 就绪（飞书: ${connected() ? channel.botIdentity?.name ?? "?" : "off"}，Telegram: ${telegram?.identity.username ?? "off"}）`);
 }
 
@@ -1623,15 +1638,26 @@ async function answerText(id: EntryId, context = BACKGROUND_CONTEXT): Promise<st
 	return (answer?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("");
 }
 
-async function shutdown(): Promise<void> {
-	console.log("[dwell] 关闭中…");
-	if (approvalReplayTimer !== undefined) clearTimeout(approvalReplayTimer);
-	telegramWorkers?.stop();
-	await telegram?.close();
-	await telegramWorkers?.close();
-	await channel?.disconnect();
-	await harness?.close(BACKGROUND_CONTEXT);
-	process.exit(0);
+function shutdown(code = 0): Promise<void> {
+	shutdownCode = Math.max(shutdownCode, code);
+	return shutdownPromise ??= (async () => {
+		ready = false;
+		console.log("[dwell] 关闭中…");
+		// Media and SDK shutdown may stall; durable receipts retain unfinished work for restart.
+		const deadline = setTimeout(() => { console.error("[dwell] 关闭超过 30 秒，强制退出"); process.exit(1); }, 30_000);
+		const panelClosed = panel === undefined ? Promise.resolve() : new Promise<void>((resolve) => panel!.close(() => resolve()));
+		telegramWorkers?.stop();
+		if (approvalReplayTimer !== undefined) clearTimeout(approvalReplayTimer);
+		try {
+			const closed = await Promise.allSettled([telegram?.close(), telegramWorkers?.close(), channel?.disconnect()]);
+			if (closed.some((result) => result.status === "rejected")) { shutdownCode = 1; console.error("[dwell] 聊天入口关闭失败"); }
+			await harness?.close(BACKGROUND_CONTEXT);
+			await runtimeTelemetry(harness)?.close();
+			panel?.closeAllConnections();
+			await panelClosed;
+		} catch { shutdownCode = 1; console.error("[dwell] 运行时关闭失败"); }
+		finally { clearTimeout(deadline); process.exit(shutdownCode); }
+	})();
 }
 
 // 启动失败必须遇错即遇（退出码非 0，systemd/docker 可感知重启）；不走 unhandledRejection 兜底（那会挂着不退）

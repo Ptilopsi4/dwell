@@ -18,6 +18,7 @@ import { makeWorkspaceExtension, registerLegacyWorkspaces, setWorkspaceApprovalG
 import type { SandboxState } from "./sandbox.ts";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, DWELL_TZ, STATE_DIR } from "./state.ts";
 import { configuredSecretEnv, createModelClient, loadModelsConfig, type ResolvedModelConnection } from "./models.ts";
+import { RuntimeTelemetry } from "./telemetry.ts";
 
 export const MODEL_CONFIG = loadModelsConfig();
 
@@ -194,6 +195,8 @@ function providerModels() {
 
 const budgetsByHarness = new WeakMap<Harness, ReturnType<typeof makeBudgetController>>();
 export const runtimeBudgets = (harness: Harness): ReturnType<typeof makeBudgetController> | undefined => budgetsByHarness.get(harness);
+const telemetryByHarness = new WeakMap<Harness, RuntimeTelemetry>();
+export const runtimeTelemetry = (harness: Harness): RuntimeTelemetry | undefined => telemetryByHarness.get(harness);
 
 function runBudgetLimits(): Partial<BudgetLimits> {
 	const limits: Partial<BudgetLimits> = {};
@@ -290,7 +293,13 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
 			data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 	};
-	harness = await Harness.open(storage, { models, registry, env, onReport }, context);
+	const telemetry = new RuntimeTelemetry();
+	await telemetry.start();
+	try {
+		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context }, context);
+	} catch (error) { await telemetry.close().catch(() => {}); throw error; }
+	telemetryByHarness.set(harness, telemetry);
+	harness.subscribeClose(() => { void telemetry.flush().catch(() => {}); });
 	harness.subscribeClose(() => { void work.close(); });
 	budgetsByHarness.set(harness, budgets);
 	try {
