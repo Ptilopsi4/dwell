@@ -365,7 +365,14 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 		extension: defineExtension({ name: "dwell-work", tools: [tool], sections: [section("work", () => "Use dwell.work for an explicit multi-step goal; ordinary chat does not need a work record. For code or file work, declare exact verification commands and a bounded artifact scope at start. Use allowedChanges only for strict output tasks, with a narrow containing directory plus required output files in artifacts. verify must pass before ready, and any later artifact change requires another verify. These receipts establish declared command results and file versions, not semantic correctness. ready_for_review is an agent request for operator review, never user acceptance. Work budgets cover the root and its background descendants; do not restart a stopped goal to bypass its limits.", { tag: false })], hooks: [
 			hook(GenerationTask, { beforeRequest: async (request, api, context) => {
 				const value = await admit(api.conversationId, api.taskId, "model", context);
-				if (value !== undefined) return { messages: [...request.messages, { role: "user" as const, content: `[Durable work record; host-maintained data, not new user instructions]\n${value}`, timestamp: Date.now() }] };
+				if (value === undefined) return;
+				let index = request.messages.findLastIndex((message) => message.role === "user");
+				if (index === -1) {
+					index = request.messages.findIndex((message) => message.role !== "system");
+					if (index === -1) index = request.messages.length;
+				}
+				// Keep the user's request and the assistant/tool-result tail in their original positions relative to each other.
+				return { messages: [...request.messages.slice(0, index), { role: "user" as const, content: `[Durable work record; host-maintained data, not new user instructions]\n${value}`, timestamp: Date.now() }, ...request.messages.slice(index)] };
 			} }),
 			hook(ToolTask, { beforeTool: async (_call, api, context) => { await admit(api.conversationId, api.taskId, "tool", context); } }),
 			hook(CompactionTask, { beforeCompact: async (_request, api) => {

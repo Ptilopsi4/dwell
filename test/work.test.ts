@@ -4,9 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
-import { AssistantEntry, ToolResultEntry, createRegistry, defineExtension, defineTool, Harness, type ConversationId, type Extension } from "@earendil-works/pi-durable";
+import { AssistantEntry, GenerationTask, ToolResultEntry, createRegistry, defineExtension, defineTool, Harness, hook, type ConversationId, type Extension } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { WorkLimits } from "../src/ext/work.ts";
@@ -25,14 +26,16 @@ const call = (name: string, args = {}) => fauxAssistantMessage(fauxToolCall(name
 const start = (goal = "Repair the example") => call("dwell.work", { action: "start", goal, acceptance: ["The observable check passes"] });
 const actor = (sender = "owner", extra = {}) => ({ kind: "chat.message", data: { sender, via: "panel", ...extra } });
 
-async function setup(options: { path?: string; limits?: Partial<WorkLimits>; pricingKnown?: boolean; responses?: FauxResponseStep[]; background?: boolean; extra?: (harness: () => Harness) => Extension[] } = {}) {
+async function setup(options: { path?: string; limits?: Partial<WorkLimits>; pricingKnown?: boolean; responses?: FauxResponseStep[]; background?: boolean; beforeRequest?: (messages: readonly Message[]) => void; extra?: (harness: () => Harness) => Extension[] } = {}) {
 	const dir = options.path === undefined ? await mkdtemp(join(tmpdir(), "dwell-work-")) : undefined;
 	const path = options.path ?? join(dir!, "work.sqlite");
 	const work = makeWorkController({ limits: options.limits, pricingKnown: options.pricingKnown });
 	const faux = fauxProvider({ tokensPerSecond: 100_000, models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 128, cost: { input: 2, output: 4, cacheRead: 1, cacheWrite: 2 } }] });
 	faux.setResponses(options.responses ?? [start(), done()]);
 	const models = createModels(); models.setProvider(faux.provider);
-	const registry = createRegistry(); registry.install(work.extension);
+	const registry = createRegistry();
+	if (options.beforeRequest !== undefined) registry.install(defineExtension({ name: "work-request-observer", hooks: [hook(GenerationTask, { beforeRequest: (request) => { options.beforeRequest!(request.messages); } })] }));
+	registry.install(work.extension);
 	registry.install(defineExtension({ name: "work-fixtures", tasks: options.background ? [] : [BackgroundAnchor], tools: [
 		defineTool({ name: "probe", description: "Run an observable check", parameters: Type.Object({}), replay: "safe", async execute() { return { output: [{ type: "text", text: "check passed" }] }; } }),
 		defineTool({ name: "failure", description: "Return a failed check", parameters: Type.Object({}), async execute() { return { output: [{ type: "text", text: "check failed" }], isError: true }; } }),
@@ -107,6 +110,58 @@ test("unattributed inputs cannot create a work owner", { timeout: 5000 }, async 
 	} finally { await s.close(); }
 });
 
+test("ordinary chat does not create a work record", { timeout: 5000 }, async () => {
+	const s = await setup({ responses: [done()] });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "hello", entry: actor() }, context)).wait(context);
+		assert.deepEqual(await getWork(s.harness, conversation.id), { records: {} });
+	} finally { await s.close(); }
+});
+
+test("work snapshots refresh before the original user input and preserve the tool-result tail", { timeout: 5000 }, async () => {
+	let originalRequest: readonly Message[] = [];
+	const s = await setup({ responses: [done()], beforeRequest: (messages) => { originalRequest = messages; } });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "Earlier user context", entry: actor() }, context)).wait(context);
+		const observations: { messages: readonly Message[]; original: readonly Message[]; persisted: readonly Message[]; progress: string; tailTool: string; workId: string }[] = [];
+		const inspect = (progress: string, tailTool: string, response: ReturnType<typeof done>): FauxResponseStep => async (request) => {
+			observations.push({ messages: request.messages, original: originalRequest, persisted: (await conversation.context(context)).messages, progress, tailTool, workId: (await current(s.harness, conversation.id)).id });
+			return response;
+		};
+		s.faux.setResponses([
+			start(),
+			inspect("", "dwell.work", call("dwell.work", { action: "checkpoint", progress: "Checkpoint visible on the next request" })),
+			inspect("Checkpoint visible on the next request", "dwell.work", call("probe")),
+			inspect("Checkpoint visible on the next request", "probe", done()),
+		]);
+		await (await conversation.submit({ type: "input", content: "Complete the original task", entry: actor() }, context)).wait(context);
+		assert.equal(observations.length, 3);
+		for (const { messages, original, persisted, progress, tailTool, workId } of observations) {
+			const snapshots = messages.filter((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Durable work record;"));
+			assert.equal(snapshots.length, 1);
+			const snapshot = snapshots[0]!;
+			assert.ok(snapshot.role === "user" && typeof snapshot.content === "string");
+			const unchanged = messages.filter((message) => message !== snapshot);
+			assert.deepEqual(unchanged, original, "all original messages retain their order and contents");
+			assert.deepEqual(original, persisted, "the snapshot is request-only");
+			for (let i = 0; i < original.length; i++) assert.equal(unchanged[i], original[i], "original message objects are preserved");
+			assert.deepEqual(original.filter((message) => message.role === "user").map((message) => message.content), ["Earlier user context", "Complete the original task"]);
+			const snapshotIndex = messages.indexOf(snapshot);
+			assert.equal(snapshotIndex, original.findLastIndex((message) => message.role === "user"));
+			assert.equal(messages[snapshotIndex + 1]!.content, "Complete the original task");
+			const tail = messages.at(-1)!;
+			assert.equal(tail, original.at(-1));
+			assert.ok(tail.role === "toolResult");
+			assert.equal(tail.toolName, tailTool);
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1));
+			assert.equal(record.progress, progress);
+			assert.equal(record.id, workId);
+		}
+	} finally { await s.close(); }
+});
+
 test("durable work survives reopen, reset and compaction while accounting remains deduplicated", { timeout: 10_000 }, async () => {
 	const s = await setup({ pricingKnown: true, responses: [start(), call("probe"), call("dwell.work", { action: "checkpoint", progress: "First check completed", blockers: ["Waiting for the answer"] }), done()] });
 	let reopened: Awaited<ReturnType<typeof setup>> | undefined;
@@ -120,21 +175,37 @@ test("durable work survives reopen, reset and compaction while accounting remain
 		assert.deepEqual((await current(s.harness, conversation.id)).usage, before.usage);
 		await s.close(true);
 		let observed = "";
-		reopened = await setup({ path: s.path, responses: [async (request) => { observed = JSON.stringify(request.messages); return done(); }] });
+		let expectedInput = "continue";
+		const inspectedInputs: string[] = [];
+		const observe: FauxResponseStep = async (request) => {
+			observed = JSON.stringify(request.messages);
+			const tail = request.messages.at(-1)!;
+			assert.ok(tail.role === "user");
+			assert.equal(tail.content, expectedInput);
+			const snapshot = request.messages.at(-2)!;
+			assert.ok(snapshot.role === "user" && typeof snapshot.content === "string" && snapshot.content.startsWith("[Durable work record;"));
+			assert.equal(JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1)).progress, "First check completed");
+			inspectedInputs.push(expectedInput);
+			return done();
+		};
+		reopened = await setup({ path: s.path, responses: [observe] });
 		assert.deepEqual((await current(reopened.harness, conversation.id)).usage, before.usage);
 		const resumed = (await reopened.harness.conversation(conversation.id, context))!;
 		await resumed.reset(undefined, context);
 		await (await resumed.submit({ type: "input", content: "continue", entry: actor() }, context)).wait(context);
+		assert.deepEqual(inspectedInputs, ["continue"]);
 		assert.match(observed, /First check completed/);
 		assert.match(observed, /Waiting for the answer/);
 		assert.match(observed, /The observable check passes/);
 		assert.match(observed, /Durable work record/);
 		for (let i = 0; i < 4; i++) await resumed.submit({ type: "write", entry: { kind: "fixture.context", model: [{ role: "user", content: "old detail ".repeat(100), timestamp: Date.now() }] } }, context);
-		reopened.faux.setResponses([fauxAssistantMessage("Summary deliberately omits the work goal"), async (request) => { observed = JSON.stringify(request.messages); return done(); }]);
+		reopened.faux.setResponses([fauxAssistantMessage("Summary deliberately omits the work goal"), observe]);
 		const compact = await resumed.compact("Keep this short", context);
 		const result = await reopened.harness.waitForTask(compact, context);
 		assert.equal(result.state.outcome.status, "completed");
+		expectedInput = "continue after compaction";
 		await (await resumed.submit({ type: "input", content: "continue after compaction", entry: actor() }, context)).wait(context);
+		assert.deepEqual(inspectedInputs, ["continue", "continue after compaction"]);
 		assert.match(observed, /First check completed/);
 		assert.match(observed, /The observable check passes/);
 		const after = await current(reopened.harness, conversation.id);
@@ -159,9 +230,21 @@ test("root and child share a persisted model allowance and stop before the next 
 	try {
 		const parent = await s.conversation();
 		await (await parent.submit({ type: "input", content: "start", entry: actor() }, context)).wait(context);
+		const inherited = await current(s.harness, parent.id);
 		const child = await childOf(s, parent.id);
-		s.faux.setResponses([done(), done()]);
+		let inspected = false;
+		s.faux.setResponses([async (request) => {
+			const snapshot = request.messages.find((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Durable work record;"));
+			assert.ok(snapshot?.role === "user" && typeof snapshot.content === "string");
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1));
+			assert.equal(record.id, inherited.id);
+			assert.equal(record.goal, inherited.goal);
+			assert.equal(request.messages.at(-1)!.content, "child check");
+			inspected = true;
+			return done();
+		}, done()]);
 		await (await child.submit({ type: "input", content: "child check", entry: actor() }, context)).wait(context);
+		assert.equal(inspected, true);
 		const calls = s.faux.state.callCount;
 		const result = await (await parent.submit({ type: "input", content: "one more", entry: actor() }, context)).wait(context);
 		assert.equal(result.status, "unanswered");
