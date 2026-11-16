@@ -22,7 +22,7 @@ import { makeLarkExtension } from "./ext/lark.ts";
 import { makeSendExtension } from "./ext/send.ts";
 import { makeScheduleExtension } from "./ext/schedule.ts";
 import { backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, reconcileBackgroundStops } from "./ext/background.ts";
-import { makeProcExtension } from "./ext/proc.ts";
+import { makeProcExtension, pruneProcLogs } from "./ext/proc.ts";
 
 type ReplyTarget = { chatId: string; messageId: string };
 
@@ -165,6 +165,7 @@ async function main(): Promise<void> {
 	await uploads.register(DEFAULT_CWD);
 	sessions = new Sessions(harness, (cwd) => uploads.register(cwd));
 	await sessions.load();
+	await pruneProcLogs(harness).catch((err: unknown) => console.error("[dwell] 旧进程日志清理失败:", err));
 	// 后台子会话 → 父会话映射重建（审批窗口按父线开；重启后 approval 扩展立即能用）
 	await rebuildConversationScope();
 	const realigned = await sessions.alignModel();
