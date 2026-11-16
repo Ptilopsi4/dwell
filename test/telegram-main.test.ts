@@ -237,16 +237,34 @@ test("main Telegram identity commands return the current chat ID without admitti
 			message(50, "/whoami"),
 			message(51, "/whoami@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 }),
 			message(52, "/whoami@AcceptanceBot", { chat: { id: -301, type: "supergroup" } }),
+			message(53, "/ask@AcceptanceBot Read this private attachment", { from: { id: 999, first_name: "Unknown" }, chat: { id: -301, type: "supergroup" }, document: { file_id: "must-not-download", file_name: "secret.txt" } }),
+			message(54, "Ordinary group chat", { chat: { id: -301, type: "supergroup" } }),
+			message(55, "/help@AnotherBot", { chat: { id: -301, type: "supergroup" } }),
+			message(56, "/help@AcceptanceBot", { chat: { id: -301, type: "supergroup" }, sender_chat: { id: -301, type: "supergroup" } }),
 		]);
-		await f.until((event) => event.method === "getUpdates" && event.body.offset === 53);
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 57);
 		const replies = f.requests("telegram", "sendMessage");
-		assert.equal(replies.length, 2);
+		assert.equal(replies.length, 4);
 		assert.equal(replies[0].body.text, "你的 ID：tg:200；聊天 ID：200");
 		assert.equal(replies[1].body.text, "你的 ID：tg:200；聊天 ID：-300");
 		assert.equal(replies[1].body.chat_id, "-300");
 		assert.equal(replies[1].body.message_thread_id, 9);
+		for (const [index, sender] of [[2, "tg:200"], [3, "tg:999"]] as const) {
+			assert.equal(replies[index].body.chat_id, "-301");
+			assert.match(String(replies[index].body.text), /这个群尚未启用/);
+			assert.match(String(replies[index].body.text), /聊天 ID：-301/);
+			assert.ok(String(replies[index].body.text).includes(`你的 ID：${sender}`));
+			assert.doesNotMatch(String(replies[index].body.text), /private attachment|secret\.txt|Ordinary group chat/);
+			assert.deepEqual(replies[index].body.reply_parameters, { message_id: 50 + index, allow_sending_without_reply: true });
+		}
 		assert.equal(f.requests("model").length, 0);
+		assert.equal(f.requests("telegram", "getFile").length, 0);
 		assert.equal(f.requests("unexpected").length, 0);
+		await f.stop();
+		const { inbox } = await f.snapshot();
+		assert.equal(Object.values(inbox.inputs).length, 0, "Admission notices must not enqueue model input");
+		const routes = JSON.parse(await readFile(join(f.directory, "state", "sessions.json"), "utf8")) as Record<string, { destination: { chatId?: string } }>;
+		assert.ok(Object.values(routes).every((route) => route.destination.chatId !== "-301"), "An unlisted group must not acquire a conversation route");
 		passed = true;
 	} finally { await f.close(passed); }
 });

@@ -274,7 +274,7 @@ export function rmRecursiveMatch(command: string): string | null {
 }
 
 /** 状态文件与凭证面兜底：路径已移出 agent 可写域，此检查防 cwd 相对猜测与 /proc 回读（减速带非硬墙）。 */
-const STATE_FILES = /users\.json|sessions\.json|message-map\.json|approvals\.json|telegram[\\/]\d+\.json|(?:^|[\s"'=/\\])\.env\b|(?<![\w-])state[\\/]|\/proc\/[^\s/]*\/environ/;
+const STATE_FILES = /users\.json|sessions\.json|message-map\.json|approvals\.json|telegram-chats\.json|telegram[\\/]\d+\.json|(?:^|[\s"'=/\\])\.env\b|(?<![\w-])state[\\/]|\/proc\/[^\s/]*\/environ/;
 let modelConfigPaths: string[] = [];
 
 /** Protect only the selected connection file; project files may also be named models.json. */

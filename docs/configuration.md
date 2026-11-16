@@ -78,11 +78,11 @@ Configure either bot or both. Telegram-only needs no Feishu credentials. See [Bo
 |---|---|
 | `LARK_APP_ID` / `LARK_APP_SECRET` | Optional Feishu custom app credentials; set both to enable Feishu |
 | `TELEGRAM_BOT_TOKEN` | Optional BotFather token; enables Telegram long polling |
-| `DWELL_TELEGRAM_CHATS` | Allowed Telegram group/supergroup IDs, comma-separated raw numeric IDs, such as `-1001234567890` |
+| `DWELL_TELEGRAM_CHATS` | First-start group seeds, comma-separated raw numeric IDs, such as `-1001234567890` |
 | `DWELL_ADMINS` | Admin IDs, comma-separated: Feishu `ou_...`, Telegram `tg:<numeric user ID>` |
 | `DWELL_ALLOW` | Member IDs in the same format, comma-separated |
 
-An empty `DWELL_TELEGRAM_CHATS` allows private chats only. Allowed groups still require user permission.
+`DWELL_TELEGRAM_CHATS` seeds a bot's groups only when it has no record in `$DWELL_STATE/telegram-chats.json`. Afterwards that bot's persisted list is authoritative, including an empty list for private chats only. Use admin commands `/allowchat`, `/disallowchat`, and `/chats` to manage it without restarting. Changing the environment does not restore a revoked group. An unreadable or invalid group state prevents startup. Allowed groups still require user permission.
 
 `DWELL_ADMINS` and `DWELL_ALLOW` seed `state/users.json` once, when the file does not exist. After that, `users.json` is the source of truth. Manage it with `/allow`, `/disallow`, or the panel. For example, `/allow tg:123456789 admin` adds a Telegram admin and `/disallow tg:123456789` removes that user. Existing Feishu IDs stay unchanged.
 

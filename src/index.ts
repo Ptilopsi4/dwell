@@ -16,6 +16,7 @@ import { getWork, workBudgetStopReason } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
+import { TelegramChats, isTelegramGroupId } from "./telegram-chats.ts";
 import { createTelegramStreamPresenter } from "./telegram-stream.ts";
 import { formatTelegramText } from "./telegram-format.ts";
 import { TelegramInbox, TelegramInputWorkers, telegramApprovalData, telegramApprovalMatch, type TelegramCommandReceipt, type TelegramInputReceipt } from "./telegram-entry.ts";
@@ -42,7 +43,8 @@ let telegramInbox: TelegramInbox;
 let feishuDeliveries: FeishuDeliveries | undefined;
 let telegramWorkers: TelegramInputWorkers;
 const telegramAdmissions = new Map<number, Promise<unknown>>();
-const telegramChats = new Set((process.env.DWELL_TELEGRAM_CHATS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+const telegramChatSeed = (process.env.DWELL_TELEGRAM_CHATS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+let telegramChats: TelegramChats | undefined;
 const telegramReplies = new Set<string>();
 const telegramPreparationActivities = new Map<string, () => void>();
 const users = new Users();
@@ -284,9 +286,14 @@ async function main(): Promise<void> {
 		if (!larkAppId || !larkAppSecret) throw new Error("LARK_APP_ID / LARK_APP_SECRET 必须一起设置");
 		channel = await connectChannel({ appId: larkAppId, appSecret: larkAppSecret, onMessage: (msg) => void handleMessage(msg), onCardAction: (evt) => void handleCardAction(evt) });
 	}
-	if (telegramToken) telegram = await TelegramBot.connect({ token: telegramToken, onMessage: handleMessage, onCallback: handleTelegramCallback, onError: (error) => console.error("[dwell] Telegram 连接异常:", error.message),
-		onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); void shutdown(1); },
-	});
+	if (telegramToken) {
+		telegram = await TelegramBot.connect({ token: telegramToken, onMessage: handleMessage, onCallback: handleTelegramCallback, onError: (error) => console.error("[dwell] Telegram 连接异常:", error.message),
+			isDestinationAllowed: telegramChatAllowed,
+			onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); void shutdown(1); },
+		});
+		telegramChats = new TelegramChats(telegram.identity.id);
+		await telegramChats.load(telegramChatSeed);
+	}
 	if (!connected() && telegram === undefined) throw new Error("请配置飞书或 TELEGRAM_BOT_TOKEN，或启用 panel-only 模式");
 	await feishuDeliveries.recover();
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
@@ -366,7 +373,18 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		const target: ReplyTarget = { chatId: msg.chatId, messageId: msg.messageId, destination };
 		// 群聊准入（SDK policy 已放开 mention 门，由这里细化）：话题内消息与回复已锚定消息视为显式指向，平消息仍需 @bot
 		if (!groupAdmits(msg, (messageId) => sessions.follow(messageId) !== undefined)) return;
-		if (destination.kind === "telegram" && !telegramChatAllowed(destination)) return;
+		if (destination.kind === "telegram" && await handleTelegramChatCommand(msg, destination)) return;
+		if (destination.kind === "telegram" && !telegramChatAllowed(destination)) {
+			// A host-only notice can explain group admission without opening a task or its general delivery path.
+			if (telegram !== undefined && destination.botId === telegram.identity.id && msg.chatType === "group") {
+				try {
+					const admin = users.isAdmin(msg.senderId);
+					const instruction = admin ? `你可点击“启用本群”，或发送 /allowchat@${telegram.identity.username}。` : "请让 dwell 管理员启用这个群。";
+					await telegram.sendControl(destination, `这个群尚未启用，暂时不能在这里执行任务。\n\n聊天 ID：${destination.chatId}\n你的 ID：${msg.senderId}\n\n${instruction}启用后，已授权成员才能提交任务。\n使用 /ask@${telegram.identity.username} 内容，或回复我的消息。`, { replyTo: msg.messageId, ...(admin ? { buttons: [[{ text: "启用本群", data: "dwell:allowchat" }]] } : {}) });
+				} catch (error) { console.error("[dwell] Telegram 群接入提示未能送达:", error instanceof TelegramError ? error.message : "发送失败"); }
+			}
+			return;
+		}
 		if (msg.platform === "telegram" && msg.content.trim() === "/whoami" && !users.isAllowed(msg.senderId)) {
 			await replyTo(target, `你的 ID：${msg.senderId}；聊天 ID：${destination.kind === "telegram" ? destination.chatId : "?"}`).catch((error: unknown) => console.error("[dwell] 身份回复失败:", error));
 			return;
@@ -889,7 +907,43 @@ function panelDestination(): ConversationDestination {
 
 function telegramChatAllowed(destination: TelegramDestination): boolean {
 	return telegram !== undefined && destination.botId === telegram.identity.id
-		&& (!destination.chatId.startsWith("-") || telegramChats.has(destination.chatId));
+		&& telegramChats?.allows(destination) === true;
+}
+
+async function telegramControlReply(destination: TelegramDestination, text: string, replyTo?: string): Promise<void> {
+	if (telegram === undefined || destination.botId !== telegram.identity.id) return;
+	try { await telegram.sendControl(destination, text, { replyTo }); }
+	catch (error) { console.error("[dwell] Telegram 群管理提示未能送达:", error instanceof TelegramError ? error.message : "发送失败"); }
+}
+
+async function handleTelegramChatCommand(msg: NormalizedMessage, destination: TelegramDestination): Promise<boolean> {
+	const parts = msg.content.trim().split(/\s+/);
+	const command = parts[0]!;
+	if (!["/allowchat", "/disallowchat", "/chats"].includes(command)) return false;
+	if (telegram === undefined || telegramChats === undefined || destination.botId !== telegram.identity.id) return true;
+	if (!users.isAdmin(msg.senderId)) {
+		await telegramControlReply(destination, "群白名单管理仅 dwell 管理员可用。", msg.messageId);
+		return true;
+	}
+	if (command === "/chats") {
+		if (parts.length !== 1) await telegramControlReply(destination, "用法：/chats，查看当前 bot 已启用的群。", msg.messageId);
+		else {
+			const chats = telegramChats.list();
+			await telegramControlReply(destination, chats.length ? `当前 bot 已启用的群：\n${chats.join("\n")}` : "当前 bot 尚未启用任何群。", msg.messageId);
+		}
+		return true;
+	}
+	const chatId = parts[1] ?? (msg.chatType === "group" ? destination.chatId : "");
+	if (parts.length > 2 || !isTelegramGroupId(chatId)) {
+		await telegramControlReply(destination, `用法：${command} 负数群ID。群内可省略群ID，私聊必须明确指定。`, msg.messageId);
+		return true;
+	}
+	const result = await telegramChats.change(chatId, command === "/allowchat", msg.requestId ?? msg.messageId);
+	const text = result === "replayed" ? "这条群白名单命令已处理，未重复更改群状态。"
+		: command === "/allowchat" ? `已启用群 ${chatId}，已授权成员现在可以提交任务。`
+		: `已停用群 ${chatId}，停止接收新输入与后续投递。既有会话、任务、定时和进程保留。`;
+	await telegramControlReply(destination, text, msg.messageId);
+	return true;
 }
 
 async function sendFileToConversation(id: number, input: FileSendInput): Promise<boolean> {
@@ -1001,6 +1055,7 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 		}
 		settled ??= await submission.wait(BACKGROUND_CONTEXT);
 		await stopPreview();
+		if (!telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); return; }
 		if (settled === undefined) throw new Error("Telegram 输入不存在");
 		let answer = "";
 		if (settled.status === "done" && settled.type === "input") {
@@ -1084,6 +1139,16 @@ async function sendTelegramApproval(destination: TelegramDestination, scope: num
 
 async function handleTelegramCallback(callback: TelegramCallback): Promise<void> {
 	if (telegram === undefined) return;
+	if (callback.data === "dwell:allowchat") {
+		let text = "启用群仅 dwell 管理员可用。";
+		if (telegramChats !== undefined && callback.destination.botId === telegram.identity.id
+			&& isTelegramGroupId(callback.destination.chatId) && users.isAdmin(callback.senderId)) {
+			const result = await telegramChats.change(callback.destination.chatId, true, `tg-chat-callback:${callback.id}`);
+			text = result === "replayed" ? "该启用请求已处理，未重复更改群状态。" : "已启用本群，已授权成员现在可以提交任务。";
+		}
+		await telegram.acknowledge(callback.id, text).catch((error: unknown) => console.error("[dwell] Telegram 群管理回调提示失败:", error));
+		return;
+	}
 	const matched = telegramApprovalMatch(callback, pendingApprovals, {
 		allowed: (id) => users.isAllowed(id), admin: (id) => users.isAdmin(id), owner: (id) => sessions.ownerOf(id as ConversationId), chatAllowed: telegramChatAllowed,
 	});
@@ -1138,7 +1203,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					"/deny：关闭批准窗口并取消待审请求",
 					"/whoami：查看你的 ID 和当前聊天 ID",
 					"/help：查看完整使用说明",
-					...(cmd === "/help" ? ["管理员命令：", "/status：查看运行中任务", "/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员"] : []),
+					...(cmd === "/help" && admin ? ["管理员命令：", "/status：查看运行中任务", "/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员", "/allowchat [负数群ID]、/disallowchat [负数群ID]：启用或停用群（群内可省略 ID）", "/chats：查看当前 bot 已启用的群"] : []),
 				];
 				await replyTo(target, guide.join("\n"), conversation);
 				break;

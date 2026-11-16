@@ -9,7 +9,7 @@ const group = { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 };
 const replyTo = (id: number) => ({ message_id: id, date: 10, chat: group.chat, from: { id: 100, is_bot: true } });
 
 test("main Telegram host guidance uses the real username and preserves admission without model calls", { timeout: 60_000 }, async (t) => {
-	const f = await mainFixture(t);
+	const f = await mainFixture(t, [], { admins: "tg:200" });
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
@@ -30,7 +30,10 @@ test("main Telegram host guidance uses the real username and preserves admission
 		const sends = f.requests("telegram", "sendMessage");
 		const sentFor = (id: number) => sends.find((event) => (event.body.reply_parameters as JsonRecord)?.message_id === id)!;
 		for (const id of [1, 2, 6]) assert.equal(sentFor(id).body.text, "未授权使用，请联系管理员开通。");
-		for (const id of [3, 4, 5]) assert.equal(sentFor(id), undefined);
+		for (const id of [3, 4]) assert.equal(sentFor(id), undefined);
+		assert.equal(sentFor(5).body.chat_id, "-301");
+		assert.match(String(sentFor(5).body.text), /^这个群尚未启用/);
+		assert.match(String(sentFor(5).body.text), /聊天 ID：-301/);
 		for (const id of [7, 9, 10]) {
 			const text = String(sentFor(id).body.text);
 			assert.match(text, /私聊：直接发送文字、图片或文件/);
@@ -43,6 +46,8 @@ test("main Telegram host guidance uses the real username and preserves admission
 			assert.doesNotMatch(text, /@bot\b/);
 		}
 		assert.match(String(sentFor(9).body.text), /管理员命令：[\s\S]*\/status：[\s\S]*\/allow tg:用户ID \[admin\]、\/disallow tg:用户ID/);
+		assert.match(String(sentFor(9).body.text), /\/allowchat \[负数群ID\]、\/disallowchat \[负数群ID\]/);
+		assert.match(String(sentFor(9).body.text), /\/chats：查看当前 bot 已启用的群/);
 		for (const id of [7, 10]) assert.doesNotMatch(String(sentFor(id).body.text), /\/status|\/allow|\/disallow/);
 		for (const id of [8, 11]) {
 			assert.match(String(sentFor(id).body.text), /^请在命令后写下任务，例如：\/ask@AcceptanceBot/);
@@ -55,13 +60,17 @@ test("main Telegram host guidance uses the real username and preserves admission
 		assert.match(String(replyGuide.body.text), /^请在命令后写下任务，例如：\/ask@AcceptanceBot/);
 		assert.equal(replyGuide.body.chat_id, "-300");
 		assert.equal(replyGuide.body.message_thread_id, 9);
+		f.updates([message(13, "/help", { from: { id: 201 }, chat: { id: 201, type: "private" } })]);
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 14);
+		const memberHelp = f.requests("telegram", "sendMessage").find((event) => (event.body.reply_parameters as JsonRecord)?.message_id === 13)!;
+		assert.doesNotMatch(String(memberHelp.body.text), /管理员命令|\/status|\/allow|\/disallow|\/chats/);
 		assert.equal(f.requests("model").length, 0);
 		assert.equal(f.requests("unexpected").length, 0);
 		await f.stop();
 		const { inbox, submissions } = await f.snapshot();
 		assert.equal(submissions.length, 0);
 		assert.deepEqual(inbox.inputs, {});
-		assert.deepEqual(Object.keys(inbox.commands).sort(), [7, 8, 9, 10, 11, 12].map((id) => `tg-update:100:${id}`).sort());
+		assert.deepEqual(Object.keys(inbox.commands).sort(), [7, 8, 9, 10, 11, 12, 13].map((id) => `tg-update:100:${id}`).sort());
 		for (const receipt of Object.values(inbox.commands)) assert.equal((receipt as JsonRecord).done, true);
 		passed = true;
 	} finally { await f.close(passed); }

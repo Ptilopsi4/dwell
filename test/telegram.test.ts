@@ -37,6 +37,7 @@ async function fixture(t: TestContext, options: {
 	sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 	onMessage?: (message: NormalizedMessage) => Promise<void>;
 	onCallback?: (callback: TelegramCallback) => Promise<void>;
+	isDestinationAllowed?: (destination: TelegramDestination) => boolean;
 	saved?: unknown;
 } = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-telegram-"));
@@ -64,6 +65,7 @@ async function fixture(t: TestContext, options: {
 			onError: (error) => errors.push(error),
 			onMessage: options.onMessage ?? (async (message) => { messages.push(message); }),
 			onCallback: options.onCallback ?? (async (callback) => { callbacks.push(callback); }),
+			isDestinationAllowed: options.isDestinationAllowed,
 			timing: { now: () => clock, sleep: async (ms, signal) => { assert.equal(signal.aborted, false); waits.push(ms); await options.sleep?.(ms, signal); clock += ms; } },
 		});
 	} catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
@@ -270,12 +272,75 @@ test("Telegram persisted cursors are scoped to the bot", async (t) => {
 	assert.equal((other.requests.at(-1)!.body as { offset: number }).offset, 0);
 });
 
+test("Telegram rejects callbacks attached to another bot's message before host handling", async (t) => {
+	let polls = 0;
+	const callbacks = [999, 123].map((id, index) => ({ update_id: index + 1, callback_query: {
+		id: `callback-${id}`, from: { id: 55 }, data: "dwell:allowchat",
+		message: { ...update().message!, from: { id, is_bot: true } },
+	} }));
+	const f = await fixture(t, { respond: (request) => request.method === "getUpdates" && polls++ === 0 ? ok(callbacks) : blocked(request.signal) });
+	f.bot.start();
+	await until(() => polls >= 2);
+	assert.deepEqual(f.callbacks.map((callback) => callback.id), ["callback-123"]);
+});
+
+test("Telegram checks admission after queueing and reserves control replies for the host", async (t) => {
+	let allowed = true;
+	let finish!: () => void;
+	const pending = new Promise<void>((resolve) => { finish = resolve; });
+	const f = await fixture(t, { isDestinationAllowed: () => allowed,
+		respond: async (request) => { if ((request.body as Record<string, unknown>).text === "first") await pending; return ok({ message_id: 7 }); } });
+	const first = f.bot.send(destination, "first");
+	await until(() => f.requests.some((request) => request.method === "sendMessage"));
+	const second = assert.rejects(f.bot.send(destination, "must not leave the queue"), (error: unknown) => error instanceof TelegramError && !error.uncertain && error.code === undefined);
+	allowed = false;
+	finish();
+	await first;
+	await second;
+	await assert.rejects(f.bot.edit(destination, "tg:123:42:7", "blocked edit"), /未启用/);
+	await assert.rejects(f.bot.sendFile(destination, Buffer.from("private"), "private.txt"), /未启用/);
+	assert.equal(f.requests.filter((request) => ["sendMessage", "editMessageText", "sendDocument"].includes(request.method)).length, 1);
+	await f.bot.sendControl(destination, "群白名单管理仅 dwell 管理员可用。");
+	await f.bot.acknowledge("control-callback", "已处理");
+	assert.equal(f.requests.filter((request) => request.method === "sendMessage").length, 2);
+	assert.equal(f.bot.status(), "ready");
+	assert.equal(f.errors.length, 0);
+});
+
+test("Telegram stops later chunks, entity retries, and rate-limit retries when admission is revoked", async (t) => {
+	for (const mode of ["chunks", "entities", "rate-limit"] as const) {
+		let allowed = true;
+		const f = await fixture(t, { isDestinationAllowed: () => allowed, respond: () => {
+			allowed = false;
+			if (mode === "entities") return Response.json({ ok: false, error_code: 400, description: "Bad Request: can't parse entities" }, { status: 400 });
+			if (mode === "rate-limit") return failure(429, 1);
+			return ok({ message_id: 7 });
+		} });
+		await assert.rejects(f.bot.send(destination, mode === "chunks" ? "x".repeat(9000) : "**message**", { format: "markdown" }), /未启用/);
+		assert.equal(f.requests.filter((request) => request.method === "sendMessage").length, 1, mode);
+	}
+});
+
+test("Telegram rechecks admission after throttle waits and suppresses disabled chat activity", async (t) => {
+	let allowed = true;
+	const f = await fixture(t, { isDestinationAllowed: () => allowed, sleep: async () => { allowed = false; } });
+	await f.bot.send(destination, "first");
+	await assert.rejects(f.bot.send(destination, "blocked after wait"), /未启用/);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const stop = f.bot.startActivity(destination);
+	await setImmediate();
+	f.advanceClock(4_000); t.mock.timers.tick(4_000); await setImmediate();
+	stop();
+	assert.equal(f.requests.filter((request) => request.method === "sendChatAction").length, 0);
+	assert.equal(f.requests.filter((request) => request.method === "sendMessage").length, 1);
+});
+
 test("Telegram awaits callbacks and intentionally skips irrelevant updates before saving cursor", async (t) => {
 	let release!: () => void;
 	const pending = new Promise<void>((resolve) => { release = resolve; });
 	let seen: TelegramCallback | undefined;
 	const updates = [{ update_id: 1, callback_query: { id: "callback", from: { id: 55 }, data: "opaque",
-		message: { ...update().message!, message_thread_id: 88 } } }, { update_id: 2 }];
+		message: { ...update().message!, from: { id: 123, is_bot: true }, message_thread_id: 88 } } }, { update_id: 2 }];
 	let polls = 0;
 	const f = await fixture(t, { respond: (r) => r.method === "getUpdates" && polls++ === 0 ? ok(updates) : blocked(r.signal),
 		onCallback: async (callback) => { seen = callback; await pending; } });

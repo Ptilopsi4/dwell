@@ -108,6 +108,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate, identity: Telegr
 function normalizeCallback(update: TelegramUpdate, identity: TelegramIdentity): TelegramCallback | null {
 	const callback = update.callback_query;
 	if (!callback?.message || callback.from.is_bot || callback.data === undefined
+		|| callback.message.from?.is_bot !== true || String(callback.message.from.id) !== identity.id
 		|| !["private", "group", "supergroup"].includes(callback.message.chat.type)) return null;
 	const destination = destinationFor(callback.message, identity);
 	return { id: callback.id, senderId: `tg:${callback.from.id}`, destination,
@@ -126,6 +127,7 @@ type ConnectOptions = {
 	onCallback: (callback: TelegramCallback) => Promise<void>;
 	onError: (error: TelegramError) => void;
 	onFatal?: (error: TelegramError) => void;
+	isDestinationAllowed?: (destination: TelegramDestination) => boolean;
 	stateFile?: string;
 	fetch?: typeof fetch;
 	timing?: Timing;
@@ -239,7 +241,7 @@ export class TelegramBot {
 		if (ms > 0) await this.#sleep(ms, signal);
 	}
 
-	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination, requestSignal?: AbortSignal): Promise<T> {
+	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination, requestSignal?: AbortSignal, hostControl = false): Promise<T> {
 		const activity = method === "sendChatAction";
 		const requestLifetime = AbortSignal.any([this.#controller.signal, ...(requestSignal === undefined ? [] : [requestSignal])]);
 		for (let attempt = 0; ; attempt++) {
@@ -247,6 +249,7 @@ export class TelegramBot {
 			const chatKey = destination ? telegramChatKey(destination.botId, destination.chatId) : undefined;
 			const interval = destination?.chatId.startsWith("-") ? this.#options.timing?.groupIntervalMs ?? 3000 : this.#options.timing?.privateIntervalMs ?? 1000;
 			for (;;) {
+				if (destination !== undefined && !hostControl && this.#options.isDestinationAllowed?.(destination) === false) throw new TelegramError("Telegram 目的地未启用");
 				const deadline = Math.max(this.#cooldown, chatKey ? (this.#lastSend.get(chatKey) ?? -Infinity) + interval : 0);
 				if (activity && (requestSignal?.aborted || chatKey !== undefined && this.#queues.has(chatKey) || deadline > this.#now())) return undefined as T;
 				if (deadline <= this.#now()) break;
@@ -410,22 +413,29 @@ export class TelegramBot {
 		void operation.finally(() => { if (this.#queues.get(key) === operation) this.#queues.delete(key); }).catch(() => {});
 		return operation;
 	}
-	async #messageApi<T>(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string): Promise<T> {
-		try { return await this.#api<T>(method, body, true, destination); }
+	async #messageApi<T>(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string, hostControl = false): Promise<T> {
+		try { return await this.#api<T>(method, body, true, destination, undefined, hostControl); }
 		catch (error) {
 			if (body instanceof FormData || !Array.isArray(body.entities) || !body.entities.length
 				|| !(error instanceof TelegramError) || !this.#invalidEntityErrors.has(error)) throw error;
 			// Only an explicit entity rejection proves the first mutation did not succeed.
 			const { entities: _entities, ...plain } = body;
-			return this.#api<T>(method, plain, true, destination);
+			return this.#api<T>(method, plain, true, destination, undefined, hostControl);
 		}
 	}
-	async #sendOne(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string): Promise<string> {
-		const result = await this.#queued(destination, () => this.#messageApi<{ message_id: number }>(destination, body, method));
+	async #sendOne(destination: TelegramDestination, body: Record<string, unknown> | FormData, method: string, hostControl = false): Promise<string> {
+		const result = await this.#queued(destination, () => this.#messageApi<{ message_id: number }>(destination, body, method, hostControl));
 		if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new TelegramError("Telegram 未返回有效消息锚点", { uncertain: true });
 		return telegramMessageKey(destination, result.message_id);
 	}
 	async send(destination: TelegramDestination, text: string, options: { replyTo?: string; buttons?: TelegramButton[][]; format?: TelegramTextFormat } = {}): Promise<TelegramSent> {
+		return this.#sendText(destination, text, options);
+	}
+	/** Fixed host admission and management responses can reach a disabled group. */
+	async sendControl(destination: TelegramDestination, text: string, options: { replyTo?: string; buttons?: TelegramButton[][] } = {}): Promise<TelegramSent> {
+		return this.#sendText(destination, text, options, true);
+	}
+	async #sendText(destination: TelegramDestination, text: string, options: { replyTo?: string; buttons?: TelegramButton[][]; format?: TelegramTextFormat }, hostControl = false): Promise<TelegramSent> {
 		if (!text) throw new TelegramError("Telegram 消息不能为空");
 		const address = this.#address(destination, options.replyTo);
 		const markup = this.#markup(options.buttons);
@@ -434,7 +444,7 @@ export class TelegramBot {
 		for (let i = 0; i < chunks.length; i++) messageIds.push(await this.#sendOne(destination, {
 			...address, text: chunks[i]!.text, ...(chunks[i]!.entities.length ? { entities: chunks[i]!.entities } : {}),
 			...(i === chunks.length - 1 && markup ? { reply_markup: markup } : {}),
-		}, "sendMessage"));
+		}, "sendMessage", hostControl));
 		return { messageId: messageIds.at(-1)!, messageIds };
 	}
 	async edit(destination: TelegramDestination, messageId: string, text: string, buttons?: TelegramButton[][], options: { format?: TelegramTextFormat; preview?: boolean } = {}): Promise<void> {

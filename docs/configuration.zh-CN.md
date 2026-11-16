@@ -78,11 +78,11 @@ OpenCode Go 模板复用标准 Chat Completions adapter。SDK 为持久会话添
 |---|---|
 | `LARK_APP_ID` / `LARK_APP_SECRET` | 可选的飞书自建应用凭证，同时设置两项以启用飞书 |
 | `TELEGRAM_BOT_TOKEN` | 可选的 BotFather token，设置后启用 Telegram 长轮询 |
-| `DWELL_TELEGRAM_CHATS` | 允许的 Telegram 群/超级群 ID，逗号分隔的原始数字 ID，如 `-1001234567890` |
+| `DWELL_TELEGRAM_CHATS` | 首次启动的群种子，逗号分隔的原始数字 ID，如 `-1001234567890` |
 | `DWELL_ADMINS` | 管理员 ID，逗号分隔：飞书用 `ou_...`，Telegram 用 `tg:<数字用户 ID>` |
 | `DWELL_ALLOW` | 成员 ID，格式同上，逗号分隔 |
 
-`DWELL_TELEGRAM_CHATS` 为空时只允许私聊；允许的群仍需用户权限。
+仅当 `$DWELL_STATE/telegram-chats.json` 尚无当前 bot 的记录时，才导入 `DWELL_TELEGRAM_CHATS`。之后以该 bot 的持久名单为准，空名单表示只允许私聊。管理员用 `/allowchat`、`/disallowchat`、`/chats` 即时管理，无需重启；修改环境变量不会恢复已停用的群。群状态不可读或格式无效时拒绝启动。允许的群仍需用户权限。
 
 `DWELL_ADMINS` 和 `DWELL_ALLOW` 只在 `state/users.json` 不存在时播种一次，之后以 `users.json` 为准，用 `/allow`、`/disallow` 或 panel 维护。例如 `/allow tg:123456789 admin` 添加 Telegram 管理员，`/disallow tg:123456789` 移除该用户。已有飞书 ID 保持原样。
 

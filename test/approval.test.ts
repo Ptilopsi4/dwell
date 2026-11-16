@@ -50,6 +50,7 @@ test("安全命令不误伤", () => {
 test("状态文件与凭证面兜底拦截", () => {
 	assert.equal(stateFileBlocked("cat /opt/dwell/state/users.json"), true);
 	assert.equal(stateFileBlocked("cat state/sessions.json"), true);
+	assert.equal(stateFileBlocked("cat /var/private/telegram-chats.json"), true);
 	assert.equal(stateFileBlocked("cat /opt/dwell/state/u*.json"), true); // 通配也拦
 	assert.equal(stateFileBlocked("cat /opt/dwell/.env"), true);
 	assert.equal(stateFileBlocked("cat .env"), true);

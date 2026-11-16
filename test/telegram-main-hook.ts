@@ -17,6 +17,7 @@ const modelReplies: ModelReply[] = JSON.parse(process.env.DWELL_TEST_REPLIES ?? 
 const updateBatches: unknown[][] = [];
 const rejectedReplies = new Set<number>();
 const deletedReplies = new Set<number>();
+const rejectedCallbacks = new Set<string>();
 const released = new Set<string>();
 const waitingModels = new Map<string, () => void>();
 let waitingUpdates: ((updates: unknown[]) => void) | undefined;
@@ -72,7 +73,7 @@ TelegramInbox.prototype.enqueue = async function (id, receipt) {
 	await enqueue.call(this, id, input);
 };
 
-process.on("message", (message: { kind?: string; replies?: ModelReply[]; updates?: unknown[]; messageIds?: number[]; token?: string }) => {
+process.on("message", (message: { kind?: string; replies?: ModelReply[]; updates?: unknown[]; messageIds?: number[]; callbackIds?: string[]; token?: string }) => {
 	if (message.kind === "models") modelReplies.push(...message.replies!);
 	if (message.kind === "model-release") {
 		released.add(message.token!);
@@ -81,6 +82,7 @@ process.on("message", (message: { kind?: string; replies?: ModelReply[]; updates
 	}
 	if (message.kind === "reject-replies") for (const id of message.messageIds!) rejectedReplies.add(id);
 	if (message.kind === "delete-replies") for (const id of message.messageIds!) deletedReplies.add(id);
+	if (message.kind === "reject-callbacks") for (const id of message.callbackIds!) rejectedCallbacks.add(id);
 	if (message.kind === "updates") {
 		if (waitingUpdates !== undefined) {
 			const resolve = waitingUpdates;
@@ -196,6 +198,7 @@ globalThis.fetch = async (input, init) => {
 			const sent = method === "sendMessage" ? nextId("messageId") : undefined;
 			report({ kind: "telegram", method, body, ...(sent === undefined ? {} : { messageId: sent }) });
 			if (method === "sendChatAction" && process.env.DWELL_TEST_ACTIVITY_FAILURE === "1") return Response.json({ ok: false, error_code: 401, description: "synthetic-private-action-error" }, { status: 401 });
+			if (method === "answerCallbackQuery" && rejectedCallbacks.has(String(body.callback_query_id))) return Response.json({ ok: false, error_code: 400, description: "Synthetic expired callback" }, { status: 400 });
 			switch (method) {
 				case "getMe": return ok({ id: 100, is_bot: true, username: "AcceptanceBot", first_name: "Acceptance" });
 				case "getWebhookInfo": return ok({ url: "" });

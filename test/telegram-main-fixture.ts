@@ -16,7 +16,7 @@ export function message(id: number, text: string, overrides: JsonRecord = {}): J
 		from: { id: 200, first_name: "Member" }, text, ...overrides } };
 }
 
-export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; legacyTelegramInput?: boolean; failActivity?: boolean; vision?: boolean } = {}) {
+export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; legacyTelegramInput?: boolean; failActivity?: boolean; vision?: boolean; admins?: string } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-telegram-main-"));
 	// Production rejects model configuration in the system temporary directory.
 	const privateRoot = resolve(import.meta.dirname, "../.pi");
@@ -42,6 +42,7 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 			// Never inherit credentials, NODE_OPTIONS, or a dotenv startup argument.
 			env: { PATH: process.env.PATH, TZ: "UTC", DWELL_TZ: "UTC", DWELL_DATA: join(directory, "data"), DWELL_STATE: join(directory, "state"), DWELL_MODELS_FILE: modelsFile,
 				DWELL_MODEL_API_KEY: "synthetic-acceptance-key", TELEGRAM_BOT_TOKEN: "100:SYNTHETIC_TEST_TOKEN", DWELL_ALLOW: "tg:200,tg:201", DWELL_TELEGRAM_CHATS: "-300", DWELL_SANDBOX: "off",
+				DWELL_ADMINS: options.admins ?? "",
 				DWELL_TEST_TRANSPORT_STATE: join(directory, "transport.json"), DWELL_TEST_REPLIES: JSON.stringify(replies),
 				...(options.legacyTelegramInput ? { DWELL_TEST_LEGACY_INPUT: "1" } : {}),
 				...(options.failActivity ? { DWELL_TEST_ACTIVITY_FAILURE: "1" } : {}),
@@ -109,6 +110,7 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 		release: (token: string) => child.send({ kind: "model-release", token }),
 		rejectReplies: (messageIds: number[]) => child.send({ kind: "reject-replies", messageIds }),
 		deleteReplies: (messageIds: number[]) => child.send({ kind: "delete-replies", messageIds }),
+		rejectCallbacks: (callbackIds: string[]) => child.send({ kind: "reject-callbacks", callbackIds }),
 		updates: (updates: JsonRecord[]) => child.send({ kind: "updates", updates }),
 		requests: (kind: MainFixtureEvent["kind"], method?: string) => events.filter((event) => event.kind === kind && (method === undefined || event.method === method)),
 	};

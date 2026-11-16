@@ -39,7 +39,7 @@ dwell 使用官方 SDK 的长连接（WebSocket），服务器需要能访问公
 
 1. 用 BotFather 创建 bot，将 token 写入私有环境文件的 `TELEGRAM_BOT_TOKEN`，保持群隐私模式开启。主机需要通过 HTTPS 出站访问 Bot API，长轮询不需要公开的入站端点。
 2. 在首次使用正式状态目录前取得用户 ID。尚不知道 ID 时，用下方独立的 bootstrap 目录临时启动，私聊 bot 发送 `/whoami`，收到 `tg:<数字用户 ID>` 后停止临时进程。把该 ID 填入 `DWELL_ADMINS`，再首次启动正式实例。已有 `state/users.json` 时修改环境变量不会更新用户，此时用现有管理员的 `/allow tg:123456789 admin` 或受信任的 panel 添加。Telegram 管理员和 panel 操作者需先私聊启动 bot，才能收到通知。
-3. 群聊需邀请 bot 入群，并将原始数字群 ID 以逗号分隔写入 `DWELL_TELEGRAM_CHATS`，例如 `-1001234567890`；为空时只允许私聊。发送者仍需用户权限。修改群列表后重启。群中用 `/ask@your_bot 内容` 或回复这个 bot 的消息，单独 @ 不会发起任务；在已允许的群里用 `/whoami@your_bot` 核对群 ID。
+3. 群聊需邀请 bot 入群，发送 `/whoami@your_bot` 取得原始数字群 ID，群尚未启用时也可查询。dwell 管理员可在目标群发送 `/allowchat@your_bot`、点击「启用本群」，或私聊发送 `/allowchat -1001234567890`。用 `/disallowchat` 和 `/chats` 即时维护持久名单，无需重启。`DWELL_TELEGRAM_CHATS` 只做首次播种；`$DWELL_STATE/telegram-chats.json` 已有当前 bot 记录时以文件为准，包括空名单。发送者仍需用户权限。群中用 `/ask@your_bot 内容` 或回复这个 bot 的消息，单独 @ 不会发起任务。
 4. 每个 token 只运行一个轮询实例。启动时若已有 webhook 则拒绝启动并保留 webhook，启用长轮询前需单独处理它。认证失败 401 或轮询冲突 409 会使服务以非零退出码停止，需先修正 token 或停止竞争客户端再启动。临时传输故障持续重试，退避间隔有上限。本地副本不要使用生产 token。
 
 仅用于查询 ID 的临时启动，在已安装依赖并填好模型 key、bot token 的仓库目录执行；同一个 token 的其他实例必须先停止：

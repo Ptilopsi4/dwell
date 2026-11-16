@@ -6,7 +6,7 @@ Use dwell through Feishu, Telegram, or the web panel. Bot setup is covered in [D
 
 ## Commands
 
-Bot commands require user authorization. Telegram `/whoami` also works before authorization so you can obtain your ID; group admission still applies.
+Bot commands require user authorization. Telegram `/whoami` also works before authorization so you can obtain your ID. In an unlisted group, directed commands receive a fixed admission notice with the user and chat IDs; they do not start a task.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -18,6 +18,9 @@ Bot commands require user authorization. Telegram `/whoami` also works before au
 | `/deny` | Close your approval window and deny a waiting command; admins close all windows of the thread | Everyone |
 | `/allow <user> [admin]` | Add a member or admin | Admins |
 | `/disallow <user>` | Remove a user; the last admin cannot be removed | Admins |
+| `/allowchat [group ID]` (Telegram) | Enable a group immediately; omit its ID when sent in that group | Admins |
+| `/disallowchat [group ID]` (Telegram) | Close group input and later delivery; retain existing work | Admins |
+| `/chats` (Telegram) | List this bot's enabled groups | Admins |
 | `/whoami` | Show your platform user ID | Everyone |
 | `/help` | Show usage guidance | Everyone |
 | `/start` (Telegram) | Show startup guidance without calling the model | Authorized users |
@@ -60,7 +63,9 @@ Start a private chat and send `/whoami` to obtain your `tg:<numeric user ID>`. T
 
 Authorized users can send `/start` or `/help` for guidance. `/ask` without text shows how to submit a task; a photo or document attached to `/ask` still submits that attachment. These guidance replies do not call the model. Telegram's `/` suggestions require a command list registered through BotFather or `setMyCommands`; starting dwell does not register or overwrite the bot menu. Menu visibility does not grant command permission.
 
-Private chats accept text, photos, and documents from authorized users. Groups require both an allowed chat in `DWELL_TELEGRAM_CHATS` and an allowed sender. Keep group privacy mode enabled. Use a directed command such as `/ask@your_bot summarize this`, or reply to an actual message from this bot. A plain `@your_bot` mention does not start a task. `/whoami@your_bot` in an allowed group also shows its chat ID. Channels, messages sent as a group/channel, and messages from bots are ignored.
+Private chats accept text, photos, and documents from authorized users. Groups require both an enabled chat in the bot's persistent allowlist and an allowed sender. Keep group privacy mode enabled. Use a directed command such as `/ask@your_bot summarize this`, or reply to an actual message from this bot. A plain `@your_bot` mention does not start a task. `/whoami@your_bot` also shows the chat ID before the group is enabled. An unlisted group receives setup guidance without creating a conversation, downloading attachments, or calling a model. Channels, messages sent as a group/channel, and messages from bots are ignored.
+
+A dwell admin can send `/allowchat@your_bot` in an unlisted group or use its Enable this group button. In a private chat, provide the negative numeric ID, for example `/allowchat -1001234567890`. `/disallowchat` closes new group input and later delivery operations immediately; an operation already sent cannot be recalled. Existing conversations, admitted runs, schedules, and processes remain, with their original cancellation controls. Enabling a group does not authorize its members. Group commands and buttons recheck the current dwell role; Telegram group administrators do not automatically receive it. Replayed control requests do not undo a later allowlist change.
 
 ### Conversation routing and commands
 
