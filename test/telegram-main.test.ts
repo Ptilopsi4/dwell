@@ -38,8 +38,8 @@ test("main Telegram delivers both answers when a busy input becomes a later gene
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram persists a blocked attachment while another chat and cancellation remain responsive", { timeout: 60_000 }, async (t) => {
-	const f = await mainFixture(t, [{ text: "Other chat completed." }]);
+test("main Telegram cancels a blocked attachment and admits later input on the same route", { timeout: 60_000 }, async (t) => {
+	const f = await mainFixture(t, [{ text: "Other chat completed.", match: "Another chat ordinary input" }, { text: "Replacement completed.", match: "Replacement after attachment cancellation" }]);
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
@@ -52,19 +52,74 @@ test("main Telegram persists a blocked attachment while another chat and cancell
 			message(212, "/cancel"),
 		]);
 		await f.until((event) => event.method === "sendMessage" && event.body.text === "已中止当前任务。");
+		await f.until((event) => event.method === "media.aborted" && event.body.token === "file:hold-cancel");
 		await f.until((event) => event.method === "editMessageText" && event.body.text === "Other chat completed.");
 		assert.equal(f.requests("checkpoint", "media.downloaded").length, 0);
 		const activityCount = f.requests("telegram", "sendChatAction").length;
 		await delay(4_100);
-		assert.equal(f.requests("telegram", "sendChatAction").length, activityCount, "Cancelled preprocessing must release its activity while the download is still blocked");
-		f.release("file:hold-cancel");
-		await f.until((event) => event.method === "telegram.prepared" && event.body.id === "tg-update:100:210");
+		assert.equal(f.requests("telegram", "sendChatAction").length, activityCount, "Cancelled preprocessing must release its activity");
+		f.updates([message(213, "Replacement after attachment cancellation")]);
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:213" && event.body.state === "done");
 		await f.stop();
-		const row = (await f.snapshot()).inbox.inputs["tg-update:100:210"];
+		const { inbox } = await f.snapshot();
+		const row = inbox.inputs["tg-update:100:210"];
 		assert.equal(row.output, "failed");
+		assert.equal(row.prepared, false);
+		assert.equal(row.content, "");
+		assert.equal(row.preparationAttempts, undefined);
 		assert.equal(row.submissionId, undefined);
 		assert.match(row.raw!, /hold-cancel/);
-		assert.equal(f.requests("model").length, 1, "Cancelled preprocessing must not start a delayed model run");
+		assert.equal(inbox.inputs["tg-update:100:213"].conversationId, row.conversationId);
+		assert.equal(f.requests("checkpoint", "media.downloaded").length, 0);
+		assert.equal(f.requests("model").length, 2, "Only the other chat and replacement input may request the model");
+		assert.equal(f.requests("unexpected").length, 0);
+		passed = true;
+	} finally { await f.close(passed); }
+});
+
+test("main Telegram cancels vision preparation and preserves the cancelled receipt across restart", { timeout: 60_000 }, async (t) => {
+	const f = await mainFixture(t, [
+		{ text: "Cancelled vision description", wait: "cancel-vision", match: "Describe this image" },
+		{ text: "Vision replacement completed.", match: "Replacement after vision cancellation" },
+	], { vision: true });
+	let passed = false;
+	try {
+		await f.until((event) => event.method === "getUpdates");
+		f.updates([message(216, "Analyze this image", { photo: [{ file_id: "image-cancel", width: 1, height: 1, file_size: 12 }] })]);
+		await f.until((event) => event.method === "model.waiting" && event.body.token === "cancel-vision");
+		assert.equal(f.requests("model")[0].body.model, "opaque-acceptance-vision");
+		f.updates([message(217, "/cancel")]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已中止当前任务。");
+		await f.until((event) => event.method === "model.aborted" && event.body.token === "cancel-vision");
+		f.updates([message(218, "Replacement after vision cancellation")]);
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:218" && event.body.state === "done");
+		await f.stop();
+		const before = await f.snapshot();
+		const cancelled = before.inbox.inputs["tg-update:100:216"];
+		assert.equal(cancelled.output, "failed");
+		assert.equal(cancelled.prepared, false);
+		assert.equal(cancelled.submissionId, undefined);
+		assert.equal(cancelled.preparationAttempts, undefined);
+		assert.equal(f.requests("model").length, 2, "Cancelled vision must not submit its description to the main model");
+		const afterRestart = f.events.length;
+		f.start([{ text: "Later work completed.", wait: "later-work" }]);
+		await f.until((event) => event.method === "getUpdates", afterRestart);
+		f.updates([message(219, "New work after restart")]);
+		await f.until((event) => event.method === "model.waiting" && event.body.token === "later-work", afterRestart);
+		const replay = f.events.length;
+		f.updates([message(217, "/cancel")]);
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 220, replay);
+		assert.equal(f.requests("checkpoint", "model.aborted").filter((event) => event.body.token === "later-work").length, 0);
+		f.release("later-work");
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:219" && event.body.state === "done", afterRestart);
+		await f.stop();
+		const after = await f.snapshot();
+		assert.deepEqual(after.inbox.inputs["tg-update:100:216"], cancelled);
+		assert.equal(f.events.slice(afterRestart).filter((event) => event.method === "getFile").length, 0);
+		assert.equal(after.submissions.filter((submission) => submission.requestId === "tg-update:100:218").length, 1);
+		assert.equal(after.submissions.filter((submission) => submission.requestId === "tg-update:100:219").length, 1);
+		assert.equal(f.requests("model").length, 3);
+		assert.equal(f.requests("unexpected").length, 0);
 		passed = true;
 	} finally { await f.close(passed); }
 });

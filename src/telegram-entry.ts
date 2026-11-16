@@ -61,14 +61,15 @@ export class TelegramInbox {
 	async prepared(id: string, content: string): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const row = (await tx.doc(TelegramInboxDoc)).inputs[id];
+			if (row === undefined || row.output !== "pending" || row.submissionId !== undefined) return;
 			row.content = content;
 			row.prepared = true;
 		}, BACKGROUND_CONTEXT);
 	}
-	async preparationFailed(id: string): Promise<boolean> {
+	async preparationFailed(id: string): Promise<boolean | undefined> {
 		return this.#harness.commit(async (tx) => {
 			const row = (await tx.doc(TelegramInboxDoc)).inputs[id];
-			if (row.output !== "pending") return false;
+			if (row === undefined || row.output !== "pending") return undefined;
 			row.preparationAttempts = (row.preparationAttempts ?? 0) + 1;
 			row.retryAt = Date.now() + Math.min(30_000, 1000 * 2 ** (row.preparationAttempts - 1));
 			if (row.preparationAttempts >= 3) row.output = "failed";
@@ -161,7 +162,7 @@ export class TelegramInbox {
 
 /** SQLite owns the backlog; only a bounded number of routes hold in-memory workers. */
 export class TelegramInputWorkers {
-	#active = new Map<number, Promise<void>>();
+	#active = new Map<number, { id: string; controller: AbortController; task: Promise<void> }>();
 	#timer?: ReturnType<typeof setTimeout>;
 	#scanning = false;
 	#stopped = true;
@@ -182,8 +183,12 @@ export class TelegramInputWorkers {
 		if (this.#stopped || this.#timer !== undefined) return;
 		this.#timer = setTimeout(() => { this.#timer = undefined; void this.#pump(); }, 0);
 	}
+	cancel(ids: string[]): void {
+		const cancelled = new Set(ids);
+		for (const active of this.#active.values()) if (cancelled.has(active.id)) active.controller.abort();
+	}
 	stop(): void { this.#stopped = true; this.#controller.abort(); if (this.#timer !== undefined) clearTimeout(this.#timer); this.#timer = undefined; }
-	async close(): Promise<void> { this.stop(); await Promise.allSettled(this.#active.values()); }
+	async close(): Promise<void> { this.stop(); await Promise.allSettled([...this.#active.values()].map((active) => active.task)); }
 	async #pump(): Promise<void> {
 		if (this.#stopped || this.#scanning) return;
 		this.#scanning = true;
@@ -194,12 +199,15 @@ export class TelegramInputWorkers {
 				if (routes.has(row.conversationId)) continue;
 				routes.add(row.conversationId);
 				if (this.#active.has(row.conversationId) || (row.retryAt ?? 0) > Date.now()) continue;
-				const task = this.#process(id, row, this.#controller.signal).catch(async (error: unknown) => {
-					if (this.#stopped) return;
+				const controller = new AbortController();
+				const signal = AbortSignal.any([this.#controller.signal, controller.signal]);
+				const task = Promise.resolve().then(() => this.#process(id, row, signal)).catch(async (error: unknown) => {
+					if (signal.aborted) return;
 					const terminal = await this.#inbox.preparationFailed(id);
+					if (terminal === undefined) return;
 					await this.#onError(id, row, error, terminal);
 				}).finally(() => { this.#active.delete(row.conversationId); this.wake(); });
-				this.#active.set(row.conversationId, task);
+				this.#active.set(row.conversationId, { id, controller, task });
 				void task.catch((error: unknown) => console.error("[dwell] Telegram 输入恢复失败:", error));
 			}
 		} catch (error) { console.error("[dwell] Telegram 输入队列读取失败:", error); }

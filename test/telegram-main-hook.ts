@@ -159,6 +159,7 @@ globalThis.fetch = async (input, init) => {
 	const url = new URL(request.url);
 	if (url.origin === "https://api.telegram.org" && url.pathname.startsWith("/file/bot100:SYNTHETIC_TEST_TOKEN/files/")) {
 		report({ kind: "checkpoint", method: "media.downloaded", body: { file: url.pathname.split("/").at(-1) } });
+		if (url.pathname.split("/").at(-1)!.startsWith("image-")) return new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]));
 		return new Response("Synthetic attachment content.");
 	}
 	const body = await request.json() as JsonRecord;
@@ -169,8 +170,15 @@ globalThis.fetch = async (input, init) => {
 		if (reply === undefined) throw new Error("Unexpected additional model request");
 		if (reply.wait !== undefined && !released.has(reply.wait)) {
 			const token = reply.wait;
-			await new Promise<void>((resolve) => {
-				waitingModels.set(token, resolve);
+			await new Promise<void>((resolve, reject) => {
+				const abort = () => {
+					waitingModels.delete(token);
+					report({ kind: "checkpoint", method: "model.aborted", body: { token } });
+					reject(new Error("Fixture model request aborted"));
+				};
+				waitingModels.set(token, () => { signal.removeEventListener("abort", abort); resolve(); });
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
 				report({ kind: "checkpoint", method: "model.waiting", body: { token } });
 			});
 		}
@@ -196,7 +204,11 @@ globalThis.fetch = async (input, init) => {
 					const token = `file:${body.file_id}`;
 					if (String(body.file_id).startsWith("hold-") && !released.has(token)) {
 						await new Promise<void>((resolve, reject) => {
-							const abort = () => { waitingModels.delete(token); reject(new Error("Fixture download aborted")); };
+							const abort = () => {
+								waitingModels.delete(token);
+								report({ kind: "checkpoint", method: "media.aborted", body: { token } });
+								reject(new Error("Fixture download aborted"));
+							};
 							waitingModels.set(token, () => { signal.removeEventListener("abort", abort); resolve(); });
 							if (signal.aborted) abort();
 							else signal.addEventListener("abort", abort, { once: true });

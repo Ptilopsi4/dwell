@@ -70,6 +70,63 @@ test("Telegram preprocessing workers bound concurrency and serialize each durabl
 	} finally { await t.close(); }
 });
 
+test("Telegram input cancellation retains the route until cleanup and preserves shutdown recovery", async () => {
+	const t = await setup();
+	const started: string[] = [];
+	const signals = new Map<string, AbortSignal>();
+	let finishCleanup!: () => void;
+	const cleanup = new Promise<void>((resolve) => { finishCleanup = resolve; });
+	let cancelled = false;
+	const errors: unknown[] = [];
+	const waitFor = async (predicate: () => boolean) => {
+		for (let i = 0; i < 2000; i++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 1)); }
+		assert.fail("Worker checkpoint not reached");
+	};
+	const workers = new TelegramInputWorkers(t.inbox, async (id, _row, signal) => {
+		started.push(id);
+		signals.set(id, signal);
+		if (id === "second") await t.inbox.prepared(id, "prepared replacement survives shutdown");
+		try {
+			await new Promise<void>((_resolve, reject) => {
+				const abort = () => { if (id === "first") cancelled = true; reject(signal.reason); };
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			});
+		} finally { if (id === "first") await cleanup; }
+	}, async (_id, _row, error) => { errors.push(error); }, 1);
+	try {
+		for (const id of ["first", "second"]) {
+			const raw = { resources: [], content: id } as unknown as NormalizedMessage;
+			await t.inbox.enqueue(id, { conversationId: 42, sender: "tg:300", destination, replyTo: id, raw });
+		}
+		workers.start();
+		await waitFor(() => started.length === 1);
+		await t.inbox.cancelInputs(["first"]);
+		workers.cancel(["first"]);
+		await waitFor(() => cancelled);
+		assert.equal(workers.status().activeRoutes, 1);
+		assert.deepEqual(started, ["first"], "Cancellation must not release the route while cleanup can still write");
+		await t.inbox.prepared("first", "late cancelled content");
+		const first = await t.inbox.input("first");
+		assert.equal(first?.prepared, false);
+		assert.equal(first?.content, "");
+		assert.equal(first?.output, "failed");
+		finishCleanup();
+		await waitFor(() => started.length === 2);
+		await waitFor(() => signals.has("second"));
+		workers.cancel(["first"]);
+		assert.equal(signals.get("second")?.aborted, false, "A replayed cancellation must not target later route input");
+		await workers.close();
+		await t.reopen();
+		const second = await t.inbox.input("second");
+		assert.equal(second?.output, "pending");
+		assert.equal(second?.prepared, true);
+		assert.equal(second?.content, "prepared replacement survives shutdown");
+		for (const id of ["first", "second"]) assert.equal((await t.inbox.input(id))?.preparationAttempts, undefined);
+		assert.deepEqual(errors, []);
+	} finally { finishCleanup(); await workers.close(); await t.close(); }
+});
+
 async function setup() {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-telegram-entry-"));
 	const faux = fauxProvider();

@@ -34,6 +34,7 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 async function fixture(t: TestContext, options: {
 	respond?: (request: Request) => Response | Promise<Response>;
+	sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 	onMessage?: (message: NormalizedMessage) => Promise<void>;
 	onCallback?: (callback: TelegramCallback) => Promise<void>;
 	saved?: unknown;
@@ -63,7 +64,7 @@ async function fixture(t: TestContext, options: {
 			onError: (error) => errors.push(error),
 			onMessage: options.onMessage ?? (async (message) => { messages.push(message); }),
 			onCallback: options.onCallback ?? (async (callback) => { callbacks.push(callback); }),
-			timing: { now: () => clock, sleep: async (ms, signal) => { assert.equal(signal.aborted, false); waits.push(ms); clock += ms; } },
+			timing: { now: () => clock, sleep: async (ms, signal) => { assert.equal(signal.aborted, false); waits.push(ms); await options.sleep?.(ms, signal); clock += ms; } },
 		});
 	} catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
 	t.after(async () => { await bot.close(); await rm(dir, { recursive: true, force: true }); });
@@ -613,6 +614,50 @@ test("Telegram downloads enforce getFile size before making a tokenized download
 	const f = await fixture(t, { respond: () => ok({ file_path: "documents/file", file_size: 20 * 1024 * 1024 + 1 }) });
 	await assert.rejects(f.bot.download("doc"), /20 MiB/);
 	assert.deepEqual(f.requests.map((r) => r.method), ["getMe", "getWebhookInfo", "getFile"]);
+});
+
+for (const stage of ["getFile", "download", "body"] as const) test(`Telegram input cancellation aborts ${stage} without exposing tokenized URLs`, async (t) => {
+	const controller = new AbortController();
+	let waiting = false;
+	let pendingSignal: AbortSignal | undefined;
+	const f = await fixture(t, { respond: (request) => {
+		if (request.method === "getFile" && stage !== "getFile") return ok({ file_path: "documents/file" });
+		pendingSignal = request.signal;
+		waiting = true;
+		if (stage !== "body") return blocked(request.signal);
+		return new Response(new ReadableStream<Uint8Array>({
+			start(stream) { request.signal.addEventListener("abort", () => stream.error(new Error(`download aborted ${token}`)), { once: true }); },
+		}));
+	} });
+	const pending = assert.rejects(f.bot.download("doc", controller.signal), (error: unknown) => {
+		assert.ok(error instanceof TelegramError);
+		assert.doesNotMatch(error.stack ?? "", /FAKE_TOKEN|\/file\/bot/);
+		assert.equal(error.cause, undefined);
+		return true;
+	});
+	await until(() => waiting);
+	controller.abort();
+	await pending;
+	assert.equal(pendingSignal?.aborted, true);
+});
+
+test("Telegram cancelled getFile retry leaves cooldown waiting without another request", async (t) => {
+	const controller = new AbortController();
+	let waiting = false;
+	const f = await fixture(t, {
+		respond: () => failure(429, 30),
+		sleep: async (_ms, signal) => {
+			waiting = true;
+			await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+		},
+	});
+	const pending = assert.rejects(f.bot.download("doc", controller.signal), /abort/i);
+	await until(() => waiting);
+	controller.abort();
+	await pending;
+	assert.equal(f.requests.filter((request) => request.method === "getFile").length, 1);
+	await assert.rejects(f.bot.download("doc", controller.signal), /abort/i);
+	assert.equal(f.requests.filter((request) => request.method === "getFile").length, 1);
 });
 
 test("Telegram download caps Content-Length and streaming data; successful bytes remain intact", async (t) => {

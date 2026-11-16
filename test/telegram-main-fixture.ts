@@ -16,14 +16,15 @@ export function message(id: number, text: string, overrides: JsonRecord = {}): J
 		from: { id: 200, first_name: "Member" }, text, ...overrides } };
 }
 
-export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; legacyTelegramInput?: boolean; failActivity?: boolean } = {}) {
+export async function mainFixture(t: TestContext, initialReplies: ModelReply[] = [], options: { panel?: boolean; legacyTelegramInput?: boolean; failActivity?: boolean; vision?: boolean } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-telegram-main-"));
 	// Production rejects model configuration in the system temporary directory.
 	const privateRoot = resolve(import.meta.dirname, "../.pi");
 	await mkdir(privateRoot, { recursive: true });
 	const configDirectory = await mkdtemp(join(privateRoot, "telegram-main-"));
 	const modelsFile = join(configDirectory, "models.json");
-	await writeFile(modelsFile, JSON.stringify({ main: { api: "openai-responses", baseUrl: "https://models.invalid/v1", model: "opaque-acceptance-model", apiKeyEnv: "DWELL_MODEL_API_KEY", compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true } }, vision: null }));
+	const connection = { api: "openai-responses", baseUrl: "https://models.invalid/v1", model: "opaque-acceptance-model", apiKeyEnv: "DWELL_MODEL_API_KEY", compat: { supportsAdditionalTools: true, supportsMidConvoSystemMessages: true } };
+	await writeFile(modelsFile, JSON.stringify({ main: connection, vision: options.vision ? { ...connection, model: "opaque-acceptance-vision", input: ["text", "image"] } : null }));
 	const events: MainFixtureEvent[] = [];
 	const changed = new EventEmitter();
 	let logs = "";

@@ -34,6 +34,31 @@ test("sniffImageMime 识别四种图片格式与未知数据", () => {
 	assert.equal(sniffImageMime(Buffer.from([1, 2])), null); // 过短
 });
 
+for (const stage of ["download", "save", "vision"] as const) test(`cancelled attachment stops at ${stage} without preparing later resources`, async () => {
+	const controller = new AbortController();
+	const calls: string[] = [];
+	const stopped = new Error("Attachment cancelled");
+	await assert.rejects(preprocess(msgOf([{ type: "image", fileKey: "first" }, { type: "image", fileKey: "later" }]), "/unused", {
+		download: async (key, _type, signal) => {
+			assert.equal(signal, controller.signal);
+			calls.push(`download:${key}`);
+			if (stage === "download") controller.abort(stopped);
+			return PNG;
+		},
+		save: async () => {
+			calls.push("save");
+			if (stage === "save") controller.abort(stopped);
+		},
+		describer: async (_base64, _mime, signal) => {
+			assert.equal(signal, controller.signal);
+			calls.push("vision");
+			controller.abort(stopped);
+			throw stopped;
+		},
+	}, controller.signal), (error: unknown) => error === stopped);
+	assert.deepEqual(calls, stage === "download" ? ["download:first"] : stage === "save" ? ["download:first", "save"] : ["download:first", "save", "vision"]);
+});
+
 test("图片经 describer 生成描述并落盘留档", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const seen: { mime: string; data: string }[] = [];

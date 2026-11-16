@@ -914,6 +914,7 @@ async function withTelegramAdmission<T>(id: number, action: () => Promise<T>): P
 
 async function processTelegramInput(id: string, row: TelegramInputReceipt, signal: AbortSignal): Promise<void> {
 	const conversation = await sessions.byConversation(row.conversationId as ConversationId);
+	if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
 	if (conversation === undefined || !users.isAllowed(row.sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); return; }
 	const msg = JSON.parse(row.raw!) as NormalizedMessage;
 	let content = row.content;
@@ -924,7 +925,7 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 			telegramPreparationActivities.set(id, stopActivity);
 			try {
 				const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
-				const attachment = await describeResources(msg, cwd, { download: (key) => telegram!.download(key), describer: imageDescriber, save: uploads.save });
+				const attachment = await describeResources(msg, cwd, { download: (key, _type, signal) => telegram!.download(key, signal), describer: imageDescriber, save: uploads.save }, signal);
 				content = [content, attachment].filter(Boolean).join("\n\n");
 			} finally {
 				stopActivity();
@@ -1229,6 +1230,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			}
 			if (receipt !== undefined) {
 				await telegramInbox.cancelInputs(receipt.cancelInputIds ?? []);
+				telegramWorkers.cancel(receipt.cancelInputIds ?? []);
 				for (const id of receipt.cancelInputIds ?? []) { telegramPreparationActivities.get(id)?.(); telegramPreparationActivities.delete(id); }
 				if (receipt.cancelTaskId !== undefined) await harness.abortTask(receipt.cancelTaskId as TaskId, context);
 			} else await conversation.abort(context);

@@ -90,6 +90,31 @@ test("each vision request gets a 60-second abort signal", async (t) => {
 	assert.equal(requests, 2);
 });
 
+test("vision request cancellation aborts the provider and rejects before a completed description", async (t) => {
+	const controller = new AbortController();
+	let providerSignal: AbortSignal | undefined;
+	let started!: () => void;
+	const waiting = new Promise<void>((resolve) => { started = resolve; });
+	const fetchMock = mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+		providerSignal = init!.signal!;
+		started();
+		return new Promise<Response>((_resolve, reject) => {
+			const abort = () => reject(providerSignal!.reason);
+			if (providerSignal!.aborted) abort();
+			else providerSignal!.addEventListener("abort", abort, { once: true });
+		});
+	});
+	t.after(() => fetchMock.mock.restore());
+	const describe = makeImageDescriber(legacyConfig().vision, "test-key")!;
+	const request = describe("aW1hZ2U=", "image/png", controller.signal);
+	await waiting;
+	controller.abort();
+	await assert.rejects(request, /abort/i);
+	assert.equal(providerSignal?.aborted, true);
+	await assert.rejects(describe("aW1hZ2U=", "image/png", controller.signal), /abort/i);
+	assert.equal(fetchMock.mock.callCount(), 1, "Already-cancelled vision must not create a provider request");
+});
+
 test("vision provider errors reach the caller for media degradation", async (t) => {
 	const fetchMock = mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ error: { message: "Vision access denied", type: "authentication_error" } }), { status: 401, headers: { "Content-Type": "application/json" } }));
 	t.after(() => fetchMock.mock.restore());

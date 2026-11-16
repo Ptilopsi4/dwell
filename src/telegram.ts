@@ -233,25 +233,27 @@ export class TelegramBot {
 		this.#token = "";
 	}
 
-	async #wait(ms: number): Promise<void> {
+	async #wait(ms: number, signal = this.#controller.signal): Promise<void> {
 		if (this.#controller.signal.aborted) throw new TelegramError("Telegram 连接已关闭");
-		if (ms > 0) await this.#sleep(ms, this.#controller.signal);
+		signal.throwIfAborted();
+		if (ms > 0) await this.#sleep(ms, signal);
 	}
 
-	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination, activitySignal?: AbortSignal): Promise<T> {
+	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination, requestSignal?: AbortSignal): Promise<T> {
 		const activity = method === "sendChatAction";
+		const requestLifetime = AbortSignal.any([this.#controller.signal, ...(requestSignal === undefined ? [] : [requestSignal])]);
 		for (let attempt = 0; ; attempt++) {
-			await this.#wait(0);
+			await this.#wait(0, requestLifetime);
 			const chatKey = destination ? telegramChatKey(destination.botId, destination.chatId) : undefined;
 			const interval = destination?.chatId.startsWith("-") ? this.#options.timing?.groupIntervalMs ?? 3000 : this.#options.timing?.privateIntervalMs ?? 1000;
 			for (;;) {
 				const deadline = Math.max(this.#cooldown, chatKey ? (this.#lastSend.get(chatKey) ?? -Infinity) + interval : 0);
-				if (activity && (activitySignal?.aborted || chatKey !== undefined && this.#queues.has(chatKey) || deadline > this.#now())) return undefined as T;
+				if (activity && (requestSignal?.aborted || chatKey !== undefined && this.#queues.has(chatKey) || deadline > this.#now())) return undefined as T;
 				if (deadline <= this.#now()) break;
-				await this.#wait(Math.min(60_000, deadline - this.#now()));
+				await this.#wait(Math.min(60_000, deadline - this.#now()), requestLifetime);
 			}
 			if (chatKey && !activity) this.#lastSend.set(chatKey, this.#now());
-			const signal = AbortSignal.any([this.#controller.signal, ...(activitySignal === undefined ? [] : [activitySignal]), AbortSignal.timeout(activity ? 2_000 : method === "getUpdates" ? 35_000 : 30_000)]);
+			const signal = AbortSignal.any([requestLifetime, AbortSignal.timeout(activity ? 2_000 : method === "getUpdates" ? 35_000 : 30_000)]);
 			let response: Response;
 			let payload: { ok?: boolean; result?: T; error_code?: number; description?: string; parameters?: { retry_after?: number } };
 			try {
@@ -458,14 +460,15 @@ export class TelegramBot {
 	async acknowledge(callbackId: string, text?: string): Promise<void> {
 		await this.#api("answerCallbackQuery", { callback_query_id: callbackId, ...(text ? { text: text.slice(0, 200) } : {}) });
 	}
-	async download(fileId: string): Promise<Buffer> {
-		const file = await this.#api<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
+	async download(fileId: string, signal?: AbortSignal): Promise<Buffer> {
+		const file = await this.#api<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId }, false, undefined, signal);
+		signal?.throwIfAborted();
 		if ((file.file_size ?? 0) > DOWNLOAD_LIMIT) throw new TelegramError("Telegram 下载文件超过 20 MiB");
 		if (!file.file_path || !/^[a-zA-Z0-9_./-]+$/.test(file.file_path) || file.file_path.split("/").includes("..")) throw new TelegramError("Telegram 下载路径无效");
 		let response: Response;
 		try {
 			response = await this.#fetch(`https://api.telegram.org/file/bot${this.#token}/${file.file_path}`, {
-				signal: AbortSignal.any([this.#controller.signal, AbortSignal.timeout(30_000)]), redirect: "error",
+				signal: AbortSignal.any([this.#controller.signal, ...(signal === undefined ? [] : [signal]), AbortSignal.timeout(30_000)]), redirect: "error",
 			});
 			if (!response.ok || !response.body) throw new TelegramError("Telegram 文件下载失败");
 			if (Number(response.headers.get("content-length")) > DOWNLOAD_LIMIT) {
@@ -477,6 +480,7 @@ export class TelegramBot {
 			let size = 0;
 			try {
 				for (;;) {
+					signal?.throwIfAborted();
 					const { done, value } = await reader.read();
 					if (done) break;
 					size += value.byteLength;

@@ -373,14 +373,15 @@ export function runConversations(graph: TaskGraph | undefined): Set<number> {
 
 export const VISION_MODEL_ID = MODEL_CONFIG.vision?.model;
 
-export type ImageDescriber = (base64: string, mimeType: string) => Promise<string>;
+export type ImageDescriber = (base64: string, mimeType: string, signal?: AbortSignal) => Promise<string>;
 
 /** A missing key disables vision; an explicitly configured unusable model fails startup. */
 export function makeImageDescriber(connection: ResolvedModelConnection | undefined = MODEL_CONFIG.vision, key = connection === undefined ? undefined : process.env[connection.apiKeyEnv]): ImageDescriber | null {
 	if (connection === undefined || key === undefined || key === "") return null;
 	if (!connection.metadata.input.includes("image")) throw new Error(`视觉模型 ${connection.model} 不支持图片输入；请配置支持图片的连接`);
 	const { models, model } = createModelClient(connection, key);
-	return async (base64, mimeType) => {
+	return async (base64, mimeType, signal) => {
+		signal?.throwIfAborted();
 		const context = normalizeContext({
 			messages: [
 				{
@@ -393,7 +394,8 @@ export function makeImageDescriber(connection: ResolvedModelConnection | undefin
 				},
 			],
 		});
-		const answer = await models.completeSimple(model, context, { maxTokens: 1024, signal: AbortSignal.timeout(60_000) });
+		const answer = await models.completeSimple(model, context, { maxTokens: 1024, signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal === undefined ? [] : [signal])]) });
+		signal?.throwIfAborted();
 		if (answer.errorMessage !== undefined) throw new Error(answer.errorMessage);
 		const text = answer.content.filter((part) => part.type === "text").map((part) => part.text).join("");
 		return text.trim() !== "" ? text : "(the model returned no description)";
