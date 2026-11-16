@@ -10,7 +10,7 @@ import { creatorVia, decisionInput, removeApprovalTarget, type RunVia } from "./
 import { canonicalWorkspace, checkBackgroundWorkspace, markBackgroundWorkspaceStopped, prepareBackgroundWorkspace, readOnlyWorkspaceTool, registerBackgroundWorkspace, releaseStoppedWorkspace, workspaceStartViolation, WorkspaceDoc } from "../workspace.ts";
 import { DEFAULT_CWD } from "../state.ts";
 import { resolve } from "node:path";
-import { inheritWork, workIdentity, type WorkIdentity } from "./work.ts";
+import { inheritWork, workBudgetStopReason, workIdentity, type WorkIdentity } from "./work.ts";
 
 export const BACKGROUND_ANCHOR_KIND = "dwell.background-anchor";
 export const BACKGROUND_REPORTER_KIND = "dwell.background-reporter";
@@ -322,9 +322,10 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 				);
 				const settled = await submission.wait(context);
 				if (settled.status !== "done" || settled.type !== "input") {
-					// 被中止（stop/重启级联）不回报；失败把原因带回父会话
+					// Explicit cancellation stays silent; both budget ledgers need a durable parent report.
 					const aborted = settled.status === "unanswered" && settled.reason === "aborted";
-					const budget = aborted ? await deps.budgetStopReason?.(input.child, input.approval?.budgetId ?? `${input.child}:${String(submission.id)}`) : undefined;
+					const budgetId = input.approval?.budgetId ?? `${input.child}:${String(submission.id)}`;
+					const budget = aborted ? (await deps.budgetStopReason?.(input.child, budgetId)) ?? await workBudgetStopReason(runtime, input.child, budgetId, context) : undefined;
 					const note = budget !== undefined ? `[Background task ${input.name}] stopped at its execution budget (${budget}). Report this limit to the user; do not silently restart it.` : aborted ? undefined : `[Background task ${input.name}] failed: ${settled.status === "unanswered" ? settled.reason : settled.status}.`;
 					await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report", ...(note === undefined ? {} : { report: note }) } }), context);
 					return;

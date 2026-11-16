@@ -75,6 +75,19 @@ export async function workIdentity(tx: Tx, conversationId: number, budgetId?: st
 	return doc.current === undefined ? undefined : { conversationId, id: doc.current };
 }
 
+/** Failure presentation must follow the stopped input, even after its current goal changes. */
+export async function workBudgetStopReason(store: Pick<Harness, "snapshot">, conversationId: number, budgetId: string, context: Context = BACKGROUND_CONTEXT): Promise<WorkRecord["stopped"]> {
+	const prefix = `${conversationId}:`;
+	if (!budgetId.startsWith(prefix)) return undefined;
+	const input = budgetId.slice(prefix.length);
+	if (!/^\d+$/.test(input)) return undefined;
+	const doc = await store.snapshot(WorkDoc, conversationId as ConversationId, context);
+	const identity = doc?.runs[input];
+	if (identity == null) return undefined;
+	const record = (await store.snapshot(WorkDoc, identity.conversationId as ConversationId, context))?.records[identity.id];
+	return record?.stopped;
+}
+
 /** A child retains its creation-time goal, including an explicit absence of one. */
 export async function inheritWork(tx: Tx, parent: number, child: number): Promise<void> {
 	const doc = await tx.doc(WorkDoc, child as ConversationId);

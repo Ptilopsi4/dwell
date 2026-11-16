@@ -12,7 +12,7 @@ import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } f
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { beginNewGoal, NewGoalDoc } from "./new-goal.ts";
-import { getWork } from "./ext/work.ts";
+import { getWork, workBudgetStopReason } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
@@ -1598,6 +1598,8 @@ async function runFailureReason(conversationId: number, settled: SubmissionRecor
 	const reason = await runtimeBudgets(harness)?.stopReason(conversationId, budgetId);
 	const labels = { model_limit: "模型请求次数达到上限", tool_limit: "工具调用次数达到上限", execution_limit: "执行时间达到上限", unknown_budget: "无法恢复原运行预算", storage_error: "无法可靠保存运行预算" };
 	if (reason !== undefined) return `运行预算已停止任务：${labels[reason]}`;
+	const workReason = await workBudgetStopReason(harness, conversationId, budgetId);
+	if (workReason !== undefined) return `工作预算已停止任务：${labels[workReason]}`;
 	if (settled.status === "unanswered" && settled.reason === "model_error") return modelFailure(typeof settled.detail === "string" ? settled.detail : "").message;
 	return settled.status === "unanswered" ? settled.reason : settled.status;
 }
