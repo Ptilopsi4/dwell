@@ -152,6 +152,37 @@ test("wait admits an already queued report after its Reporter becomes terminal",
 	} finally { waitGate.release(); await s.close(); }
 });
 
+test("an invalid task wait action directs the model to the separate replay-safe tool and recovers", { timeout: 10_000 }, async () => {
+	const childGate = gate(); let parentId: number | undefined; let step = 0;
+	const s = await setup((transcript) => {
+		const input = users(transcript);
+		if (input.includes("Background task")) return done("relayed result");
+		if (input.includes("worker:")) return done("child result");
+		if (step++ === 0) return calls({ name: "dwell.task", args: { action: "wait" } });
+		const invalid = transcript.messages.filter((item) => item.role === "toolResult").at(-1)!;
+		assert.equal(invalid.role, "toolResult");
+		if (invalid.role === "toolResult") {
+			assert.equal(invalid.isError, true);
+			assert.match(JSON.stringify(invalid.content), /dwell\.task\.wait/);
+			assert.match(JSON.stringify(invalid.content), /arguments/);
+			assert.match(JSON.stringify(invalid.content), /alone/);
+		}
+		return wait();
+	}, { attribute: async (id) => { if (id !== parentId) await childGate.promise; } });
+	try {
+		const parent = await s.conversation(); parentId = parent.id; await s.spawn(parent);
+		const answer = await waitAnswer(s, parent);
+		assert.equal(s.faux.state.callCount, 2, "only the invalid call and corrected wait request the model before yielding");
+		assert.equal(await backgroundWaitingAnswer(s.harness, parent.id, answer.answer), true);
+		const definition = s.background.tools!.find((item) => item.name === "dwell.task")!;
+		assert.doesNotMatch(JSON.stringify(definition.parameters), /"const":"wait"/);
+		assert.equal(s.background.tools!.find((item) => item.name === BACKGROUND_WAIT_TOOL)!.replay, "safe");
+		childGate.release(); await until(() => s.fired.length === 1);
+		const resumed = await (await s.harness.submission(s.fired[0]!, context))!.wait(context);
+		assert.equal(resumed.status, "done");
+	} finally { childGate.release(); await s.close(); }
+});
+
 for (const mode of ["mixed", "nested"] as const) test(`wait rejects ${mode} calls without claiming waiting state`, { timeout: 10_000 }, async () => {
 	const childGate = gate(); let parentId: number | undefined; let step = 0;
 	const s = await setup(() => step++ === 0 ? mode === "mixed" ? calls({ name: BACKGROUND_WAIT_TOOL, args: {} }, { name: "dwell.task", args: { action: "status" } }) : calls({ name: "nested.wait", args: {} }) : done(), {

@@ -4,7 +4,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, InboxDoc, LiveDoc, section, ToolResultEntry, type ConversationId, type Cursor, type EntryId, type Extension, type Harness, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { scanLiveTasks } from "./schedule.ts";
 import { creatorVia, decisionInput, removeApprovalTarget, type RunVia } from "./approval.ts";
 import { canonicalWorkspace, checkBackgroundWorkspace, markBackgroundWorkspaceStopped, prepareBackgroundWorkspace, readOnlyWorkspaceTool, registerBackgroundWorkspace, releaseStoppedWorkspace, workspaceStartViolation, WorkspaceDoc } from "../workspace.ts";
@@ -15,6 +15,8 @@ import { inheritWork, workIdentity, type WorkIdentity } from "./work.ts";
 export const BACKGROUND_ANCHOR_KIND = "dwell.background-anchor";
 export const BACKGROUND_REPORTER_KIND = "dwell.background-reporter";
 export const BACKGROUND_WAIT_TOOL = "dwell.task.wait";
+const WAIT_CALL = JSON.stringify({ name: BACKGROUND_WAIT_TOOL, arguments: {} });
+const WAIT_INSTRUCTION = `To await a pending result, call the separate tool exactly as ${WAIT_CALL}, alone in its response. It ends this run so the durable report can resume you. The dwell.task action field has no wait action.`;
 
 /** Match the settled answer's own wait receipt, rather than an earlier wait in its history. */
 export async function backgroundWaitingAnswer(harness: Pick<Harness, "commit">, conversationId: number, answerEntryId: number, context: Context = BACKGROUND_CONTEXT): Promise<boolean> {
@@ -368,19 +370,24 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof makeBackgroundReporter>) {
 	const Stopper = makeBackgroundStopper(() => deps.getHarness?.());
 	const text = (t: string, isError = false) => ({ output: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+	const parameters = Type.Object({
+		action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("status"), Type.Literal("stop")]),
+		name: Type.Optional(Type.String({ description: "Agent name (1-40 chars, unique in this conversation)" })),
+		message: Type.Optional(Type.String({ description: "The task (start) or the follow-up message (send), self-contained, in English" })),
+		followUp: Type.Optional(Type.Boolean({ description: "send only: true queues the message after the agent's current answer instead of steering" })),
+		mode: Type.Optional(Type.Union([Type.Literal("read"), Type.Literal("write")], { description: "start only: read by default, or write to hand off exclusive workspace write access; a task's mode cannot change later" })),
+	});
 	return defineTool({
 		name: "dwell.task",
 		description:
 			"Manage background task agents that keep working while this conversation stays free. start: spawn a named background agent with a self-contained message (English, include everything it needs; it starts with this conversation's tools and working directory but an empty context, and it cannot start background tasks of its own). " +
-			"Its answer comes back here as a follow-up message when done, and you are then expected to relay or act on it. The follow-up waits until this run ends: when you need the child's result, call dwell.task.wait by itself to end this run and let the result resume you. send: give a running agent another message (steer by default; followUp: true queues it after its current answer). status: list agents and whether each is busy; status does not deliver results. stop: abort an agent's current work. " +
+			`Its answer comes back here as a follow-up message when done, and you are then expected to relay or act on it. The follow-up waits until this run ends. ${WAIT_INSTRUCTION} send: give a running agent another message (steer by default; followUp: true queues it after its current answer). status: list agents and whether each is busy; status does not deliver results. stop: abort an agent's current work. ` +
 			"Tasks default to mode=read: no shell commands or file changes. Explicit mode=write hands off exclusive workspace write access; dispatch it in a tool batch by itself, then keep this main run read-only until it ends. Use a writable task for builds or other commands. /cancel and clearing the context do not stop background tasks; use stop.",
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("status"), Type.Literal("stop")]),
-			name: Type.Optional(Type.String({ description: "Agent name (1-40 chars, unique in this conversation)" })),
-			message: Type.Optional(Type.String({ description: "The task (start) or the follow-up message (send), self-contained, in English" })),
-			followUp: Type.Optional(Type.Boolean({ description: "send only: true queues the message after the agent's current answer instead of steering" })),
-			mode: Type.Optional(Type.Union([Type.Literal("read"), Type.Literal("write")], { description: "start only: read by default, or write to hand off exclusive workspace write access; a task's mode cannot change later" })),
-		}),
+		parameters,
+		prepareArguments(args) {
+			if (typeof args === "object" && args !== null && (args as { action?: unknown }).action === "wait") throw new Error(WAIT_INSTRUCTION);
+			return args as Static<typeof parameters>;
+		},
 		// 崩溃重放可能重复 start/stop 新的工作，不重跑；模型看到 interrupted 后可用 status 核对
 		replay: "unsafe",
 		async execute(args, api, context) {
@@ -397,7 +404,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					const access = (await api.snapshot(WorkspaceDoc, context))?.children[String(found.conversationId)];
 					lines.push(`${each}: ${busy ? "working" : "idle"} (${access?.mode ?? "read"})`);
 				}
-				return text(lines.length === 0 ? "No background tasks in this conversation." : `${lines.join("\n")}\nStatus does not deliver results. Call dwell.task.wait by itself when you need a pending result; it ends this run so the follow-up can resume you.`);
+				return text(lines.length === 0 ? "No background tasks in this conversation." : `${lines.join("\n")}\nStatus does not deliver results. ${WAIT_INSTRUCTION}`);
 			}
 			if (name === "") return text(`${args.action} needs a name.`, true);
 			if (args.action === "stop") {
@@ -434,7 +441,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					return undefined;
 				}, context);
 				if (error !== undefined) return text(error, true);
-				return text(`Sent to ${name}.`);
+				return text(`Sent to ${name}. ${WAIT_INSTRUCTION}`);
 			}
 			// start
 			const mode = args.mode ?? "read";
@@ -472,7 +479,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 			}, context);
 			if (!created.ok) return text(created.error, true);
 			deps.onStarted(created.child, api.conversationId as number);
-			return text(`Started ${name}. Its answer will arrive here as a follow-up; tell the user it runs in the background.`);
+			return text(`Started ${name}. Its answer will arrive here as a follow-up; tell the user it runs in the background. ${WAIT_INSTRUCTION}`);
 		},
 	});
 }
@@ -480,7 +487,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 function makeBackgroundWaitTool() {
 	return defineTool({
 		name: BACKGROUND_WAIT_TOOL,
-		description: "End this run while waiting for a pending background agent result. Call this tool alone, with no other tool calls in the same response. A background Reporter's follow-up starts a new run when its result is available. This does not stop or poll the agent; status does not deliver its result. Cannot be called by another tool.",
+		description: `End this run while waiting for a pending background agent result. Invoke exactly ${WAIT_CALL}. Call this tool alone, with no other tool calls in the same response. A background Reporter's follow-up starts a new run when its result is available. This does not stop or poll the agent; status does not deliver its result. Cannot be called by another tool.`,
 		parameters: Type.Object({}),
 		replay: "safe",
 		executionMode: "sequential",
@@ -534,7 +541,7 @@ export function makeBackgroundExtension(deps: BackgroundDeps): Extension {
 		tasks: [BackgroundAnchor, Reporter, makeBackgroundStopper(() => deps.getHarness?.())],
 		sections: [
 			section("background", () =>
-				"For long jobs that should not block the conversation (builds, crawls, batch processing), start a background agent with dwell.task and keep talking; its answer arrives as a follow-up after the current run ends. When you need its result, call dwell.task.wait alone to end this run; the durable Reporter's follow-up resumes you in a new run. Status does not deliver results. Do not poll status or start a process to wait. /cancel and clearing context do not stop background tasks — use dwell.task stop.",
+				`For long jobs that should not block the conversation (builds, crawls, batch processing), start a background agent with dwell.task and keep talking; its answer arrives as a follow-up after the current run ends. ${WAIT_INSTRUCTION} Status does not deliver results. Do not poll status or start a process to wait. /cancel and clearing context do not stop background tasks — use dwell.task stop.`,
 				{ tag: false },
 			),
 		],
