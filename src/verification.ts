@@ -37,7 +37,7 @@ function scopePath(path: string): string {
 export function verificationContract(value: VerificationContract): VerificationContract {
 	const artifacts = [...new Set(value.artifacts.map(scopePath))];
 	const allowedChanges = value.allowedChanges?.map(scopePath);
-	if (allowedChanges?.some((path) => path === "." || !artifacts.some((scope) => scope === "." || path === scope || path.startsWith(`${scope}/`)))) throw new Error("allowedChanges must contain exact file paths inside the declared artifact scope");
+	if (allowedChanges?.some((path) => path === "." || !artifacts.some((scope) => scope === "." || path === scope || path.startsWith(`${scope}/`)))) throw new Error('allowedChanges must contain exact file paths inside the declared artifact scope. List files only, without directories or globs. For example, use artifacts ["job", "job/result.json"] with allowedChanges ["job/result.json"]; the directory captures extra files and the explicit file detects a missing output.');
 	if (value.checks.some((check) => !check.name.trim() || !check.command.trim())) throw new Error("Verification checks need nonempty names and commands");
 	return { checks: value.checks.map((check) => ({ name: check.name, command: check.command })), artifacts, ...(allowedChanges === undefined ? {} : { allowedChanges: [...new Set(allowedChanges)] }) };
 }
@@ -123,7 +123,10 @@ export function unexpectedChanges(baseline: ArtifactManifest, current: ArtifactM
 		const a = before.get(path), b = after.get(path);
 		if (JSON.stringify(a) === JSON.stringify(b)) return false;
 		if (allowedChanges.includes(path) && (a === undefined || a.kind === "file" || a.kind === "missing") && (b === undefined || b.kind === "file" || b.kind === "missing")) return false;
-		return !((a === undefined || a.kind === "missing") && b?.kind === "directory" && allowedChanges.some((allowed) => allowed.startsWith(`${path}/`)));
+		const ancestor = allowedChanges.some((allowed) => allowed.startsWith(`${path}/`));
+		const absentBefore = a === undefined || a.kind === "missing";
+		const absentAfter = b === undefined || b.kind === "missing";
+		return !(ancestor && ((absentBefore && b?.kind === "directory") || (a?.kind === "directory" && absentAfter)));
 	}).sort();
 }
 

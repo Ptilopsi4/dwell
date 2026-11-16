@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import { getOrThrow, type DirReader } from "@earendil-works/pi-durable/env";
 import { GuardedExecutionEnv } from "../src/guarded-env.ts";
-import { artifactManifest, VERIFICATION_MAX_ENTRIES } from "../src/verification.ts";
+import { artifactManifest, unexpectedChanges, VERIFICATION_MAX_ENTRIES } from "../src/verification.ts";
 
 const supported = { skip: process.platform === "win32" ? "POSIX directory boundary; Windows fails closed" : false, timeout: 15_000 };
 const childProcesses = () => process.getActiveResourcesInfo().filter((name) => name === "ProcessWrap").length;
@@ -125,4 +125,33 @@ test("directory readers stay on their authorized directory after path replacemen
 	try { assert.deepEqual(getOrThrow(await reader.next(10, context)).entries.map((entry) => entry.name), ["safe.txt"]); }
 	finally { await reader.close(context); }
 	assert.equal((await env.openDirReader("normal", context)).ok, false);
+});
+
+test("an exact file allowance also permits removing its empty parent directories", supported, async (t) => {
+	const { cwd, env } = await fixture(t);
+	await mkdir(join(cwd, "job/disposable/nested"), { recursive: true });
+	await writeFile(join(cwd, "job/disposable/nested/marker.txt"), "disposable");
+	await writeFile(join(cwd, "job/result.txt"), "complete");
+	const contract = { checks: [], artifacts: ["job", "job/result.txt"], allowedChanges: ["job/disposable/nested/marker.txt"] };
+	const baseline = await artifactManifest(env, contract, context);
+	await rm(join(cwd, "job/disposable"), { recursive: true });
+	const current = await artifactManifest(env, contract, context);
+	assert.deepEqual(unexpectedChanges(baseline, current, contract.allowedChanges), []);
+});
+
+test("parent directory removal does not permit undeclared descendants or type changes", supported, async (t) => {
+	for (const variant of ["extra-file", "extra-directory", "directory-to-file"]) await t.test(variant, async (subtest) => {
+		const { cwd, env } = await fixture(subtest);
+		await mkdir(join(cwd, "job/disposable"), { recursive: true });
+		await writeFile(join(cwd, "job/disposable/marker.txt"), "disposable");
+		if (variant === "extra-file") await writeFile(join(cwd, "job/disposable/keep.txt"), "must not disappear");
+		if (variant === "extra-directory") await mkdir(join(cwd, "job/disposable/keep"));
+		const contract = { checks: [], artifacts: ["job"], allowedChanges: ["job/disposable/marker.txt"] };
+		const baseline = await artifactManifest(env, contract, context);
+		await rm(join(cwd, "job/disposable"), { recursive: true });
+		if (variant === "directory-to-file") await writeFile(join(cwd, "job/disposable"), "replacement");
+		const current = await artifactManifest(env, contract, context);
+		const expected = variant === "extra-file" ? "job/disposable/keep.txt" : variant === "extra-directory" ? "job/disposable/keep" : "job/disposable";
+		assert.ok(unexpectedChanges(baseline, current, contract.allowedChanges).includes(expected));
+	});
 });

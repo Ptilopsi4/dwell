@@ -230,8 +230,8 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 			evidence: Type.Optional(Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 64 })), review: Type.Optional(Type.String({ maxLength: 8000 })),
 			verification: Type.Optional(Type.Object({
 				checks: Type.Array(Type.Object({ name: Type.String({ minLength: 1, maxLength: 200 }), command: Type.String({ minLength: 1, maxLength: 8000 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
-				artifacts: Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { minItems: 1, maxItems: 128 }),
-				allowedChanges: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 128 })),
+				artifacts: Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { minItems: 1, maxItems: 128, description: 'Required final workspace-relative files or directories that remain after the task; directories are scanned recursively. Example: artifacts ["job", "job/result.json"] with allowedChanges ["job/result.json"]; the directory captures extra files and the explicit file detects a missing output. For cleanup, declare a parent directory that remains, such as "job" when deleting "job/disposable", plus required final outputs; list exact deleted file paths in allowedChanges.' }),
+				allowedChanges: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 128, description: 'Optional exact workspace-relative file paths allowed to change inside artifacts, such as ["job/result.json"]. List files only, without directories or globs.' })),
 			}, { additionalProperties: false })),
 		}),
 		executionMode: "sequential",
