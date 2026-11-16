@@ -7,7 +7,7 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AgentDoc, createRegistry, defineExtension, Harness, section, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
+import { AgentDoc, createRegistry, defineExtension, Harness, section, type ConversationId, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard } from "./ext/approval.ts";
 import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
@@ -263,7 +263,12 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		limits,
 		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
 	});
-	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown });
+	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown, verificationEnv: async (conversationId, context) => {
+		const agent = await harness!.snapshot(AgentDoc, conversationId as ConversationId, context);
+		if (agent === undefined) throw new Error("Verification conversation is unavailable");
+		const cwd = resolve(agent.cwd ?? DEFAULT_CWD);
+		return env({ cwd, readScope: cwd });
+	} });
 	setApprovalBudgetGetter((conversationId) => budgets.captureApproval(conversationId));
 	setWorkspaceApprovalGetter((conversationId) =>
 		[...pendingApprovals.values()].some((pending) => pending.targets?.includes(conversationId)) ||

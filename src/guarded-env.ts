@@ -219,10 +219,16 @@ export class GuardedExecutionEnv extends NodeExecutionEnv {
 		} catch (error) { return err(toError(error, path)); }
 	}
 	override async openDirReader(path: string, context: Context): Promise<Result<DirReader, FileError>> {
-		const result = await this.listDir(path, context);
-		if (!result.ok) return result;
-		let cursor = 0;
-		return ok({ next: async (maxEntries) => { const entries = result.value.slice(cursor, cursor + maxEntries); cursor += entries.length; return ok({ entries, done: cursor >= result.value.length }); }, close: async () => {} });
+		const opened = await this.start(path, "directory-reader", context);
+		if (!opened.ok) return opened;
+		const { worker } = opened.value;
+		return ok({
+			next: async (maxEntries, context) => {
+				if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) return err(new FileError("invalid", "maxEntries must be a positive safe integer.", path));
+				return worker.receive(context, { op: "next", maxEntries });
+			},
+			close: async () => worker.stop(),
+		});
 	}
 	override async createTempDir(prefix: string | undefined, context: Context): Promise<Result<string, FileError>> {
 		const path = join(this.bases.tmp, `${basename(prefix ?? "dwell-")}${randomUUID()}`);

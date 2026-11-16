@@ -357,7 +357,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
-				<button id="newGoalBtn">开启新目标</button>
+					<button id="newGoalBtn">开启新目标</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -941,13 +941,17 @@ function appendEntry(entry) {
 			log.appendChild(el);
 			T.lastKind = "bot";
 		}
-		for (const call of parts.filter((c) => c.type === "toolCall")) addToolRow(call);
+		const calls = parts.filter((c) => c.type === "toolCall");
+		for (const call of calls) {
+			const row = addToolRow(call);
+			row._waitCandidate = calls.length === 1 && call.name === "dwell.task.wait";
+		}
 		if (model?.stopReason === "error" || model?.stopReason === "aborted") {
 			T.group = null;
 			const el = msgEl("err", "", ts);
 			el.querySelector(".hd").remove();
 			el.querySelector(".bd").innerHTML = `${ic("x", "sm")}<span></span>`;
-			el.querySelector(".bd span").textContent = model.stopReason === "aborted" ? "已中止" : `模型出错：${model.errorMessage ?? "未知错误"}`;
+			el.querySelector(".bd span").textContent = model.stopReason === "aborted" ? "已中止" : (model.errorMessage ?? "模型请求未完成，可在原任务线继续。");
 			log.appendChild(el);
 			T.lastKind = "err";
 		}
@@ -967,6 +971,14 @@ function appendEntry(entry) {
 		row.querySelector(".tm").textContent = meta;
 		if (!err) addDownload(row);
 		if (row.open) fillToolBody(row);
+		if (row._waitCandidate && !err && entry.byTaskId !== undefined && model?.toolName === "dwell.task.wait" && model.details?.waitingForBackground === true) {
+			const notice = document.createElement("div");
+			notice.className = "note";
+			notice.textContent = "后台任务处理中，完成后会继续。";
+			log.appendChild(notice);
+			T.group = null;
+			T.lastKind = "note";
+		}
 	}
 }
 /** Offer artifacts from send/write tools; the server restricts downloads to this workspace. */

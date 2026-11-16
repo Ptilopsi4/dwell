@@ -2,7 +2,7 @@
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
@@ -380,18 +380,18 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			json(res, 200, await getWork(harness, id));
 			return;
 		}
-		if (req.method === "POST" && url.pathname === "/api/work/newgoal") {
-			const body = await readBody(req);
-			const id = Number(body?.id);
-			const workId = body?.workId;
-			const requestId = body?.requestId;
-			if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
-			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
-			try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
-			catch (error) { throw new HttpError(409, (error as Error).message); }
-			return;
-		}
-		if (req.method === "POST" && url.pathname === "/api/work/accept") {
+			if (req.method === "POST" && url.pathname === "/api/work/newgoal") {
+				const body = await readBody(req);
+				const id = Number(body?.id);
+				const workId = body?.workId;
+				const requestId = body?.requestId;
+				if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
+				if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+				try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
+				catch (error) { throw new HttpError(409, (error as Error).message); }
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/api/work/accept") {
 			const body = await readBody(req);
 			const id = Number(body?.id);
 			const workId = typeof body?.workId === "string" ? body.workId : "";

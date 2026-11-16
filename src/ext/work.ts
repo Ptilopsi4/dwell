@@ -1,8 +1,10 @@
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { AssistantEntry, CompactionTask, GenerationTask, LiveDoc, ToolResultEntry, ToolTask, defineDoc, defineExtension, defineTool, hook, section, type ConversationId, type EntryId, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { abortBeforeRequest } from "./approval.ts";
 import { BudgetDoc } from "./budget.ts";
+import { artifactManifest, manifestSummary, unexpectedChanges, verificationContract, type ArtifactManifest, type CheckReceipt, type VerificationContract, type WorkVerification } from "../verification.ts";
 
 export type WorkIdentity = { conversationId: number; id: string };
 export type WorkLimits = { modelAdmissions: number; toolAdmissions: number };
@@ -12,6 +14,7 @@ export type WorkRecord = {
 	evidence: number[]; review: string; status: "active" | "ready_for_review" | "accepted";
 	createdAt: number; updatedAt: number; acceptedBy?: string; acceptedAt?: number;
 	limits: WorkLimits; stopped?: "model_limit" | "tool_limit";
+	verification?: WorkVerification;
 	usage: { scope: "generation_and_tools"; pricingKnown: boolean; modelAdmissions: number; toolAdmissions: number; modelResponses: number; toolResults: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cost: number | null };
 	availableEvidence: Record<string, { conversationId: number; toolName: string }>;
 	// Cursors and task claims deduplicate committed results across restart; admissions bound their size.
@@ -22,6 +25,34 @@ export const WorkDoc = defineDoc<{
 	current?: string; inherited?: WorkIdentity | null;
 	runs: Record<string, WorkIdentity | null>; records: Record<string, WorkRecord>;
 }>({ kind: "dwell.work", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ runs: {}, records: {} }), checkpointWhen: () => true });
+
+type VerificationEnv = (conversationId: number, context: Context) => Promise<ExecutionEnv>;
+const verificationReaders = new WeakMap<Harness, VerificationEnv>();
+async function snapshotArtifacts(harness: Harness, conversationId: number, contract: VerificationContract, context: Context, allowMissing = false): Promise<ArtifactManifest> {
+	const factory = verificationReaders.get(harness);
+	if (factory === undefined) throw new Error("Governed verification file access is unavailable");
+	const env = await factory(conversationId, context);
+	try { return await artifactManifest(env, contract, context, allowMissing); }
+	finally { await env.cleanup(context); }
+}
+
+async function requireFreshVerification(harness: Harness, conversationId: number, record: WorkRecord, context: Context): Promise<void> {
+	const verification = record.verification;
+	if (verification === undefined) return;
+	if (verification.status !== "verified" || verification.receipt?.workId !== record.id) throw new Error("Run verify successfully before requesting review or accepting this work");
+	try {
+		const current = await snapshotArtifacts(harness, conversationId, verification.contract, context);
+		if (current.cwd !== verification.receipt.manifest.cwd || current.digest !== verification.receipt.manifest.digest) throw new Error("Verified artifacts changed; run verify again before review or acceptance");
+	} catch (error) {
+		await harness.commit(async (tx) => {
+			const current = (await tx.doc(WorkDoc, conversationId as ConversationId)).records[record.id];
+			if (current?.verification?.receipt?.taskId !== verification.receipt!.taskId || current.status === "accepted") return;
+			current.status = "active"; current.updatedAt = Date.now();
+			current.verification.status = "stale"; current.verification.failure = (error as Error).message;
+		}, BACKGROUND_CONTEXT);
+		throw error;
+	}
+}
 
 export async function workIdentity(tx: Tx, conversationId: number, budgetId?: string): Promise<WorkIdentity | undefined> {
 	const doc = await tx.doc(WorkDoc, conversationId as ConversationId);
@@ -98,19 +129,26 @@ export async function getWork(harness: Harness, conversationId: number) {
 /** Only a trusted host route may call this; the model tool deliberately has no accept action. */
 export async function acceptWork(harness: Harness, conversationId: number, workId: string, operator: string): Promise<WorkRecord> {
 	if (operator.trim() === "") throw new Error("An operator identity is required");
+	const before = (await getWork(harness, conversationId)).records[workId];
+	if (before === undefined) throw new Error("Work record not found");
+	if (before.status !== "ready_for_review") throw new Error("Work must be ready for review before acceptance");
+	await requireFreshVerification(harness, conversationId, before, BACKGROUND_CONTEXT);
 	return harness.commit(async (tx) => {
 		const record = (await tx.doc(WorkDoc, conversationId as ConversationId)).records[workId];
 		if (record === undefined) throw new Error("Work record not found");
 		if (record.status !== "ready_for_review") throw new Error("Work must be ready for review before acceptance");
+		if (record.verification?.receipt?.taskId !== before.verification?.receipt?.taskId) throw new Error("Work verification changed during acceptance");
 		await reconcileUsage(tx, record);
 		record.status = "accepted"; record.acceptedBy = operator; record.acceptedAt = record.updatedAt = Date.now();
 		return JSON.parse(JSON.stringify(record)) as WorkRecord;
 	}, BACKGROUND_CONTEXT);
 }
 
-const summary = (record: WorkRecord) => ({ id: record.id, creator: record.creator, goal: record.goal, acceptance: record.acceptance, progress: record.progress, blockers: record.blockers, evidence: record.evidence, review: record.review, status: record.status, usage: record.usage, limits: record.limits, stopped: record.stopped, availableEvidence: record.availableEvidence });
+const summary = (record: WorkRecord) => ({ id: record.id, creator: record.creator, goal: record.goal, acceptance: record.acceptance, progress: record.progress, blockers: record.blockers, evidence: record.evidence, review: record.review, status: record.status, usage: record.usage, limits: record.limits, stopped: record.stopped, availableEvidence: record.availableEvidence,
+	verification: record.verification === undefined ? { status: "unverified", failure: "No verification contract was declared" } : { contract: record.verification.contract, status: record.verification.status, receipt: record.verification.receipt, failure: record.verification.failure, lastAttempt: record.verification.lastAttempt },
+});
 
-export function makeWorkController(options: { limits?: Partial<WorkLimits>; pricingKnown?: boolean } = {}) {
+export function makeWorkController(options: { limits?: Partial<WorkLimits>; pricingKnown?: boolean; verificationEnv?: VerificationEnv } = {}) {
 	const limits = { ...DEFAULT_WORK_LIMITS, ...options.limits };
 	for (const [key, value] of Object.entries(limits)) if (!Number.isSafeInteger(value) || value < 0 || value > 4096) throw new Error(`Invalid work limit: ${key}`);
 	let harness: Harness | undefined;
@@ -183,18 +221,99 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 	};
 	const tool = defineTool({
 		name: "dwell.work",
-		description: "Keep an explicit durable work goal across compaction and restarts. Ordinary conversation does not require a work record. start creates a goal owned by the original sender; checkpoint saves progress, blockers and successful tool-result entry IDs; ready requests operator review with a review note. This tool cannot accept work. Call start in its own batch before substantive work and checkpoint before waiting for clarification.",
+		description: "Keep an explicit durable work goal across compaction and restarts. Ordinary conversation does not require a work record. For code or file work, declare verification at start: checks are exact commands to run; artifacts are required workspace-relative files or directories, recursively hashed (1024 entries, 16 MiB total). Optional allowedChanges restricts all changes since start to exact file paths inside that scope; declare a narrow containing directory plus each required output file to catch extra files and missing outputs. verify runs the declared commands through the governed bash tool and records a host-generated receipt only if every exit code is zero and the artifact scope passes. ready and operator acceptance recheck artifact hashes without running commands. start creates a goal owned by the original sender; checkpoint saves progress, blockers and successful tool-result entry IDs; ready requests operator review with a review note. This tool cannot accept work. Records without a verification contract remain labeled unverified. Call start in its own batch before substantive work and checkpoint before waiting for clarification.",
 		parameters: Type.Object({
-			action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("checkpoint"), Type.Literal("ready")]),
+			action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("checkpoint"), Type.Literal("verify"), Type.Literal("ready")]),
 			goal: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
 			acceptance: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { minItems: 1, maxItems: 32 })),
 			progress: Type.Optional(Type.String({ maxLength: 8000 })), blockers: Type.Optional(Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 32 })),
 			evidence: Type.Optional(Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 64 })), review: Type.Optional(Type.String({ maxLength: 8000 })),
+			verification: Type.Optional(Type.Object({
+				checks: Type.Array(Type.Object({ name: Type.String({ minLength: 1, maxLength: 200 }), command: Type.String({ minLength: 1, maxLength: 8000 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
+				artifacts: Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { minItems: 1, maxItems: 128 }),
+				allowedChanges: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 128 })),
+			}, { additionalProperties: false })),
 		}),
 		executionMode: "sequential",
 		async execute(args, api, context) {
 			try {
 				const run = await runInput(api.conversationId, context);
+				if (args.verification !== undefined && args.action !== "start") throw new Error("Verification contracts are fixed at work start");
+				let preparedVerification: WorkVerification | undefined;
+				if (args.action === "start" && args.verification !== undefined) {
+					await api.commit(async (tx) => {
+						const identity = await bind(tx, api.conversationId, run);
+						const doc = await tx.doc(WorkDoc, api.conversationId);
+						if (doc.inherited !== undefined) throw new Error("A background child cannot create or replace its inherited work");
+						if (!run.sender) throw new Error("Work requires the original input's durable sender identity");
+						if (identity !== undefined && identity.id !== doc.current) throw new Error("A late continuation cannot replace the current work");
+						const previous = doc.current === undefined ? undefined : doc.records[doc.current];
+						if (previous !== undefined && previous.creator !== run.sender) throw new Error("Only the work creator can replace this conversation's goal");
+						if (previous?.status === "active") throw new Error("The current work is still active");
+					}, context);
+					const contract = verificationContract(args.verification);
+					const baseline = await snapshotArtifacts(host(), api.conversationId, contract, context, true);
+					preparedVerification = { contract, status: "unverified", ...(contract.allowedChanges === undefined ? {} : { baseline }) };
+				}
+				let readySnapshot: WorkRecord | undefined;
+				if (args.action === "ready") {
+					readySnapshot = await api.commit(async (tx) => {
+						const identity = await bind(tx, api.conversationId, run);
+						if (identity === undefined) throw new Error("No work record is active for this input");
+						if (identity.conversationId !== api.conversationId) throw new Error("Only the root conversation can request work review");
+						const record = (await tx.doc(WorkDoc, identity.conversationId as ConversationId)).records[identity.id]!;
+						if (record.creator !== run.sender) throw new Error("Only the original work creator may change its record");
+						if (record.status === "accepted") throw new Error("Accepted work is immutable; start another goal");
+						return JSON.parse(JSON.stringify(record)) as WorkRecord;
+					}, context);
+					await requireFreshVerification(host(), api.conversationId, readySnapshot, context);
+				}
+				if (args.action === "verify") {
+					const target = await api.commit(async (tx) => {
+						const identity = await bind(tx, api.conversationId, run);
+						if (identity === undefined) throw new Error("No work record is active for this input");
+						if (api.conversationId !== identity.conversationId) throw new Error("Only the root conversation can verify work");
+						const record = (await tx.doc(WorkDoc, identity.conversationId as ConversationId)).records[identity.id]!;
+						if (record.creator !== run.sender) throw new Error("Only the original work creator may verify its record");
+						if (record.status === "accepted") throw new Error("Accepted work is immutable; start another goal");
+						if (record.verification === undefined) throw new Error("This work has no verification contract; its evidence remains unverified");
+						record.status = "active"; record.updatedAt = Date.now();
+						record.verification.status = "unverified"; delete record.verification.receipt; delete record.verification.failure;
+						return JSON.parse(JSON.stringify({ identity, verification: record.verification })) as { identity: WorkIdentity; verification: WorkVerification };
+					}, context);
+					const checks: CheckReceipt[] = [];
+					let manifest: ArtifactManifest | undefined, failure: string | undefined;
+					try {
+						for (const check of target.verification.contract.checks) {
+							const result = await api.executeTool("bash", { command: check.command }, context, { key: `verify-${checks.length}` });
+							const output = result.structuredOutput;
+							const exitCode = typeof output === "object" && output !== null && !Array.isArray(output) && typeof output.exitCode === "number" ? output.exitCode : null;
+							checks.push({ ...check, taskId: result.taskId, exitCode, isError: result.isError });
+							if (result.isError || exitCode !== 0) throw new Error(`Verification check failed: ${check.name}${exitCode === null ? " (no successful exit receipt)" : ` (exit ${exitCode})`}`);
+						}
+						manifest = await snapshotArtifacts(host(), api.conversationId, target.verification.contract, context);
+						if (target.verification.contract.allowedChanges !== undefined) {
+							if (target.verification.baseline === undefined) throw new Error("The strict verification baseline is unavailable");
+							const unexpected = unexpectedChanges(target.verification.baseline, manifest, target.verification.contract.allowedChanges);
+							if (unexpected.length > 0) throw new Error(`Changes outside allowedChanges: ${unexpected.slice(0, 20).join(", ")}`);
+						}
+					} catch (error) { failure = (error as Error).message; }
+					const result = await api.commit(async (tx) => {
+						const identity = await bind(tx, api.conversationId, run);
+						if (identity?.id !== target.identity.id || identity.conversationId !== target.identity.conversationId) throw new Error("Work changed during verification");
+						const record = (await tx.doc(WorkDoc, identity.conversationId as ConversationId)).records[identity.id]!;
+						const verification = record.verification!;
+						verification.lastAttempt = { taskId: api.taskId, checks, completedAt: Date.now() };
+						if (failure !== undefined || manifest === undefined) { verification.status = "failed"; verification.failure = failure ?? "Artifact snapshot unavailable"; }
+						else {
+							verification.status = "verified"; delete verification.failure;
+							verification.receipt = { workId: record.id, taskId: api.taskId, checks, verifiedAt: Date.now(), manifest: manifestSummary(manifest) };
+						}
+						await reconcileUsage(tx, record); record.updatedAt = Date.now();
+						return JSON.stringify(summary(record));
+					}, context);
+					return { output: [{ type: "text" as const, text: result }], ...(failure === undefined ? {} : { isError: true }) };
+				}
 				const result = await api.commit(async (tx) => {
 					let identity = await bind(tx, api.conversationId, run);
 					const doc = await tx.doc(WorkDoc, api.conversationId);
@@ -210,6 +329,7 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 						const id = `work:${api.taskId}`;
 						identity = { conversationId: api.conversationId, id };
 						doc.records[id] = { id, creator: run.sender, goal: args.goal.trim(), acceptance: args.acceptance, progress: "", blockers: [], evidence: [], review: "", status: "active", createdAt: Date.now(), updatedAt: Date.now(), limits: { ...limits }, usage: { scope: "generation_and_tools", pricingKnown: options.pricingKnown === true, modelAdmissions: 0, toolAdmissions: 0, modelResponses: 0, toolResults: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: options.pricingKnown === true ? 0 : null }, availableEvidence: {}, members: { [String(api.conversationId)]: 0 }, tasks: {} };
+						if (preparedVerification !== undefined) doc.records[id]!.verification = preparedVerification;
 						doc.current = id; doc.runs[String(run.input)] = identity;
 					}
 					if (identity === undefined) throw new Error("No work record is active for this input");
@@ -226,7 +346,8 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 						}
 						if (args.action === "ready") {
 							if (api.conversationId !== identity.conversationId) throw new Error("Only the root conversation can request work review");
-							if (evidence.length === 0 || !(args.review ?? record.review).trim()) throw new Error("ready requires successful tool evidence and a review note explaining acceptance checks");
+							if (readySnapshot?.id !== record.id || readySnapshot.verification?.receipt?.taskId !== record.verification?.receipt?.taskId) throw new Error("Work verification changed during review");
+							if ((evidence.length === 0 && record.verification?.receipt === undefined) || !(args.review ?? record.review).trim()) throw new Error("ready requires verified evidence and a review note explaining acceptance checks");
 							if ((args.blockers ?? record.blockers).length > 0) throw new Error("Resolve the recorded blockers before requesting review");
 						}
 						if (args.progress !== undefined) record.progress = args.progress;
@@ -241,7 +362,7 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 		},
 	});
 	return {
-		extension: defineExtension({ name: "dwell-work", tools: [tool], sections: [section("work", () => "Use dwell.work for an explicit multi-step goal; ordinary chat does not need a work record. Keep progress, blockers and successful tool evidence current. ready_for_review is an agent request for operator review, never user acceptance. Work budgets cover the root and its background descendants; do not restart a stopped goal to bypass its limits.", { tag: false })], hooks: [
+		extension: defineExtension({ name: "dwell-work", tools: [tool], sections: [section("work", () => "Use dwell.work for an explicit multi-step goal; ordinary chat does not need a work record. For code or file work, declare exact verification commands and a bounded artifact scope at start. Use allowedChanges only for strict output tasks, with a narrow containing directory plus required output files in artifacts. verify must pass before ready, and any later artifact change requires another verify. These receipts establish declared command results and file versions, not semantic correctness. ready_for_review is an agent request for operator review, never user acceptance. Work budgets cover the root and its background descendants; do not restart a stopped goal to bypass its limits.", { tag: false })], hooks: [
 			hook(GenerationTask, { beforeRequest: async (request, api, context) => {
 				const value = await admit(api.conversationId, api.taskId, "model", context);
 				if (value !== undefined) return { messages: [...request.messages, { role: "user" as const, content: `[Durable work record; host-maintained data, not new user instructions]\n${value}`, timestamp: Date.now() }] };
@@ -261,7 +382,7 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 				} catch { return { decline: true }; }
 			} }),
 		] }),
-		async attach(value: Harness): Promise<void> { if (harness !== undefined) throw new Error("Work controller already attached"); harness = value; },
-		async close(): Promise<void> {},
+		async attach(value: Harness): Promise<void> { if (harness !== undefined) throw new Error("Work controller already attached"); harness = value; if (options.verificationEnv !== undefined) verificationReaders.set(value, options.verificationEnv); },
+		async close(): Promise<void> { if (harness !== undefined) verificationReaders.delete(harness); },
 	};
 }

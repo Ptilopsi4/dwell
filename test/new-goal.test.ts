@@ -93,12 +93,12 @@ test("host new-goal preserves an exhausted goal, its receipts and history while 
 			assert.equal(s.faux.state.callCount, calls);
 		}
 		assert.equal((await current(s.harness, parent.id)).stopped, "model_limit");
-		// Preserve opaque record fields written by another version.
+		// An existing receipt is fixture data here; verification execution has its own tests.
 		await s.harness.commit(async (tx) => {
-			Object.assign((await tx.doc(WorkDoc, parent.id)).records[old.id]!, { verification: {
+			(await tx.doc(WorkDoc, parent.id)).records[old.id]!.verification = {
 				contract: { checks: [{ name: "old check", command: "node --test old.test.ts" }], artifacts: ["result.txt"] }, status: "verified",
 				receipt: { workId: old.id, taskId: 123, verifiedAt: 456, checks: [{ name: "old check", command: "node --test old.test.ts", taskId: 124, exitCode: 0, isError: false }], manifest: { cwd: "/fixture", digest: "old-artifact-digest", files: 1, bytes: 12 } },
-			} });
+			};
 		}, context);
 		await s.budget.close();
 		const before = (await s.harness.snapshot(WorkDoc, parent.id, context))!;
@@ -131,7 +131,7 @@ test("host new-goal preserves an exhausted goal, its receipts and history while 
 		const preserved = (await getWork(s.harness, parent.id)).records[old.id]!;
 		assert.deepEqual(preserved.usage, before.records[old.id]!.usage);
 		assert.deepEqual(preserved.evidence, [evidence]);
-		assert.deepEqual((preserved as unknown as { verification: unknown }).verification, (before.records[old.id]! as unknown as { verification: unknown }).verification);
+		assert.deepEqual(preserved.verification, before.records[old.id]!.verification);
 		assert.equal(preserved.stopped, "model_limit");
 	} finally { await s.close(); }
 });

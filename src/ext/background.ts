@@ -2,8 +2,8 @@
 // 子会话继承父会话的 cwd/模型/工具（去掉 dwell.task / dwell.schedule / dwell.proc 防递归派生）；父线 /cancel 与 idle 等待
 // 不穿越 background 边界。答案以 followUp 回到父会话，由宿主 onFired 开卡（模式同官方 example 23）。
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, InboxDoc, LiveDoc, section, type ConversationId, type Cursor, type Extension, type Harness, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
+import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, InboxDoc, LiveDoc, section, ToolResultEntry, type ConversationId, type Cursor, type EntryId, type Extension, type Harness, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { scanLiveTasks } from "./schedule.ts";
 import { creatorVia, decisionInput, removeApprovalTarget, type RunVia } from "./approval.ts";
@@ -14,6 +14,35 @@ import { inheritWork, workIdentity, type WorkIdentity } from "./work.ts";
 
 export const BACKGROUND_ANCHOR_KIND = "dwell.background-anchor";
 export const BACKGROUND_REPORTER_KIND = "dwell.background-reporter";
+export const BACKGROUND_WAIT_TOOL = "dwell.task.wait";
+
+/** Match the settled answer's own wait receipt, rather than an earlier wait in its history. */
+export async function backgroundWaitingAnswer(harness: Pick<Harness, "commit">, conversationId: number, answerEntryId: number, context: Context = BACKGROUND_CONTEXT): Promise<boolean> {
+	return harness.commit(async (tx) => {
+		const answer = await tx.entry(AssistantEntry, answerEntryId as EntryId);
+		if (answer?.conversationId !== conversationId) return false;
+		const message = answer.model?.[0];
+		if (message?.role !== "assistant") return false;
+		const calls = message.content.filter((part) => part.type === "toolCall");
+		if (calls.length !== 1 || calls[0]!.name !== BACKGROUND_WAIT_TOOL) return false;
+		let cursor: Cursor | undefined;
+		do {
+			const page = await tx.scanEntries({ conversationId: conversationId as ConversationId, minEntryId: (answerEntryId + 1) as EntryId, order: "ascending" }, 100, cursor);
+			for (const entry of page.items) {
+				if (AssistantEntry.is(entry)) return false;
+				if (!ToolResultEntry.is(entry) || entry.byTaskId === undefined) continue;
+				const result = entry.model?.[0];
+				if (result?.role !== "toolResult" || result.toolName !== BACKGROUND_WAIT_TOOL || result.toolCallId !== calls[0]!.id || result.isError) continue;
+				if (typeof result.details !== "object" || result.details === null || !("waitingForBackground" in result.details) || result.details.waitingForBackground !== true) continue;
+				const task = await tx.task(entry.byTaskId);
+				const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
+				return task?.kind === "pi.tool" && task.conversationId === conversationId && input?.kind === "model" && input.assistant === answerEntryId && input.callId === calls[0]!.id;
+			}
+			cursor = page.next;
+		} while (cursor !== undefined);
+		return false;
+	}, context);
+}
 
 /** 成本闸：并发后台任务数（子代理会真烧 token，超限让模型等或停）。 */
 export const BG_MAX_PER_CONVERSATION = 3;
@@ -343,7 +372,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 		name: "dwell.task",
 		description:
 			"Manage background task agents that keep working while this conversation stays free. start: spawn a named background agent with a self-contained message (English, include everything it needs; it starts with this conversation's tools and working directory but an empty context, and it cannot start background tasks of its own). " +
-			"Its answer comes back here as a follow-up message when done, and you are then expected to relay or act on it. send: give a running agent another message (steer by default; followUp: true queues it after its current answer). status: list agents and whether each is busy. stop: abort an agent's current work. " +
+			"Its answer comes back here as a follow-up message when done, and you are then expected to relay or act on it. The follow-up waits until this run ends: when you need the child's result, call dwell.task.wait by itself to end this run and let the result resume you. send: give a running agent another message (steer by default; followUp: true queues it after its current answer). status: list agents and whether each is busy; status does not deliver results. stop: abort an agent's current work. " +
 			"Tasks default to mode=read: no shell commands or file changes. Explicit mode=write hands off exclusive workspace write access; dispatch it in a tool batch by itself, then keep this main run read-only until it ends. Use a writable task for builds or other commands. /cancel and clearing the context do not stop background tasks; use stop.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("status"), Type.Literal("stop")]),
@@ -368,7 +397,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					const access = (await api.snapshot(WorkspaceDoc, context))?.children[String(found.conversationId)];
 					lines.push(`${each}: ${busy ? "working" : "idle"} (${access?.mode ?? "read"})`);
 				}
-				return text(lines.length === 0 ? "No background tasks in this conversation." : lines.join("\n"));
+				return text(lines.length === 0 ? "No background tasks in this conversation." : `${lines.join("\n")}\nStatus does not deliver results. Call dwell.task.wait by itself when you need a pending result; it ends this run so the follow-up can resume you.`);
 			}
 			if (name === "") return text(`${args.action} needs a name.`, true);
 			if (args.action === "stop") {
@@ -448,16 +477,64 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 	});
 }
 
+function makeBackgroundWaitTool() {
+	return defineTool({
+		name: BACKGROUND_WAIT_TOOL,
+		description: "End this run while waiting for a pending background agent result. Call this tool alone, with no other tool calls in the same response. A background Reporter's follow-up starts a new run when its result is available. This does not stop or poll the agent; status does not deliver its result. Cannot be called by another tool.",
+		parameters: Type.Object({}),
+		replay: "safe",
+		executionMode: "sequential",
+		async execute(_args, api, context) {
+			const error = await api.commit(async (tx) => {
+				const current = await tx.task(api.taskId);
+				const input = current?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
+				if (input?.kind !== "model" || input.assistant === undefined) return "Call dwell.task.wait directly, not from another tool.";
+				const entry = await tx.entry(AssistantEntry, input.assistant as EntryId);
+				const message = entry?.model?.[0];
+				const calls = message?.role === "assistant" ? message.content.filter((part) => part.type === "toolCall") : [];
+				// pi-durable only terminates when every result of a round requests it.
+				if (entry?.conversationId !== api.conversationId || calls.length !== 1 || calls[0]!.name !== BACKGROUND_WAIT_TOOL || calls[0]!.id !== api.callId) return "Call dwell.task.wait alone, with no other tool calls in the same response.";
+				const roster = await tx.doc(BackgroundDoc, api.conversationId);
+				const stops = await tx.doc(BackgroundStopDoc, api.conversationId);
+				const belongs = (task: { kind: string; conversationId: number; input: unknown }) => {
+					const reporter = task.input as ReporterInput;
+					return task.kind === BACKGROUND_REPORTER_KIND && task.conversationId === api.conversationId && reporter.parent === api.conversationId && roster.agents[reporter.name]?.conversationId === reporter.child && stops.children[String(reporter.child)] !== true;
+				};
+				if ((await scanLiveTasks(tx, { kind: BACKGROUND_REPORTER_KIND }, 1000)).some(belongs)) return undefined;
+				// A Reporter can finish before the wait call reaches this transaction.
+				const queued = new Set((await tx.doc(InboxDoc, api.conversationId)).items.filter((item) => item.mode === "followUp").map((item) => item.id));
+				let cursor: Cursor | undefined;
+				if (queued.size > 0) do {
+					const page = await tx.scanTasks({ conversationId: api.conversationId, kind: BACKGROUND_REPORTER_KIND, order: "descending" }, 200, cursor);
+					for (const reporter of page.items) {
+						if (!belongs(reporter)) continue;
+						const submission = await tx.submissionByRequest(api.conversationId, `bg-report:${String(reporter.id)}`);
+						if (submission?.status === "queued" && queued.has(submission.id)) return undefined;
+					}
+					cursor = page.next;
+				} while (cursor !== undefined);
+				return "No pending background result belongs to this conversation. Continue the task or start a background agent first.";
+			}, context);
+			if (error !== undefined) return { output: [{ type: "text", text: error }], isError: true };
+			return {
+				output: [{ type: "text", text: "Waiting for a background result. This run has ended; the Reporter's follow-up will resume the conversation." }],
+				details: { waitingForBackground: true },
+				control: { terminate: true },
+			};
+		},
+	});
+}
+
 /** 装配：任务定义与工具同扩展（pending 的 Reporter 重启后续跑）。 */
 export function makeBackgroundExtension(deps: BackgroundDeps): Extension {
 	const Reporter = makeBackgroundReporter(deps);
 	return defineExtension({
 		name: "dwell-background",
-		tools: [makeBackgroundTool(deps, Reporter)],
+		tools: [makeBackgroundTool(deps, Reporter), makeBackgroundWaitTool()],
 		tasks: [BackgroundAnchor, Reporter, makeBackgroundStopper(() => deps.getHarness?.())],
 		sections: [
 			section("background", () =>
-				"For long jobs that should not block the conversation (builds, crawls, batch processing), start a background agent with dwell.task and keep talking; its answer arrives as a follow-up. /cancel and clearing context do not stop background tasks — use dwell.task stop.",
+				"For long jobs that should not block the conversation (builds, crawls, batch processing), start a background agent with dwell.task and keep talking; its answer arrives as a follow-up after the current run ends. When you need its result, call dwell.task.wait alone to end this run; the durable Reporter's follow-up resumes you in a new run. Status does not deliver results. Do not poll status or start a process to wait. /cancel and clearing context do not stop background tasks — use dwell.task stop.",
 				{ tag: false },
 			),
 		],

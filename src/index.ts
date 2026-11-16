@@ -1,8 +1,7 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
 import { resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, LiveDoc, type Conversation, type ConversationId, type EntryId, type Harness, type SubmissionId, type SubmissionRecord, type TaskId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
+import { LiveDoc, type Conversation, type ConversationId, type Harness, type SubmissionId, type SubmissionRecord, type TaskId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
 import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, runtimeBudgets, runtimeTelemetry, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { Uploads } from "./uploads.ts";
 import { readWorkspaceFile } from "./guarded-env.ts";
@@ -27,6 +26,7 @@ import { makeSendExtension, type FileSendInput } from "./ext/send.ts";
 import { makeScheduleExtension } from "./ext/schedule.ts";
 import { backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, reconcileBackgroundStops } from "./ext/background.ts";
 import { makeProcExtension, pruneProcLogs } from "./ext/proc.ts";
+import { presentAnswer } from "./answer.ts";
 import { modelFailure } from "./model-failure.ts";
 
 type ReplyTarget = { chatId: string; messageId: string; destination?: ConversationDestination };
@@ -701,7 +701,7 @@ async function streamReplyCore(
 					await frameWork;
 					let final = "";
 					if (settled.status === "done" && settled.type === "input") {
-						final = await answerText(settled.answer, context);
+						final = (await presentAnswer(harness, conversation.id, settled.answer, context)).text;
 					} else {
 						final = `处理失败：${await runFailureReason(conversation.id as number, settled)}`;
 					}
@@ -761,7 +761,7 @@ async function submitAndReplyPlain(
 	const context = BACKGROUND_CONTEXT;
 	const settled = await submission.wait(context);
 	if (settled.status === "done" && settled.type === "input") {
-		const reply = await answerText(settled.answer, context);
+		const { text: reply } = await presentAnswer(harness, conversation.id, settled.answer, context);
 		const label = lineLabel(conversation.id as number);
 		await replyTo(target, (label !== undefined ? `${label}\n\n` : "") + (reply || "（空回复）"), conversation);
 	} else {
@@ -825,7 +825,9 @@ async function notifyAutonomousPanelResult(conversationId: number, submission: A
 		let status = "完成";
 		let text = "";
 		if (settled.status === "done" && settled.type === "input") {
-			text = await answerText(settled.answer);
+			const answer = await presentAnswer(harness, conversationId, settled.answer);
+			text = answer.text;
+			if (answer.waiting) status = "等待后台任务";
 		} else {
 			status = "失败";
 			text = await runFailureReason(conversationId, settled);
@@ -958,7 +960,7 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 				await telegram.edit(row.destination, messageId, "该输入已并入同一轮回复。");
 				return;
 			}
-			answer = await answerText(settled.answer) || "（本次运行没有产出文本）";
+			answer = (await presentAnswer(harness, conversation.id, settled.answer)).text || "（本次运行没有产出文本）";
 		} else answer = `处理失败：${await runFailureReason(conversation.id as number, settled)}`;
 		if (answer.length <= 4096) await telegram.edit(row.destination, messageId, answer);
 		else {
@@ -1632,12 +1634,6 @@ async function mirrorStream(conversation: Conversation, submission: Awaited<Retu
 		keeper.stop();
 	}
 	return keeper.full();
-}
-
-async function answerText(id: EntryId, context = BACKGROUND_CONTEXT): Promise<string> {
-	const entry = await harness.commit((tx) => tx.entry(AssistantEntry, id), context);
-	const answer = entry?.model?.[0] as AssistantMessage | undefined;
-	return (answer?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("");
 }
 
 function shutdown(code = 0): Promise<void> {

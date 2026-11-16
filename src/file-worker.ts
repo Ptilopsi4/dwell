@@ -1,6 +1,6 @@
 // Fixed host file operations. No user code or command text is evaluated here.
-import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, type FileHandle } from "node:fs/promises";
+import { constants, type Dir, type Stats } from "node:fs";
+import { lstat, mkdir, open, opendir, readdir, realpath, type FileHandle } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LineScanner, type FileInfo } from "@earendil-works/pi-durable/env";
 import { filePathViolation, type PathBases } from "./file-policy.ts";
@@ -10,12 +10,13 @@ export type FileRequest = {
 	parts: string[];
 	root: { dev: number; ino: number };
 	bases: PathBases;
-	operation: "read" | "write" | "append" | "truncate" | "flush" | "info" | "exists" | "directory" | "mkdir";
+	operation: "read" | "write" | "append" | "truncate" | "flush" | "info" | "exists" | "directory" | "directory-reader" | "mkdir";
 	recursive?: boolean;
 };
 
 const request: FileRequest = JSON.parse(process.argv[2]!);
 let file: FileHandle | undefined;
+let directory: Dir | undefined;
 const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) => a.dev === b.dev && a.ino === b.ino;
 const denied = (message: string): never => { throw Object.assign(new Error(message), { code: "EACCES" }); };
 const check = (path: string, write: boolean) => {
@@ -83,6 +84,32 @@ async function start(): Promise<void> {
 		}
 		await send(entries); process.disconnect!(); return;
 	}
+	if (request.operation === "directory-reader") {
+		await enter(name, false);
+		const path = await realpath(".");
+		directory = await opendir(".", { bufferSize: 1 });
+		await send(undefined);
+		let done = false, chain = Promise.resolve();
+		process.on("message", (input: { op: string; maxEntries?: number }) => {
+			chain = chain.then(async () => {
+				if (input.op !== "next") denied("Unsupported directory operation.");
+				if (!Number.isSafeInteger(input.maxEntries) || input.maxEntries! <= 0) throw Object.assign(new Error("maxEntries must be a positive safe integer."), { code: "EINVAL" });
+				const entries: FileInfo[] = [];
+				while (!done && entries.length < input.maxEntries!) {
+					const entry = await directory!.read();
+					if (entry === null) { done = true; break; }
+					const target = join(path, entry.name);
+					if (filePathViolation("read", target, request.bases) !== undefined) continue;
+					try {
+						const stats = await lstat(entry.name);
+						entries.push(metadata(stats, target));
+					} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+				}
+				await send({ entries, done });
+			}).catch(fail);
+		});
+		return;
+	}
 	if (request.operation === "info") {
 		const entry = await lstat(name);
 		if (entry.isSymbolicLink()) denied("File changed to a symbolic link.");
@@ -138,5 +165,5 @@ async function start(): Promise<void> {
 	});
 }
 
-process.on("disconnect", () => { void file?.close().finally(() => process.exit()); });
+process.on("disconnect", () => { void Promise.all([file?.close(), directory?.close()]).finally(() => process.exit()); });
 start().catch(fail);

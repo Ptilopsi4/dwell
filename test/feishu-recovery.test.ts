@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, type Conversation, type ConversationView, type EntryId, type Submission, type SubmissionId, type SubmissionRecord, type Tx } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { mirrorRestoredSubmission } from "../src/feishu/recovery.ts";
+import { BACKGROUND_WAIT_NOTICE } from "../src/answer.ts";
+import { BACKGROUND_WAIT_TOOL } from "../src/ext/background.ts";
 
 const context = BACKGROUND_CONTEXT;
 const assistant = (text: string) => ({ kind: "pi.assistant", model: [fauxAssistantMessage(fauxText(text))] });
@@ -15,7 +17,7 @@ function deferred() {
 	return { promise, resolve };
 }
 
-function fixture(options: { settled: SubmissionRecord; partial?: string; laterPartial?: string; currentFrame?: string; answer?: string; pendingOnce?: boolean; statusError?: Error }) {
+function fixture(options: { settled: SubmissionRecord; partial?: string; laterPartial?: string; currentFrame?: string; answer?: string; pendingOnce?: boolean; statusError?: Error; waitReceipt?: "success" | "error" | "absent" }) {
 	const id = options.settled.id;
 	const initial = {
 		entries: [assistant("PREVIOUS RUN ANSWER")],
@@ -40,8 +42,17 @@ function fixture(options: { settled: SubmissionRecord; partial?: string; laterPa
 		commit: async (change: (tx: Tx) => unknown) => change({
 			entry: async (_token: unknown, entryId: EntryId) => {
 				assert.equal(entryId, options.settled.answer);
-				return assistant(options.answer ?? "");
+				return options.waitReceipt === undefined ? assistant(options.answer ?? "") : {
+					id: entryId, conversationId: 1, kind: "pi.assistant", model: [fauxAssistantMessage([
+						fauxText(options.answer ?? ""), fauxToolCall(BACKGROUND_WAIT_TOOL, {}, { id: "wait-call" }),
+					], { stopReason: "toolUse" })],
+				};
 			},
+			scanEntries: async () => ({ items: options.waitReceipt === "absent" ? [] : [{
+				id: 13, conversationId: 1, kind: "pi.tool-result", byTaskId: 22,
+				model: [{ role: "toolResult", toolCallId: "wait-call", toolName: BACKGROUND_WAIT_TOOL, content: [], isError: options.waitReceipt === "error", details: { waitingForBackground: true }, timestamp: 1 }],
+			}] }),
+			task: async () => ({ kind: "pi.tool", conversationId: 1, input: { kind: "model", assistant: 12, callId: "wait-call" } }),
 		} as unknown as Tx),
 	} as unknown as Conversation;
 	const submission = {
@@ -92,6 +103,20 @@ test("restored Feishu empty success does not fall back to historical assistant t
 	await mirrorRestoredSubmission(f.conversation, f.submission, f.append, async () => "unused");
 	assert.match(f.text(), /本次运行没有产出文本/);
 	assert.doesNotMatch(f.text(), /PREVIOUS|LATER/);
+});
+
+for (const answer of ["", "I will wait for the result."]) test(`restored Feishu presents a validated wait with ${answer === "" ? "no text" : "its assistant text"}`, async () => {
+	const f = fixture({ settled: answered(), answer, waitReceipt: "success" });
+	await mirrorRestoredSubmission(f.conversation, f.submission, f.append, async () => { throw new Error("A wait must not request a failure reason"); });
+	assert.equal(f.text().trim(), [answer, BACKGROUND_WAIT_NOTICE].filter(Boolean).join("\n\n"));
+	assert.doesNotMatch(f.text(), /PREVIOUS|LATER|没有产出文本|处理失败/);
+});
+
+for (const waitReceipt of ["error", "absent"] as const) test(`restored Feishu does not infer waiting from a call with an ${waitReceipt} receipt`, async () => {
+	const f = fixture({ settled: answered(), waitReceipt });
+	await mirrorRestoredSubmission(f.conversation, f.submission, f.append, async () => "unused");
+	assert.match(f.text(), /本次运行没有产出文本/);
+	assert.ok(!f.text().includes(BACKGROUND_WAIT_NOTICE));
 });
 
 test("restored Feishu waits for its submission to settle without starting the scheduler", async () => {
