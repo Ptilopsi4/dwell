@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { AgentDoc, GenerationTask, LiveDoc, ToolTask, defineDoc, defineExtension, hook, section, type ConversationId, type Cursor, type Extension, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { AgentDoc, GenerationTask, InboxDoc, LiveDoc, ToolTask, defineDoc, defineExtension, hook, section, type ConversationId, type Cursor, type Extension, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DEFAULT_CWD } from "./state.ts";
 import { abortBeforeRequest } from "./ext/approval.ts";
 
@@ -151,7 +151,9 @@ export function makeWorkspaceExtension(getHarness: () => Harness | undefined): E
 					if (harness === undefined) throw new Error("Workspace controller is not attached");
 					if ((await harness.snapshot(WorkspaceDoc, context))?.children[String(api.conversationId)]?.stopped === true) await abortBeforeRequest(harness, api.taskId, context);
 					const agent = await api.snapshot(AgentDoc, api.conversationId, context);
-					const workspace = await canonicalWorkspace(agent?.cwd ?? DEFAULT_CWD);
+					let workspace: string;
+					try { workspace = await canonicalWorkspace(agent?.cwd ?? DEFAULT_CWD); }
+					catch { await abortBeforeRequest(harness, api.taskId, context); }
 					await harness.commit((tx) => mainRun(tx, api.conversationId, workspace), context);
 				},
 			}),
@@ -160,7 +162,9 @@ export function makeWorkspaceExtension(getHarness: () => Harness | undefined): E
 					const harness = getHarness();
 					if (harness === undefined) return { block: "Workspace controller is unavailable." };
 					const agent = await api.snapshot(AgentDoc, api.conversationId, context);
-					const workspace = await canonicalWorkspace(agent?.cwd ?? DEFAULT_CWD);
+					let workspace: string;
+					try { workspace = await canonicalWorkspace(agent?.cwd ?? DEFAULT_CWD); }
+					catch { return { block: "This workspace is unavailable. Restore it before continuing the task." }; }
 					return harness.commit(async (tx) => {
 						await mainRun(tx, api.conversationId, workspace);
 						const doc = await tx.doc(WorkspaceDoc);
@@ -181,29 +185,60 @@ export function makeWorkspaceExtension(getHarness: () => Harness | undefined): E
 	});
 }
 
+async function terminalLegacyWorkspace(tx: Tx, child: number, parent: number, anchor: TaskId): Promise<boolean> {
+	if ((await tx.task(anchor))?.state.status !== "terminal" || waitingForApproval(child)) return false;
+	if ((await tx.doc(LiveDoc, child as ConversationId)).run !== undefined || (await tx.doc(InboxDoc, child as ConversationId)).items.length > 0) return false;
+	let cursor: Cursor | undefined;
+	do {
+		const page = await tx.scanTasks({ conversationId: child as ConversationId }, 200, cursor);
+		if (page.items.some((task) => task.state.status !== "terminal")) return false;
+		cursor = page.next;
+	} while (cursor !== undefined);
+	cursor = undefined;
+	do {
+		const page = await tx.scanTasks({ conversationId: parent as ConversationId, kind: "dwell.background-reporter" }, 200, cursor);
+		if (page.items.some((task) => (task.input as { child: number }).child === child && task.state.status !== "terminal")) return false;
+		cursor = page.next;
+	} while (cursor !== undefined);
+	for (const writer of Object.values((await tx.doc(WorkspaceDoc)).writers).filter((writer) => writer.conversationId === child)) {
+		if ((await tx.task(writer.reporterId as TaskId))?.state.status !== "terminal") return false;
+	}
+	return true;
+}
+
 /** Older child conversations receive the safer default before any resumed work. */
 export async function registerLegacyWorkspaces(harness: Harness): Promise<void> {
 	const children = await harness.commit(async (tx) => {
-		const found: { child: number; parent: number; cwd: string }[] = [];
+		const found: { child: number; parent: number; cwd: string; anchor: TaskId }[] = [];
+		const access = await tx.doc(WorkspaceDoc);
 		let cursor: Cursor | undefined;
 		do {
 			const page = await tx.scanConversations({}, 200, cursor);
 			for (const conv of page.items) {
-				if (conv.owner === undefined) continue;
+				if (conv.owner === undefined || access.children[String(conv.id)] !== undefined) continue;
 				const owner = await tx.task(conv.owner.taskId);
 				if (owner?.kind !== "dwell.background-anchor") continue;
 				const agent = await tx.doc(AgentDoc, conv.id);
-				found.push({ child: conv.id, parent: owner.conversationId, cwd: agent.cwd ?? DEFAULT_CWD });
+				found.push({ child: conv.id, parent: owner.conversationId, cwd: agent.cwd ?? DEFAULT_CWD, anchor: conv.owner.taskId });
 			}
 			cursor = page.next;
 		} while (cursor !== undefined);
 		return found;
 	}, BACKGROUND_CONTEXT);
 	for (const item of children) {
-		const workspace = await canonicalWorkspace(item.cwd);
+		let workspace: string;
+		let missing: unknown;
+		try { workspace = await canonicalWorkspace(item.cwd); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			workspace = resolve(item.cwd); missing = error;
+		}
 		await harness.commit(async (tx) => {
 			const doc = await tx.doc(WorkspaceDoc);
-			if (doc.children[String(item.child)] === undefined) doc.children[String(item.child)] = { parent: item.parent, mode: "read", workspace };
+			if (doc.children[String(item.child)] !== undefined) return;
+			if (missing !== undefined && !await terminalLegacyWorkspace(tx, item.child, item.parent, item.anchor)) throw missing;
+			// Keep a child identity even when its historical path is gone; recreation must not grant a main lease.
+			doc.children[String(item.child)] = { parent: item.parent, mode: "read", workspace, ...(missing === undefined ? {} : { stopped: true, stopComplete: true }) };
 		}, BACKGROUND_CONTEXT);
 	}
 }
