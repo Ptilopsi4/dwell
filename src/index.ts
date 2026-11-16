@@ -1089,7 +1089,7 @@ async function handleTelegramCallback(callback: TelegramCallback): Promise<void>
 	if (decision !== undefined) await replayApprovalDecisions(decision.id, () => updateApprovalPresentation(decision, "Telegram"));
 }
 
-async function updateApprovalPresentation(decision: ApprovalDecision, by: string): Promise<void> {
+async function updateApprovalPresentation(decision: Pick<ApprovalDecision, "cardDestination" | "cardMessageId" | "action" | "minutes" | "scope" | "trigger" | "command" | "match">, by: string): Promise<void> {
 	if (decision.cardMessageId === undefined) return;
 	if (decision.cardDestination?.kind === "telegram") {
 		if (telegram !== undefined) await telegram.edit(decision.cardDestination, decision.cardMessageId, `${decision.action === "approve" ? `已批准 · ${decision.minutes} 分钟` : "已拒绝"} · ${by}\n任务 #${decision.scope}\n${decision.command.slice(0, 2500)}`, []);
@@ -1246,33 +1246,34 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			}
 			const decision = await takeDecision(key, "approve", minutes, target, receipt?.approvalRequestId);
 			if (decision !== undefined) {
-				void replyTo(target, `已批准：本任务线 ${minutes} 分钟内危险命令免拦截，继续执行。`).catch((err: unknown) => console.error("[dwell] 审批通知失败:", err));
-				const result = await replayApprovalDecisions(decision.id);
+				void replyTo(target, `已批准：本任务线 ${minutes} 分钟内由你触发的危险命令免拦截，继续执行。`).catch((err: unknown) => console.error("[dwell] 审批通知失败:", err));
+				const result = await replayApprovalDecisions(decision.id, (saved) => updateApprovalPresentation(saved, msg.platform === "telegram" ? "Telegram 命令" : "飞书命令"));
 				if (result.unavailable > 0) await replyTo(target, "部分后台任务已停止，无法续跑。", conversation);
 				if (result.pending > 0) await replyTo(target, "审批已保存，部分续跑尚未接纳，将自动重试。", conversation);
 			} else {
 				if (receipt?.approvalRequestId) { await replyTo(target, "原审批请求已处理或变更，未开新窗口。"); break; }
 				// 预授：没有待审命令，只开窗口，不唤醒模型
 				const granted = await grantApprovalWindow(key, minutes, receipt === undefined ? undefined : receipt.createdAt + minutes * 60_000, receipt === undefined ? undefined : { previousExpiresAt: receipt.windowExpiresAt, noPending: true });
-				await replyTo(target, granted ? `已预先批准：本任务线 ${minutes} 分钟内危险命令免拦截。` : "审批状态已变化，请重新发送 /approve。");
+				const otherPending = [...pendingApprovals].some(([otherKey]) => otherKey.startsWith(`${convId}:`) && otherKey !== key);
+				await replyTo(target, granted ? `已预先批准：本任务线 ${minutes} 分钟内仅由你触发的危险命令免拦截。${otherPending ? "\n他人的待审请求尚未处理；有审批权限的人可点击原请求的按钮，或请原触发者发送 /approve。" : ""}` : "审批状态已变化，请重新发送 /approve。");
 			}
 			break;
 		}
-		case "/deny":
-			if (receipt?.denial !== undefined) {
-				await revokeApprovalSnapshot(receipt.denial);
-				await replyTo(target, "已关闭这条命令记录的批准窗口与待审请求。");
-				break;
-			}
-			if (admin) {
+		case "/deny": {
+			const revoked = receipt?.denial ?? captureApprovalRevocation(convId, admin ? undefined : msg.senderId);
+			const cards = revoked.pending.flatMap(([key, requestId]) => {
+				const pending = pendingApprovals.get(key);
+				return pending?.requestId === requestId ? [{ ...structuredClone(pending), scope: Number(key.split(":")[0]), action: "deny" as const, minutes: 0 }] : [];
+			});
+			if (receipt?.denial !== undefined) await revokeApprovalSnapshot(receipt.denial);
+			else if (admin) {
 				// 管理员：关闭该任务线全部窗口与待审请求（救场）
 				await revokeApprovalWindows(convId);
-				await replyTo(target, "已关闭本任务线的全部批准窗口。");
-				return;
-			}
-			await revokeApprovalWindows(convId, msg.senderId);
-			await replyTo(target, "已关闭你的批准窗口并取消待审请求。");
+			} else await revokeApprovalWindows(convId, msg.senderId);
+			for (const card of cards) void updateApprovalPresentation(card, msg.platform === "telegram" ? "Telegram 命令" : "飞书命令").catch((error: unknown) => console.error("[dwell] 审批卡片更新失败:", error));
+			await replyTo(target, receipt?.denial !== undefined ? "已关闭这条命令记录的批准窗口与待审请求。" : admin ? "已关闭本任务线的全部批准窗口。" : "已关闭你的批准窗口并取消待审请求。");
 			break;
+		}
 		case "/allow": {
 			if (!admin) {
 				await replyTo(target, "/allow 仅管理员可用。");
