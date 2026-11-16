@@ -1029,7 +1029,9 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 async function presentTelegramSubmission(conversation: Conversation, submission: Awaited<ReturnType<Conversation["submit"]>>, target: ReplyTarget): Promise<void> {
 	if (target.destination?.kind !== "telegram") return;
 	const id = `tg-reply:${target.destination.botId}:${submission.id}`;
-	await telegramInbox.prepare(id, { conversationId: conversation.id as number, sender: runSender.get(conversation.id as number) ?? sessions.ownerOf(conversation.id) ?? panelUser, destination: target.destination, replyTo: target.messageId, submissionId: submission.id as number }, async () => "");
+	const sender = await telegramInbox.submissionSender(conversation.id as number, submission.id as number);
+	if (sender === undefined) throw new Error("Telegram 回复缺少持久发送者，未创建投递凭据");
+	await telegramInbox.prepare(id, { conversationId: conversation.id as number, sender, destination: target.destination, replyTo: target.messageId, submissionId: submission.id as number }, async () => "");
 	void replyTelegram(id, conversation, submission);
 }
 
@@ -1044,8 +1046,9 @@ async function reattachTelegramReplies(): Promise<void> {
 			continue;
 		}
 		const conversation = await sessions.byConversation(row.conversationId as ConversationId);
-		if (conversation === undefined || !users.isAllowed(row.sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); continue; }
 		let submission = row.submissionId === undefined ? undefined : await harness.submission(row.submissionId as SubmissionId, BACKGROUND_CONTEXT);
+		const sender = submission === undefined ? row.sender : await telegramInbox.reconcileSender(id);
+		if (conversation === undefined || sender === undefined || !users.isAllowed(sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); continue; }
 		if (submission === undefined) {
 			const requestId = row.requestId ?? (id.startsWith("tg-update:") ? id : undefined);
 			if (requestId === undefined) { await telegramInbox.output(id, "failed"); continue; }

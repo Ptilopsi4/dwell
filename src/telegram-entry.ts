@@ -1,6 +1,6 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { copyJson } from "@earendil-works/chord";
-import { defineDoc, type Harness } from "@earendil-works/pi-durable";
+import { defineDoc, InboxDoc, type ConversationId, type Harness, type SubmissionId } from "@earendil-works/pi-durable";
 import type { NormalizedMessage, TelegramDestination } from "./pipeline.ts";
 import { sameDestination } from "./pipeline.ts";
 import type { ApprovalRevocation, PendingApproval, RunVia } from "./ext/approval.ts";
@@ -51,6 +51,39 @@ export class TelegramInbox {
 	constructor(harness: Harness) { this.#harness = harness; }
 	async input(id: string): Promise<TelegramInputReceipt | undefined> {
 		return (await this.#harness.snapshot(TelegramInboxDoc, BACKGROUND_CONTEXT))?.inputs[id];
+	}
+	/** A follow-up's sender belongs to its own durable input, even while another actor is running. */
+	async submissionSender(conversationId: number, submissionId: number): Promise<string | undefined> {
+		const handle = await this.#harness.submission(submissionId as SubmissionId, BACKGROUND_CONTEXT);
+		if (handle === undefined) return undefined;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const submission = await handle.status(BACKGROUND_CONTEXT);
+			if (submission.conversationId !== conversationId || submission.type !== "input") return undefined;
+			const sender = await this.#harness.commit(async (tx) => {
+				const entry = submission.entry === undefined
+					? (await tx.doc(InboxDoc, conversationId as ConversationId)).items.find((item) => item.id === submissionId)?.entry
+					: await tx.entry(submission.entry);
+				if (entry === undefined || typeof entry.kind !== "string" || !["chat.message", "panel.message", "dwell.approval", "dwell.approval.legacy"].includes(entry.kind)) return undefined;
+				const data = entry.data;
+				return typeof data === "object" && data !== null && !Array.isArray(data) && typeof data.sender === "string" && data.sender !== "" ? data.sender : undefined;
+			}, BACKGROUND_CONTEXT);
+			if (sender !== undefined || submission.status !== "queued") return sender;
+			// Placement can move the entry out of InboxDoc between the two reads; it never queues again.
+		}
+		return undefined;
+	}
+	/** Older autonomous receipts may have captured the actor of the run ahead of them. */
+	async reconcileSender(id: string): Promise<string | undefined> {
+		const row = await this.input(id);
+		if (row === undefined) return undefined;
+		if (row.submissionId === undefined) return row.sender;
+		const sender = await this.submissionSender(row.conversationId, row.submissionId);
+		if (sender === undefined || sender === row.sender) return sender;
+		await this.#harness.commit(async (tx) => {
+			const current = (await tx.doc(TelegramInboxDoc)).inputs[id];
+			if (current?.submissionId === row.submissionId && current.conversationId === row.conversationId) current.sender = sender;
+		}, BACKGROUND_CONTEXT);
+		return sender;
 	}
 	async enqueue(id: string, receipt: Omit<TelegramInputReceipt, "content" | "output" | "raw"> & { raw: NormalizedMessage }): Promise<void> {
 		await this.#harness.commit(async (tx) => {
