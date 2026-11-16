@@ -136,6 +136,8 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 	// 归属登记要先完成再 submit：登记延迟 resolve，期间会话里不应出现触发输入
 	let attributed = 0;
 	let submittedBeforeAttributed = false;
+	let announce!: () => void;
+	const firstAnnouncement = new Promise<void>((resolve) => { announce = resolve; });
 	let conversationRef: Pick<Conversation, "entries"> | undefined;
 	const deps = {
 		attribute: async () => {
@@ -145,7 +147,10 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 			if (after !== before) submittedBeforeAttributed = true;
 			attributed++;
 		},
-		onFired: (conversationId: number, submissionId: SubmissionId, header: string) => fired.push({ conversationId, header, submissionId }),
+		onFired: async (conversationId: number, submissionId: SubmissionId, header: string) => {
+			fired.push({ conversationId, header, submissionId });
+			if (fired.length === 1) await firstAnnouncement;
+		},
 		getHarness: () => undefined,
 		senderOf: () => "ou_test",
 		// 白名单检查：ou_banned 已被移出 → 其 schedule 触发时终止
@@ -179,6 +184,9 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		const once = await create({ id: "schedule:once", instruction: "say hi", firstAt: clock.now + 5 * MIN });
 		await clock.advance(6 * MIN);
 		await until(() => fired.length === 1);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal((await harness.getTask(once, context))?.state.status, "running", "The schedule must retain its announce checkpoint until presentation is durable");
+		announce();
 		const sub = await harness.submission(fired[0].submissionId, context);
 		assert.ok(sub !== undefined);
 		const settled = await sub.wait(context);
@@ -231,6 +239,7 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		await clock.advance(20 * MIN);
 		await until(() => fired.some((f) => f.header.includes("reborn")));
 	} finally {
+		announce();
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });
 	}

@@ -50,7 +50,7 @@ export interface FeishuBridge {
 	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
 	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
 	/** panel 审批决定：窗口记账 + 同步飞书卡 + 唤醒全部被拦会话（本线直接续跑，后台子会话经 Reporter） */
-	decide(key: string, action: "approve" | "deny", minutes: number): Promise<{ ok: boolean; error?: string }>;
+	decide(key: string, action: "approve" | "deny", minutes: number, requestId?: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 class HttpError extends Error {
@@ -390,7 +390,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const key = String(body?.key ?? "");
 			const action = body?.action === "deny" ? "deny" : "approve";
 			const minutes = clampMinutes(Number(body?.minutes ?? 10));
-			json(res, 200, await feishu.decide(key, action, minutes));
+			json(res, 200, await feishu.decide(key, action, minutes, typeof body?.requestId === "string" ? body.requestId : undefined));
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/users") {

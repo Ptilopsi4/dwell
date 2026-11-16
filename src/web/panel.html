@@ -1293,12 +1293,12 @@ function sheetPrompt(title, initial, onOk, placeholder = "", allowEmpty = false)
 
 /* ── 审批：当前会话的待审在输入框上方展示完整命令；其他会话列在侧栏并在会话行上打角标 ── */
 const apprConv = (a) => Number(String(a.key).split(":")[0]);
-function bindApprOps(root, key) {
+function bindApprOps(root, key, requestId) {
 	for (const b of root.querySelectorAll("button[data-a]")) {
 		b.onclick = async () => {
 			const action = b.dataset.a === "deny" ? "deny" : "approve";
 			const minutes = b.dataset.a === "approve30" ? 30 : 10;
-			const r = await api("approve", { key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
+			const r = await api("approve", { key, action, minutes, requestId }).catch((e) => ({ ok: false, error: e.message }));
 			if (!r.ok) toast(r.error ?? "操作失败", true);
 			else toast(action === "approve" ? `已批准 ${minutes} 分钟` : "已拒绝");
 			apprSig = "";
@@ -1312,7 +1312,7 @@ async function loadApprovals() {
 	pendingByConv = new Map();
 	for (const a of list) pendingByConv.set(apprConv(a), (pendingByConv.get(apprConv(a)) ?? 0) + 1);
 	refreshConvMarks();
-	const sig = JSON.stringify([convId, list.map((a) => a.key)]);
+	const sig = JSON.stringify([convId, list.map((a) => [a.key, a.requestId, a.command, a.match])]);
 	if (sig === apprSig) return;
 	apprSig = sig;
 	const mine = list.find((a) => apprConv(a) === Number(convId));
@@ -1320,7 +1320,7 @@ async function loadApprovals() {
 	if (mine !== undefined) {
 		$("inlMatch").textContent = `命中规则：${mine.match}`;
 		$("inlCmd").textContent = mine.command;
-		bindApprOps($("inlappr"), mine.key);
+		bindApprOps($("inlappr"), mine.key, mine.requestId);
 	}
 	const others = list.filter((a) => a !== mine);
 	$("approvals").hidden = others.length === 0;
@@ -1339,7 +1339,7 @@ async function loadApprovals() {
 		el.querySelector("pre").textContent = a.command;
 		el.querySelector("pre").title = a.command;
 		el.querySelector("[data-go]").onclick = () => { drawer(false); switchConv(apprConv(a)); };
-		bindApprOps(el, a.key);
+		bindApprOps(el, a.key, a.requestId);
 		box.appendChild(el);
 	}
 	reflowFloat();

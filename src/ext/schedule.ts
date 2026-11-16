@@ -6,6 +6,7 @@ import { defineDoc, defineTask, defineTool, defineExtension, section, type Conve
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "typebox";
 import { DWELL_TZ } from "../state.ts";
+import { creatorVia, type RunVia } from "./approval.ts";
 
 export const SCHEDULE_TASK_KIND = "dwell.schedule-run";
 
@@ -29,6 +30,7 @@ export type ScheduleInput = {
 	readonly firstAt: number;
 	readonly repeat?: ScheduleRepeat;
 	readonly creator: string;
+	readonly creatorVia?: RunVia;
 	readonly tz: string;
 };
 
@@ -40,11 +42,12 @@ export type ScheduleDeps = {
 	/** run 归属登记（审批卡、/cancel 归属到创建者）。fire 阶段 await 它完成才 submit；必须返回 Promise——void 包装会让 await 直接通过，顺序约束失效 */
 	attribute: (conversationId: number, creator: string) => Promise<void>;
 	/** 触发的 run 由宿主开回复卡（panel 会话走通知开关） */
-	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void;
+	onFired: (conversationId: number, submissionId: SubmissionId, header: string) => void | Promise<void>;
 	/** cancel 需要 abortTask；装配时 harness 尚未创建，getter 延迟绑定 */
 	getHarness: () => Pick<Harness, "abortTask"> | undefined;
 	/** 当前 run 发起者（schedule 创建者记录用） */
 	senderOf: (conversationId: number) => string | undefined;
+	viaOf?: (conversationId: number) => RunVia | undefined;
 	/** 创建者是否仍在白名单：被 /disallow 后终止任务并告警（缺省不检查，测试/无 users 场景） */
 	isAllowed?: (openId: string) => boolean;
 	/** 创建者被移出白名单时的告警（report 管线，仅记日志） */
@@ -262,7 +265,7 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 						content: `[Scheduled task ${input.id}] ${input.instruction}\n(This input was scheduled earlier in this conversation. Current time: ${formatLocalTime(runtime.now(), input.tz)} ${input.tz}.)`,
 						requestId: `sched:${input.id}:${n}`,
 						whenBusy: "followUp",
-						entry: { kind: "chat.message", data: { sender: input.creator, via: "schedule" } },
+						entry: { kind: "chat.message", data: { sender: input.creator, via: "schedule", ...(creatorVia(input.creator, input.creatorVia) === undefined ? {} : { authorityVia: creatorVia(input.creator, input.creatorVia)! }) } },
 					},
 					context,
 				);
@@ -271,7 +274,7 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 			announce: async (task, runtime, context) => {
 				const input = task.input;
 				const { n, at, submissionId } = task.state.checkpoint;
-				deps.onFired(input.conversationId, submissionId as SubmissionId, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
+				await deps.onFired(input.conversationId, submissionId as SubmissionId, `⏰ 定时任务 · ${input.instruction.slice(0, 40)}`);
 				await runtime.commit(() => {
 					if (input.repeat === undefined) return { status: "terminal", outcome: { status: "completed", result: null } };
 					const next = nextRecurrenceRunAt(at, input.repeat, runtime.now(), input.tz);
@@ -371,6 +374,7 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 					firstAt: runAt,
 					...(repeat === undefined ? {} : { repeat }),
 					creator: deps.senderOf(api.conversationId as number) ?? "",
+					...(deps.viaOf?.(api.conversationId) === undefined ? {} : { creatorVia: deps.viaOf!(api.conversationId)! }),
 					tz: timezone,
 				};
 				intent.scheduled = scheduled;

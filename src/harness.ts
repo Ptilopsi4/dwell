@@ -9,9 +9,11 @@ import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentDoc, createRegistry, defineExtension, Harness, section, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { makeApprovalExtension, setModelConfigGuard } from "./ext/approval.ts";
+import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard } from "./ext/approval.ts";
+import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
 import { makeWebExtension } from "./ext/web.ts";
 import { scanLiveTasks } from "./ext/schedule.ts";
+import { makeWorkspaceExtension, registerLegacyWorkspaces, setWorkspaceApprovalGetter } from "./workspace.ts";
 import type { SandboxState } from "./sandbox.ts";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, DWELL_TZ, STATE_DIR } from "./state.ts";
 import { configuredSecretEnv, createModelClient, loadModelsConfig, type ResolvedModelConnection } from "./models.ts";
@@ -189,6 +191,25 @@ function providerModels() {
 	return createModelClient(MODEL_CONFIG.main, process.env[MODEL_KEY_ENV] ?? "").models;
 }
 
+const budgetsByHarness = new WeakMap<Harness, ReturnType<typeof makeBudgetController>>();
+export const runtimeBudgets = (harness: Harness): ReturnType<typeof makeBudgetController> | undefined => budgetsByHarness.get(harness);
+
+function runBudgetLimits(): Partial<BudgetLimits> {
+	const limits: Partial<BudgetLimits> = {};
+	for (const [name, key, scale] of [
+		["DWELL_RUN_MODEL_LIMIT", "modelAdmissions", 1],
+		["DWELL_RUN_TOOL_LIMIT", "toolAdmissions", 1],
+		["DWELL_RUN_TIMEOUT_MINUTES", "executionMs", 60_000],
+	] as const) {
+		const raw = process.env[name];
+		if (raw === undefined) continue;
+		const value = Number(raw);
+		if (!Number.isSafeInteger(value) || value <= 0 || !Number.isSafeInteger(value * scale)) throw new Error(`${name} 必须为正整数`);
+		limits[key] = value * scale;
+	}
+	return limits;
+}
+
 /** A writable endpoint configuration could redirect captured credentials after a restart. */
 export async function checkModelConfigBoundary(path: string, writableRoots: readonly string[] = [DATA_DIR]): Promise<void> {
 	const target = await realpath(path);
@@ -230,12 +251,25 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
 	if (MODEL_CONFIG.path !== undefined) await checkModelConfigBoundary(MODEL_CONFIG.path);
 	setModelConfigGuard(MODEL_CONFIG.path);
+	const limits = runBudgetLimits();
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
+	let harness: Harness | undefined;
+	const budgets = makeBudgetController({
+		limits,
+		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
+	});
+	setApprovalBudgetGetter((conversationId) => budgets.captureApproval(conversationId));
+	setWorkspaceApprovalGetter((conversationId) =>
+		[...pendingApprovals.values()].some((pending) => pending.targets?.includes(conversationId)) ||
+		[...approvalDecisions.values()].some((decision) => decision.deliveryTargets.some((target) => target.conversationId === conversationId && target.status === "pending")),
+	);
 
 	const registry = createRegistry();
 	registry.install(CodingTools);
 	registry.install(DwellExtension);
-	registry.install(makeApprovalExtension());
+	registry.install(budgets.extension);
+	registry.install(makeWorkspaceExtension(() => harness));
+	registry.install(makeApprovalExtension(() => harness));
 	for (const extension of extraExtensions) registry.install(extension);
 	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
 	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
@@ -253,7 +287,8 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
 			data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 	};
-	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
+	harness = await Harness.open(storage, { models, registry, env, onReport }, context);
+	budgetsByHarness.set(harness, budgets);
 	try {
 		await checkResumableModels(harness, models);
 		if (MODEL_CONFIG.path !== undefined) {
@@ -272,7 +307,10 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 			}, context);
 			await checkModelConfigBoundary(MODEL_CONFIG.path, roots);
 		}
+		await budgets.attach(harness);
+		await registerLegacyWorkspaces(harness);
 	} catch (error) {
+		await budgets.close();
 		await harness.close(context);
 		throw error;
 	}
