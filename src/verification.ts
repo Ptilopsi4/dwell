@@ -13,15 +13,20 @@ export type ArtifactManifest = { cwd: string; entries: ArtifactEntry[]; digest: 
 export type CheckReceipt = { name: string; command: string; taskId: number; exitCode: number | null; isError: boolean };
 export type VerificationReceipt = {
 	workId: string; taskId: number; checks: CheckReceipt[]; verifiedAt: number;
+	revision?: number;
 	manifest: { cwd: string; digest: string; files: number; bytes: number };
 };
+export type VerificationAttempt = { taskId: number; checks: CheckReceipt[]; completedAt: number; revision?: number };
 export type WorkVerification = {
 	contract: VerificationContract;
+	// Missing revisions belong to the original contract; reading old records does not migrate them.
+	revision?: number;
+	revisionHistory?: { revision: number; oldChecks: VerificationContract["checks"]; reason: string; actor: string; taskId: number; revisedAt: number; oldReceipt?: VerificationReceipt; oldAttempt?: VerificationAttempt }[];
 	baseline?: ArtifactManifest;
 	status: "unverified" | "verified" | "failed" | "stale";
 	receipt?: VerificationReceipt;
 	failure?: string;
-	lastAttempt?: { taskId: number; checks: CheckReceipt[]; completedAt: number };
+	lastAttempt?: VerificationAttempt;
 };
 
 export const VERIFICATION_MAX_ENTRIES = 1024;

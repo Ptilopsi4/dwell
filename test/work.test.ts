@@ -15,7 +15,7 @@ import { makeBudgetController } from "../src/ext/budget.ts";
 
 const privateState = await mkdtemp(join(tmpdir(), "dwell-work-state-"));
 process.env.DWELL_STATE = privateState;
-const { acceptWork, getWork, inheritWork, makeWorkController, WorkDoc, workIdentity } = await import("../src/ext/work.ts");
+const { acceptWork, getWork, inheritWork, makeWorkController, WorkDoc, workIdentity, workReadyAnswer } = await import("../src/ext/work.ts");
 const { BackgroundAnchor, BackgroundDoc, BACKGROUND_REPORTER_KIND, makeBackgroundDeliverer, makeBackgroundExtension } = await import("../src/ext/background.ts");
 const { makeProcExtension, PROC_TASK_KIND } = await import("../src/ext/proc.ts");
 after(() => rm(privateState, { recursive: true, force: true }));
@@ -39,6 +39,7 @@ async function setup(options: { path?: string; limits?: Partial<WorkLimits>; pri
 	registry.install(defineExtension({ name: "work-fixtures", tasks: options.background ? [] : [BackgroundAnchor], tools: [
 		defineTool({ name: "probe", description: "Run an observable check", parameters: Type.Object({}), replay: "safe", async execute() { return { output: [{ type: "text", text: "check passed" }] }; } }),
 		defineTool({ name: "failure", description: "Return a failed check", parameters: Type.Object({}), async execute() { return { output: [{ type: "text", text: "check failed" }], isError: true }; } }),
+		defineTool({ name: "nested.ready", description: "Try a nested ready call", parameters: Type.Object({}), async execute(_args, api, ctx) { const result = await api.executeTool("dwell.work", { action: "ready", review: "Nested review" }, ctx); return { output: [{ type: "text", text: JSON.stringify(result) }] }; } }),
 	] }));
 	let harness!: Harness;
 	for (const extension of options.extra?.(() => harness) ?? []) registry.install(extension);
@@ -107,6 +108,58 @@ test("unattributed inputs cannot create a work owner", { timeout: 5000 }, async 
 		await (await conversation.submit({ type: "input", content: "start without actor" }, context)).wait(context);
 		assert.equal((await getWork(s.harness, conversation.id)).current, undefined);
 		assert.ok((await entries(s.harness, conversation.id)).some((entry) => entry.model?.[0]?.role === "toolResult" && entry.model[0].isError));
+	} finally { await s.close(); }
+});
+
+test("ready ends the run at its own correlated receipt without another provider request", { timeout: 5000 }, async () => {
+	const s = await setup({ responses: [start(), call("probe"), done()] });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "work", entry: actor() }, context)).wait(context);
+		const before = await current(s.harness, conversation.id);
+		const evidence = Object.keys(before.availableEvidence).map(Number);
+		s.faux.setResponses([call("dwell.work", { action: "ready", evidence, review: "The probe completed successfully" }), async () => { throw new Error("ready must not request another model answer"); }]);
+		const calls = s.faux.state.callCount;
+		const settled = await (await conversation.submit({ type: "input", content: "review", entry: actor() }, context)).wait(context);
+		assert.ok(settled.type === "input" && settled.status === "done");
+		assert.equal(s.faux.state.callCount, calls + 1);
+		const summary = "目标（工作声明）：Repair the example\n\n验证：未声明验证契约；已记录 1 条成功工具结果。\n\n评审说明（代理声明）：The probe completed successfully";
+		assert.deepEqual(await workReadyAnswer(s.harness, conversation.id, settled.answer), { workId: before.id, verified: false, summary });
+		assert.equal(await workReadyAnswer(s.harness, conversation.id + 1, settled.answer), undefined);
+		const record = await current(s.harness, conversation.id);
+		assert.equal(record.status, "ready_for_review");
+		assert.equal(record.usage.modelAdmissions, before.usage.modelAdmissions + 1);
+		const receipt = (await entries(s.harness, conversation.id)).find((entry) => ToolResultEntry.is(entry) && entry.model?.[0]?.role === "toolResult" && entry.model[0].details && typeof entry.model[0].details === "object" && "workReady" in entry.model[0].details);
+		assert.deepEqual(receipt?.model?.[0]?.role === "toolResult" ? receipt.model[0].details : undefined, { workReady: true, workId: before.id, verified: false, summary });
+		s.faux.setResponses([done()]);
+		const later = await (await conversation.submit({ type: "input", content: "ordinary conversation", entry: actor() }, context)).wait(context);
+		assert.ok(later.type === "input" && later.status === "done");
+		assert.equal(await workReadyAnswer(s.harness, conversation.id, later.answer), undefined);
+		assert.equal(s.work.extension.tools?.find((tool) => tool.name === "dwell.work")?.replay, "unsafe");
+	} finally { await s.close(); }
+});
+
+test("mixed and nested ready calls fail before changing the review state", { timeout: 5000 }, async () => {
+	const s = await setup({ responses: [start(), call("probe"), done()] });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "work", entry: actor() }, context)).wait(context);
+		const before = await current(s.harness, conversation.id);
+		const evidence = Object.keys(before.availableEvidence).map(Number);
+		const mixed = fauxAssistantMessage([fauxToolCall("dwell.work", { action: "ready", evidence, review: "Mixed review", progress: "Must not persist" }, { id: "mixed-ready" }), fauxToolCall("probe", {}, { id: "mixed-probe" })], { stopReason: "toolUse" });
+		for (const response of [mixed, call("nested.ready")]) {
+			s.faux.setResponses([response, done()]);
+			const result = await (await conversation.submit({ type: "input", content: "invalid ready", entry: actor() }, context)).wait(context);
+			assert.ok(result.type === "input" && result.status === "done");
+			assert.equal(await workReadyAnswer(s.harness, conversation.id, result.answer), undefined);
+			const record = await current(s.harness, conversation.id);
+			assert.equal(record.status, "active");
+			assert.equal(record.review, before.review);
+			assert.equal(record.progress, before.progress);
+		}
+		const failures = (await entries(s.harness, conversation.id)).filter(ToolResultEntry.is).filter((entry) => entry.model?.[0]?.role === "toolResult" && entry.model[0].toolName === "dwell.work" && entry.model[0].isError);
+		assert.ok(failures.some((entry) => JSON.stringify(entry.model).includes("alone")));
+		assert.ok((await entries(s.harness, conversation.id)).some((entry) => JSON.stringify(entry.model).includes("directly")), "the nested call's rejection is retained in its caller result");
 	} finally { await s.close(); }
 });
 
@@ -444,7 +497,7 @@ test("the real background Reporter preserves the child's work on both delivery a
 		s.faux.setResponses([call("dwell.task", { action: "start", name: "check", message: "Read the existing example" }), respond, respond]);
 		await (await parent.submit({ type: "input", content: "spawn", entry: actor() }, context)).wait(context);
 		await running;
-		s.faux.setResponses([call("dwell.work", { action: "ready", evidence: [Number(Object.keys(old.availableEvidence)[0])], review: "Verified" }), done(), start("New goal"), done(), done()]);
+		s.faux.setResponses([call("dwell.work", { action: "ready", evidence: [Number(Object.keys(old.availableEvidence)[0])], review: "Verified" }), start("New goal"), done(), done()]);
 		await (await parent.submit({ type: "input", content: "review", entry: actor() }, context)).wait(context);
 		await (await parent.submit({ type: "input", content: "new goal", entry: actor() }, context)).wait(context);
 		const newer = await current(s.harness, parent.id);
@@ -470,7 +523,7 @@ test("managed process admission and its delayed failure report retain their crea
 		await (await parent.submit({ type: "input", content: "start process", entry: actor() }, context)).wait(context);
 		const tasks = await s.harness.commit(async (tx) => JSON.parse(JSON.stringify((await tx.scanTasks({ kind: PROC_TASK_KIND }, 100)).items)), context);
 		assert.deepEqual(tasks[0].input.work, { conversationId: parent.id, id: old.id });
-		s.faux.setResponses([call("dwell.work", { action: "ready", evidence: [Number(Object.keys(old.availableEvidence)[0])], review: "Verified" }), done(), start("New goal"), done(), done()]);
+		s.faux.setResponses([call("dwell.work", { action: "ready", evidence: [Number(Object.keys(old.availableEvidence)[0])], review: "Verified" }), start("New goal"), done(), done()]);
 		await (await parent.submit({ type: "input", content: "review", entry: actor() }, context)).wait(context);
 		await (await parent.submit({ type: "input", content: "new goal", entry: actor() }, context)).wait(context);
 		const newer = await current(s.harness, parent.id);

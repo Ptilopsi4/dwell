@@ -834,6 +834,7 @@ async function notifyAutonomousPanelResult(conversationId: number, submission: A
 			const answer = await presentAnswer(harness, conversationId, settled.answer);
 			text = answer.text;
 			if (answer.waiting) status = "等待后台任务";
+			else if (answer.ready) status = "待验收";
 		} else {
 			status = "失败";
 			text = await runFailureReason(conversationId, settled);
