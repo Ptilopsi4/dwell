@@ -60,7 +60,7 @@ The key must be under `/etc` for sandboxed git to read it. The noreply address c
 
 ## Build checks and CI
 
-bash shares the service's memory. The system prompt asks for light local checks: formatters, linters, and builds/tests of touched packages, under `timeout` and `nice`. The unit's `OOMPolicy=continue` keeps an oversized build from stopping dwell; see [systemd setup](deployment.md#systemd-unit) for memory sizing.
+bash shares the service's memory. The system prompt asks for light local checks: formatters, linters, and builds/tests of touched packages, under `timeout` and `nice`. `OOMPolicy=continue` does not prevent the kernel from killing the main Node process; its restart policy then applies. See [systemd setup](deployment.md#systemd-unit) for memory sizing.
 
 Full CI runs on the account's fork using GitHub Actions; the model follows it with `gh run`. Keep Actions enabled on that account. Forks have no secrets, and the fork's `GITHUB_TOKEN` only reaches the fork. Workflows that run only on `pull_request`, require secrets, or need self-hosted runners do not run on the fork; the model reports the checks it could not run.
 

@@ -60,36 +60,44 @@ token 放在 agent 工作区之外，先捕获再擦除环境；传输错误省�
 
 ## 主机目录布局
 
-用专用的非 root 用户运行 dwell。代码、数据、状态分开放：
+使用专用非 root 用户运行 dwell。应用、依赖与私有配置归 root 所有，运行用户不能替换它们；只有数据和状态目录归 `dwell` 所有：
 
 ```
 /opt/dwell/
-  app/     代码（src/、test/、templates/、package.json、node_modules/）
-  data/    DWELL_DATA：dwell.sqlite、work/<会话>/
-  state/   DWELL_STATE：用户、会话、审批 JSON、models.json、telegram/ 游标与私有 proc-logs/
-  .env     凭证与配置，权限 600
+  app/         root:root，dwell 不可写；代码与 node_modules/
+  models.json  root:dwell，权限 640；连接设置，不含密钥值
+  .env         root:root，权限 600；凭证与设置，由 systemd 读取
+  data/        dwell:dwell，权限 700；DWELL_DATA：dwell.sqlite、work/<会话>/
+  state/       dwell:dwell，权限 700；DWELL_STATE：用户/路由/审批、telegram/、proc-logs/
 ```
 
 ```sh
-sudo useradd --system --create-home --shell /usr/sbin/nologin dwell
-sudo mkdir -p /opt/dwell/{app,data,state}
-# 把仓库复制到 /opt/dwell/app，然后：
-cd /opt/dwell/app && sudo -u dwell npm ci --omit=dev
-sudo cp .env.example /opt/dwell/.env && sudo chmod 600 /opt/dwell/.env
-sudo cp templates/models.openai-responses.json /opt/dwell/state/models.json
-sudo chmod 600 /opt/dwell/state/models.json
-sudo chown -R dwell:dwell /opt/dwell
+# 在已经检查、测试的发布版本 checkout 中执行。
+# 先把 Node >= 26 安装到固定且归 root 所有的路径；本例使用 /opt/node/bin。
+/opt/node/bin/node --version
+sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin dwell
+sudo install -d -o root -g root -m 755 /opt/dwell /opt/dwell/app
+sudo install -d -o dwell -g dwell -m 700 /opt/dwell/data /opt/dwell/state
+git archive HEAD | sudo tar -x -C /opt/dwell/app
+sudo env PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin /opt/node/bin/npm ci --prefix /opt/dwell/app --omit=dev
+sudo chown -R root:root /opt/dwell/app
+sudo chmod -R u=rwX,go=rX /opt/dwell/app
+sudo install -o root -g root -m 600 /opt/dwell/app/.env.example /opt/dwell/.env
+sudo install -o root -g dwell -m 640 /opt/dwell/app/templates/models.openai-responses.json /opt/dwell/models.json
+sudo -u dwell /opt/node/bin/node --version
 ```
 
-需要 Node ≥ 26。node 不在系统 `PATH` 里时，按下面的 unit 设置 `PATH`。
+需要 Node ≥ 26，应用没有构建步骤。所有命令和下方 unit 都要使用实际 Node 安装位置的绝对路径，包括 `PATH`；不要使用运维用户家目录中的 Node。`git archive HEAD` 安装选定提交，不包含未提交文件，部署前应验证该版本。安装依赖后统一应用权限，避免运维用户的严格 umask 导致 `dwell` 无法读取模块；这一步只用于不含私有环境文件的 `app/`。以上命令用于首次安装，更新时保留已有数据和状态。
 
-编辑 `/opt/dwell/.env`：设置 `DWELL_MODELS_FILE=/opt/dwell/state/models.json`，填写 `OPENAI_API_KEY`（模板的 `apiKeyEnv`），以及所选 bot 的凭证和白名单。其他[模型模板](configuration.zh-CN.md)复用同一加载器与连接结构。模型文件与凭证放在 agent 工作区之外，JSON 只保存密钥变量名。启动时拒绝位于数据、临时或已有会话目录中的配置，包括可写目录内的软链入口；显式配置缺失或无效也会使启动失败。修改连接前，先完成或取消仍在等待模型响应的请求，再重启。请求 checkpoint 保留原模型引用；如果新配置无法解析旧引用，启动会保留 checkpoint 并拒绝续跑。后续请求的主会话和后台会话设置会统一对齐。未选择模型文件且默认路径下也没有文件时，仍兼容旧环境变量配置。
+用 `sudoedit` 编辑配置。在 `/opt/dwell/.env` 中设置 `DWELL_MODELS_FILE=/opt/dwell/models.json`，填写 `OPENAI_API_KEY`（模板的 `apiKeyEnv`），以及所选 bot 的凭证和白名单。使用 systemd 环境文件语法（`KEY=value`，不加 `export`，不使用 shell 展开），目录与沙箱设置应和 unit 一致。systemd 在以 `dwell` 身份启动服务前读取这个仅 root 可读的文件，`ExecStart` 不让 Node 再读一次。不要在 `app/` 中放第二份 `.env`，也不要把整个 `/opt/dwell` 改为运行用户所有。
+
+其他[模型模板](configuration.zh-CN.md)复用同一加载器与连接结构。模型文件与凭证放在 agent 工作区之外，JSON 只保存密钥变量名。启动时拒绝位于数据、临时或已有会话目录中的配置，包括可写目录内的软链入口；显式配置缺失或无效也会使启动失败。修改连接前，先完成或取消仍在等待模型响应的请求，再重启。请求 checkpoint 保留原模型引用；如果新配置无法解析旧引用，启动会保留 checkpoint 并拒绝续跑。后续请求的主会话和后台会话设置会统一对齐。未选择模型文件且默认路径下也没有文件时，仍兼容旧环境变量配置。
 
 <a id="3-systemd-unit"></a>
 
 ## systemd unit
 
-`/etc/systemd/system/dwell.service`：
+用 `sudoedit` 创建 `/etc/systemd/system/dwell.service`（root 所有，权限 644）：
 
 ```ini
 [Unit]
@@ -98,6 +106,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+Type=simple
 User=dwell
 Group=dwell
 WorkingDirectory=/opt/dwell/app
@@ -106,13 +115,20 @@ Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
 Environment=DWELL_DATA=/opt/dwell/data
 Environment=DWELL_STATE=/opt/dwell/state
 Environment=NODE_ENV=production
+Environment=DWELL_SANDBOX=required
 ExecStart=/opt/node/bin/node src/index.ts
 Restart=always
 RestartSec=5
+TimeoutStopSec=35s
+KillMode=mixed
+UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/dwell
+ReadWritePaths=/opt/dwell/data /opt/dwell/state
+ProtectHome=true
 PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
 MemoryMax=1200M
 OOMPolicy=continue
 
@@ -120,12 +136,23 @@ OOMPolicy=continue
 WantedBy=multi-user.target
 ```
 
-node 路径按实际调整。`Restart=always` 是必需的：存储层失败（`session_failed`）后 dwell 会主动退出，靠它拉起。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里 bash 看到的也是这个 `/tmp`，服务停止时 systemd 会清空它。`MemoryMax` 限制整个 unit 的总内存，内核也可能选择主 Node 进程作为 OOM 目标。`OOMPolicy=continue` 控制进程被杀后 unit 的处理方式，不能指定被杀的进程。主进程若被杀，`Restart=always` 会重新启动 dwell，再按下文的检查点和已持久化预算规则恢复任务。详见 [systemd 内存限制](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html#MemoryMax=bytes)和 [OOM 策略](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#OOMPolicy=)。`MemoryMax` 要按预期让模型跑的最重负载预留：单个 Go `compile` 进程可吃 ~1GB，1200M 的 cgroup 里跑构建可能反复触发 OOM（模型可能重试，但完成情况不可靠）；机器宽裕就调高 `MemoryMax`，或接受重型构建归属 fork 上的 CI。沙箱在 `NoNewPrivileges` 和 `ProtectSystem=strict` 下可以正常工作。服务器通常是 UTC 时区：在 `.env` 里设置 `DWELL_TZ`（如 `Asia/Shanghai`），定时任务的触发时间与模型看到的日期才会按预期时区解释。
+`Restart=always` 在存储失败（`session_failed`）和主进程退出后拉起 dwell；显式执行 `systemctl stop` 后保持停止。`KillMode=mixed` 先只向主进程发送 SIGTERM，让 dwell 有时间保存 checkpoint 并关闭子进程。`TimeoutStopSec=35s` 为应用的 30 秒退出期限留出余量；主进程退出或停止超时后，systemd 强杀剩余进程。详见[进程终止配置](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)。输出和启动错误进入 journal。反复失败触发 systemd 启动频率限制时，先修复日志里的原因，再执行 `systemctl reset-failed dwell` 和 `systemctl start dwell`。详见[服务重启与停止配置](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)。
+
+`ProtectSystem=strict` 将普通宿主文件系统路径设为只读，两个 `ReadWritePaths` 和私有临时目录除外。root 所有权也能保护 systemd 之外维护命令所访问的代码和配置。`PrivateTmp=true` 给服务独立的 `/tmp`，沙箱里的 bash 也使用它，服务停止后清理。保留 bubblewrap 所需的 namespace；额外的 namespace 或 syscall 限制可能使启动探测失败。详见[文件系统与环境配置](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。
+
+`ProtectKernelTunables=yes` 会遮蔽部分 `/proc`，可能导致非特权 bubblewrap 无法挂载自己的 proc 文件系统，因此本例不启用它。保留专用用户、文件系统限制和必需的沙箱探测；增加此选项前应验证它们能否一起工作。
+
+`MemoryMax=1200M` 是整个 unit 物理内存记账上限的示例值，包含 Node 和子进程，要按主机容量与实测负载调整。swap 单独计算：增加 swap 不会提高 `MemoryMax`；支持的系统可用 `MemorySwapMax=` 限制 swap 用量，该设置不会创建 swap。OOM 可能杀死主进程，`OOMPolicy=continue` 不能选择被杀的进程；主进程退出后按重启策略处理。详见[内存与 swap 限制](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html#MemoryMax=bytes)。任务需要使用不同于服务器的时区时，在 `.env` 设置 `DWELL_TZ`（如 `Asia/Shanghai`）。
+
+启动前先按下文安装并检查 bubblewrap。在目标主机验证 unit；`verify` 检查 unit 配置，不能代替沙箱和 bot 流程验证：
 
 ```sh
+sudo systemd-analyze verify /etc/systemd/system/dwell.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now dwell
-journalctl -u dwell -f
+sudo systemctl status dwell --no-pager
+sudo journalctl -u dwell -b -n 100 --no-pager
+sudo journalctl -u dwell -f
 ```
 
 启动时要看的日志：
@@ -142,22 +169,22 @@ journalctl -u dwell -f
 
 ```sh
 sudo apt install bubblewrap
-sudo -u dwell unshare -Ur true && echo "userns ok"
+sudo -u dwell bwrap --ro-bind / / --unshare-user --unshare-pid --proc /proc /usr/bin/true
 ```
 
-`unshare` 检查失败说明发行版限制了非特权 user namespace（Ubuntu 23.10 起 AppArmor 默认如此）。放开它是影响整台主机的安全决定，改之前先读发行版的文档。
+这只是初步检查，最终以服务实际的启动探测为准。Ubuntu 启用 AppArmor user namespace 限制时，通用的 `unshare -Ur true` 可能被拒绝，而专用 bubblewrap profile 仍可允许 `bwrap` 运行。bubblewrap 被拒绝时，先检查内核/AppArmor 拒绝日志，再为实际安装的可执行文件采用发行版支持的 profile。Ubuntu 的 [Understanding AppArmor user namespace restriction](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007) 介绍了适用于该情形的受限 bwrap profile。profile 应匹配发行版的 AppArmor ABI，并审核对其他应用的影响；不要为通过探针而全局关闭 AppArmor 或 user namespace 限制。
 
-服务启动后，用探针从沙箱内部检查，环境变量与 unit 保持一致：
+服务启动后，用和 unit 相同的 Node 路径及不含密钥的目录、panel 设置运行 probe：
 
 ```sh
 cd /opt/dwell/app
-sudo -u dwell env -i PATH=/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/opt/dwell/state \
-  DWELL_PANEL_PORT=<端口> DWELL_PANEL_HOST=<地址> node test/probe-bwrap.ts
+sudo -u dwell env -i PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/opt/dwell/state \
+  DWELL_PANEL_PORT=<端口> DWELL_PANEL_HOST=<地址> /opt/node/bin/node test/probe-bwrap.ts
 ```
 
 每一行都应是 `PASS`：状态目录、应用目录、其他会话目录不可见；工作目录可写；`/usr` 只读；环境里没有密钥；DNS 正常；`/proc/1` 是沙箱的 init；沙箱内访问 panel 时 `/api/approvals` 返回 403、`/healthz` 返回 200。`DWELL_DATA` 和 `DWELL_STATE` 必须显式传入，否则探针回退到 `./data`，会把测试目录建进应用目录。
 
-探针会按自己的环境重写共用的 wrapper `data/bin/sandbox-bash`。配置了 [GitHub 接入](github.zh-CN.md)时，跑完探针要重启服务，wrapper 才会重新透传 `GH_TOKEN`。
+探针在 unit 之外运行，服务自身的启动探测也必须通过。探针会根据自身环境重写共享 wrapper `data/bin/sandbox-bash`；运行后重启服务，按服务设置重新生成 wrapper，包括 [GitHub 接入](github.zh-CN.md)的环境。
 
 `test/probe-scrub.ts` 检查凭证是否已从 `/proc/<pid>/environ` 清除，用法见文件头注释。
 
@@ -166,6 +193,8 @@ sudo -u dwell env -i PATH=/usr/bin:/bin DWELL_DATA=/opt/dwell/data DWELL_STATE=/
 <a id="5-panel-与网络"></a>
 
 ## Panel 与网络
+
+原生服务与 bubblewrap 共用宿主网络 namespace。沙箱限制文件系统和进程可见性，不阻止访问其他 localhost 服务、私网地址或云元数据端点。共享主机在接受不可信 shell 任务前，需要另行审核并配置针对服务身份的出站策略，或使用合适的容器/虚拟机边界。下述 panel 检查只保护 panel。
 
 panel 没有登录。保护它的是网络，加上服务端的两道检查：
 
@@ -195,41 +224,66 @@ iptables -A OUTPUT -m owner --uid-owner dwell -p tcp --dport 7788 -m addrtype --
 
 ## 更新
 
-dwell 没有构建步骤。部署前确认 `npm run check` 和 `npm test` 通过。先停止服务及所有其他工作区写入者，取得配套备份，再复制新源码、启动服务。停服务会中断托管进程，需先安排好这些进程的中断。SIGINT/SIGTERM 关闭期限为 30 秒，服务管理器应至少等待这么久再强杀。
+dwell 没有构建步骤。部署前确认选定版本的 `npm run check` 和 `npm test` 通过。先准备归 root 所有的新应用目录，再停止服务及所有其他工作区写入者，取得配套备份。停服务会中断托管进程，需先安排好这些进程的中断。SIGINT/SIGTERM 关闭期限为 30 秒，`TimeoutStopSec` 至少保留 35 秒。
 
 ```sh
+# 在进入已安装的应用目录前，从验证过的发布版本 checkout 中执行。
 ts=$(date +%Y%m%d-%H%M%S)
+next=/opt/dwell/app-next-$ts
 backup=/opt/dwell/backup-$ts
+sudo install -d -o root -g root -m 755 "$next"
+git archive HEAD | sudo tar -x -C "$next"
+sudo env PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin /opt/node/bin/npm ci --prefix "$next" --omit=dev
+sudo chown -R root:root "$next"
+sudo chmod -R u=rwX,go=rX "$next"
 sudo systemctl stop dwell
 # 确认其他工作区写入者均已停止；--stopped 记录运维对此的确认
 cd /opt/dwell/app
-sudo -u dwell npm run backup -- create --data /opt/dwell/data --state /opt/dwell/state \
-  --code /opt/dwell/app --models /opt/dwell/state/models.json --env /opt/dwell/.env \
+sudo /opt/node/bin/node src/backup.ts create --data /opt/dwell/data --state /opt/dwell/state \
+  --code /opt/dwell/app --models /opt/dwell/models.json --env /opt/dwell/.env \
   --output "$backup" --stopped
-sudo -u dwell npm run backup -- verify --backup "$backup"
-# 把新版本源码与 package 文件（含 templates/）复制到 /opt/dwell/app
-# package-lock.json 有变化时，在 /opt/dwell/app 执行 npm ci --omit=dev
-sudo chown -R dwell:dwell /opt/dwell/app
+sudo /opt/node/bin/node src/backup.ts verify --backup "$backup"
+cd /opt/dwell
+sudo mv app "app-before-$ts"
+sudo mv "$next" app
+# unit 有变化时，先运行 systemd-analyze verify 和 systemctl daemon-reload。
 sudo systemctl start dwell
 curl -s http://<panel 地址>:<端口>/healthz    # 在服务器上：{"ok":true,...,"sandbox":true}
+sudo journalctl -u dwell -b -n 100 --no-pager
 ```
+
+任一准备、备份或验证命令失败都应停止操作。备份以 root 运行，因为 `.env` 仅 root 可读，输出位于 root 所有的 `/opt/dwell` 下；执行者需要读取全部输入，并能写入输出目录的父目录。命令不需要在环境中加载 bot 凭证。更新验收前保留旧应用目录，它不能代替配套备份。模型配置或 `.env` 的改动也属于同一更新和恢复集合。
 
 启动后查看健康状态与运行告警，确认模型连接符合预期，再经各个已配置的 bot 或可信 panel 验证一个任务及已有的待审续跑。`/healthz` 包含 `feishu`、`telegram`，连接为 `failed` 时返回 503。运行任务会从 checkpoint 恢复，并继续受持久化预算约束。旧后台子会话没有访问角色时，恢复前变为只读；需要 shell 或编辑的任务须停止后以 `mode: "write"` 重新启动。已经绑定 run 的预算限额保持冻结，不随环境默认值变化；执行阶段的停机时间可能耗尽期限，run 结束后的审批等待不计。托管进程按中断报告，不自动重跑。
 
 备份 CLI 将数据、状态、运行源码/配置文件和依赖锁文件（不含应用的 `node_modules`）、选定的模型 JSON，以及可选的环境文件复制到一个新私有目录；`data/work/` 下的工作区依赖仍会备份。`backup-manifest.json` 保存 SHA-256 校验和与权限，SQLite 完整性在临时副本中检查。只允许保留 `data/work/` 内部的软链接本身，不跟随目标；外部目标内容需单独备份，恢复时需核对或重映射。`data/work/` 本身被替换成软链，或状态、应用和配置中出现软链，以及任何特殊文件，都会被拒绝。`--stopped` 是运维确认，不会自动停写，也不提供在线快照。输出必须是代码、数据、状态目录之外的新目录。模型配置放在别处时调整 `--models`，外部服务凭证需另行保留。
 
-`data/dwell.sqlite`（连同 `-wal`/`-shm` 文件）保存会话、运行预算、工作记录、工作区写租约与 Telegram 路由/inbox/输入/命令回执。`state/` 保存路由、用户、审批决定/投递记录、Telegram 游标、私有进程日志、模型配置和 `runtime-telemetry.json`。观测快照最多保留 256 个指标序列与 200 个已结束 span，不含 prompt、工具参数/结果或错误正文。整个备份应按线上凭证保护；只备份数据库不能得到配套的 JSON/配置。
+`data/dwell.sqlite`（连同 `-wal`/`-shm` 文件）保存会话、运行预算、工作记录、工作区写租约与 Telegram 路由/inbox/输入/命令回执。`state/` 保存路由、用户、审批决定/投递记录、Telegram 游标、私有进程日志和 `runtime-telemetry.json`；本机目录布局将模型配置放在 `/opt/dwell/models.json`。观测快照最多保留 256 个指标序列与 200 个已结束 span，不含 prompt、工具参数/结果或错误正文。整个备份应按线上凭证保护；只备份数据库不能得到配套的 JSON/配置。
 
 中断前已保存的审批决定会在启动时及退避重试中使用同一投递身份；状态保存失败保留原待审请求与窗口，重放不延长原到期时间。旧待审记录没有预算 ID 时，首次续跑创建预算。旧飞书卡缺少持久化请求 ID 时会被拒绝，需重新请求或由运维处理。这些重启恢复规则不承诺外部副作用恰好执行一次，也不承诺机器断电后的持久性。
 
-演练恢复时，先验证备份，再恢复到新的暂存目录：
+先验证备份，再恢复到新的暂存目录：
 
 ```sh
-sudo -u dwell npm run backup -- verify --backup "$backup"
-sudo -u dwell npm run backup -- restore --backup "$backup" --output /opt/dwell/restore-$ts
+restore=/opt/dwell/restore-$ts
+sudo /opt/node/bin/node /opt/dwell/app/src/backup.ts verify --backup "$backup"
+sudo /opt/node/bin/node /opt/dwell/app/src/backup.ts restore --backup "$backup" --output "$restore"
 ```
 
-恢复会再次检查校验和与 SQLite，不替换或启动生产服务；文件保持仅属主可用的私有权限。在暂存目录的 `app/` 中运行 `npm ci --omit=dev`，检查恢复出的 `.env` 和模型路径，并按恢复布局调整绝对目录引用。检查暂存副本时保持 bot 入口断开。生产回滚需先停全部写入者、保留升级后的产物、核对外部副作用，再由运维替换配套的代码/配置/数据/状态并检查属主，最后启动。CLI 不执行生产替换。
+恢复会再次检查校验和与 SQLite，不替换或启动生产服务。以 root 运行 CLI 后，文件与私有目录归 root 所有，文件的组和其他用户权限会被去除。验证后先准备运行所需的属主与依赖，再安装恢复出的集合：
+
+```sh
+sudo chown -R root:root "$restore/app"
+sudo env PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin /opt/node/bin/npm ci --prefix "$restore/app" --omit=dev
+sudo chmod -R u=rwX,go=rX "$restore/app"
+sudo chown -hR dwell:dwell "$restore/data" "$restore/state"
+sudo chown root:dwell "$restore/models.json"
+sudo chmod 640 "$restore/models.json"
+sudo chown root:root "$restore/.env"
+sudo chmod 600 "$restore/.env"
+```
+
+调整属主和权限是 manifest 验证后的部署准备，会改变 manifest 记录的恢复文件权限。检查 `.env` 和选定模型路径。保留原有会话工作区的绝对路径：持久化会话与 checkpoint 可能含有这些路径，CLI 不会重写；移动数据后只改 `DWELL_DATA` 不够。任务恢复演练应在隔离主机保留原路径，并保持 bot 入口断开；暂存目录本身只代表已验证的文件集合。生产回滚需先停全部写入者、保留升级后的产物、核对外部副作用，再由运维替换配套的代码/配置/数据/状态并检查属主，最后启动。CLI 不执行生产替换。
 
 进程日志位于 `$DWELL_STATE/proc-logs/<conversationId>/<taskId>.log`；agent 通过 `dwell.proc.logs` 读取，不使用工作区路径。按每份日志最多 50 MiB、已结束日志保留 7 天预留磁盘容量；启动和任务结束时清理过期终态日志，活跃日志保留。升级保留旧工作区的 `.dwell-proc/` 文件，不导入，也不重新打开旧 checkpoint 中的日志路径。旧运行进程按中断回报，新工具不能读取旧格式日志。
 
@@ -272,3 +326,5 @@ Compose 服务以非 root 的 `dwell` 用户运行，通过 `init: true` 回收�
 - `off` 或 `auto` 探测失败时，隔离靠容器边界；路径与命令检查本身不能限制 shell 的访问范围
 - `docker-compose.yml` 没有发布端口。要用 panel 需加 `ports:`，并绑定到内网接口（例如 `"10.8.0.1:7788:7788"`）
 - 容器内 bash 和 panel 共用网络命名空间，本机来源检查照样能挡住 bash。宿主机经发布端口过来的请求，源地址应是 Docker 网桥网关（不属于容器自身地址），因此会被接受。这一点未经测试，依赖它之前先验证
+
+已有 Docker 实例迁移到 systemd 时，先停止容器和所有其他写入者，再为宿主挂载的数据/状态目录、应用、模型 JSON 与 `.env` 取得配套备份。原生实例使用同一 bot 身份期间，容器保持停止。Docker 会话通常保存 `/data/work/` 下的绝对工作区路径，宿主需保留 `/data` 实体目录，或使用经过明确配置的 bind mount；原状态路径是 `/state` 时也保留它。unit 的 `DWELL_DATA`、`DWELL_STATE` 与 `ReadWritePaths` 使用这些保留路径，替代首次安装示例中的 `/opt/dwell/data` 和 `/opt/dwell/state`。按上文恢复属主边界，将选定模型 JSON 放到 root 所有的 `/opt/dwell/models.json`，并更新 `.env`。不要用软链接或只改环境变量来移动已有会话工作区；备份 CLI 不迁移持久化路径。

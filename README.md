@@ -45,7 +45,8 @@ explain how to obtain an ID with `/whoami` before creating the permanent user st
 User allowlists seed `state/users.json` only on first start; later changes use the panel or admin commands.
 
 Use separate bot credentials and data/state directories when another instance is already running.
-For a persistent Linux service, follow the [deployment guide](docs/deployment.md).
+For a persistent Linux service, follow the [systemd deployment guide](docs/deployment.md#2-host-layout),
+including service permissions, sandbox checks, updates, and recovery.
 The supplied Docker image lacks bubblewrap and refuses its default production startup until
 isolation is configured; read [Docker deployment](docs/deployment.md#docker) before starting it.
 

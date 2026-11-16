@@ -43,7 +43,8 @@ DWELL_PANEL_HOST=127.0.0.1 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start
 用户白名单仅在首次启动时写入 `state/users.json`，之后通过 panel 或管理员命令修改。
 
 已有实例运行时，使用独立的 bot 凭证和数据、状态目录。
-Linux 常驻服务见[部署指南](docs/deployment.zh-CN.md)。
+Linux 常驻服务见 [systemd 部署指南](docs/deployment.zh-CN.md#2-主机目录布局)，
+包含服务权限、沙箱检查、更新和恢复步骤。
 仓库 Docker 镜像未安装 bubblewrap，默认生产模式会拒绝启动；
 运行前先阅读 [Docker 部署](docs/deployment.zh-CN.md#docker)，配置所需隔离。
 

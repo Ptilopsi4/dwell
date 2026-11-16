@@ -60,7 +60,7 @@ key 需要放在 `/etc` 下，沙箱内 git 才能读取。noreply 地址算作�
 
 ## 构建检查与 CI
 
-bash 与服务共用内存。系统提示要求本地只做轻量检查：formatter、linter、改动包的构建与测试，并使用 `timeout` 和 `nice`。unit 中的 `OOMPolicy=continue` 防止超限构建停掉 dwell，内存配置见 [systemd 设置](deployment.zh-CN.md#systemd-unit)。
+bash 与服务共用内存。系统提示要求本地只做轻量检查：formatter、linter、改动包的构建与测试，并使用 `timeout` 和 `nice`。`OOMPolicy=continue` 不能阻止内核杀掉主 Node 进程；主进程被杀后仍需由重启策略拉起。内存配置见 [systemd 设置](deployment.zh-CN.md#systemd-unit)。
 
 完整 CI 在账号 fork 的 GitHub Actions 上运行，模型通过 `gh run` 跟进。保持该账号的 Actions 开启。fork 没有 secrets，fork 的 `GITHUB_TOKEN` 只作用于 fork。仅在 `pull_request` 触发、需要 secrets 或 self-hosted runner 的 workflow 无法在 fork 运行，模型会报告未运行的检查。
 
