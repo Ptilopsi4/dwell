@@ -127,11 +127,16 @@ test("eval: reports sanitize endpoints and unknown pricing never becomes a zero-
 	assert.equal(estimatedCostUsd({ models: { a: {} } }, true), null);
 });
 
-test("eval: verification guidance versions only the four revised scenarios", () => {
+test("eval: verification guidance versions the revised scenarios and explicit Node check", () => {
 	const revised = ["invoice-workflow-repair", "ledger-reconciliation", "policy-clarification", "release-background-audit"];
 	for (const c of cases) {
-		assert.equal(c.version, revised.includes(c.id) ? 2 : 1, c.id);
-		assert.equal(c.comparabilityNote === undefined, !revised.includes(c.id), c.id);
+		assert.equal(c.version, revised.includes(c.id) ? 2 : c.id === "node-bugfix" ? 2 : 1, c.id);
+		assert.equal(c.comparabilityNote === undefined, !revised.includes(c.id) && c.id !== "node-bugfix", c.id);
+		if (c.id === "node-bugfix") {
+			assert.match(c.comparabilityNote!, /not directly comparable/);
+			const probe = c.script.find((step) => "tool" in step && step.tool === "bash")!;
+			assert.ok("tool" in probe && c.task.includes(probe.args.command as string));
+		}
 		if (!revised.includes(c.id)) continue;
 		assert.match(c.comparabilityNote!, /not directly comparable/);
 		const first = c.script[0]!;
@@ -315,6 +320,45 @@ test("eval: successful exit cannot bypass unfinished hidden Node assertions", as
 		c.script = original;
 		await rm(directory, { recursive: true, force: true });
 	}
+});
+
+test("eval: node bugfix requires a successful executed Node check associated with its proposal", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-node-verification-"));
+	const c = cases.find((item) => item.id === "node-bugfix")!;
+	const original = c.script;
+	try {
+		const options = { mode: "faux" as const, cases: [c.id], trials: 1, out: directory, limits: { deadlineMs: 15_000, requests: 10, tools: 10 } };
+		const good = await run(options);
+		assert.equal(good.passed, true);
+		const observed = JSON.parse(await readFile(join(good.root, `${c.id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
+		const result = observed.observations.find((item) => item.event === "tool_result" && item.name === "bash")!;
+		for (const change of [
+			(run: TrialEvidence) => { run.observations = run.observations.filter((item) => item.event !== "tool_result" || item.name !== "bash"); },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.taskId = 999999; },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.args = { command: "true" }; },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.conversationId = 99; },
+			(run: TrialEvidence) => { run.tasks = []; },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.callId = "unrelated-call"; },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.exitCode = 17; },
+			(run: TrialEvidence) => { delete run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.exitCode; },
+			(run: TrialEvidence) => { run.observations.find((item) => item.event === "tool_result" && item.name === "bash")!.isError = true; },
+			(run: TrialEvidence) => {
+				const check = run.observations.filter((item) => item.name === "bash");
+				run.observations = [...check, ...run.observations.filter((item) => item.name !== "bash")];
+			},
+		]) {
+			const edited = structuredClone(observed); change(edited);
+			assert.ok(gradeBehavior(c.id, edited).some((error) => error.includes("Node")));
+		}
+		assert.ok(result.taskId);
+		for (const command of ["exit 17", "true", "echo node", "echo 'node -e total.ts'", "node -e 'console.log(42)'", "true || node -e 'import {total} from \"./total.ts\"; total([])'"]) {
+			c.script = original.map((step) => "tool" in step && step.tool === "bash" ? { ...step, args: { command, timeout: 10 } } : step);
+			const failed = await run(options);
+			assert.equal(failed.passed, false, command);
+			const graded = JSON.parse(await readFile(join(failed.root, `${c.id}-1`, "result.json"), "utf8")) as { assertions: string[] };
+			assert.ok(graded.assertions.some((error) => error.includes("Node")), command);
+		}
+	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
 test("eval: only questions about the currency receive the planned clarification", async () => {

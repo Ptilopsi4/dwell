@@ -38,7 +38,7 @@ export type TrialEvidence = {
 	usage: unknown;
 	costBudget?: CostEvidence;
 	sandbox: { enabled: boolean; reason?: string; wrapperPath?: string };
-	observations: { event: string; conversationId?: number; taskId?: number; name?: string; args?: unknown; text?: string; isError?: boolean; at: number }[];
+	observations: { event: string; conversationId?: number; taskId?: number; callId?: string; name?: string; args?: unknown; text?: string; isError?: boolean; exitCode?: number; at: number }[];
 };
 export type EvalCase = {
 	id: string;
@@ -69,6 +69,7 @@ const logOutput = { cause: "database_connection_limit", affectedRequests: ["r2",
 const notesOutput = { launchDate: "2027-01-12", owner: "Mina", unresolved: ["budget"] };
 const bgOutput = { totalCents: 4200, items: ["A", "B", "C"], source: "worker" };
 const procOutput = { processed: 3, rejected: ["B"], exitCode: 0 };
+const nodeBugfixCheck = "node --input-type=module -e 'import {total} from \"./total.ts\"; if(total([{cents:125,quantity:3}])!==375||total([])!==0)process.exit(1)'";
 
 export const cases: EvalCase[] = [
 	...scenarios,
@@ -79,10 +80,11 @@ export const cases: EvalCase[] = [
 		script: [read("invoices.csv"), read("payments.csv"), write("result.json", csvOutput), done], expected: csvOutput,
 	},
 	{
-		id: "node-bugfix", version: 1,
-		task: "Fix total.ts so total(lines) sums cents times quantity for every line and returns zero for an empty array. Keep its named export and make no other files. Use bash to check the result with Node after editing.",
+		id: "node-bugfix", version: 2,
+		comparabilityNote: "Version 2 declares the exact Node check and requires an associated successful execution after editing; scores are not directly comparable with version 1.",
+		task: `Fix total.ts so total(lines) sums cents times quantity for every line and returns zero for an empty array. Keep its named export and make no other files. After editing, use bash to run exactly this Node verification command and obtain exit code zero: ${nodeBugfixCheck}`,
 		fixtures: { "total.ts": "export const total = (lines: { cents: number; quantity: number }[]) => lines.reduce((sum, line) => sum + line.cents, 0);\n" },
-		script: [read("total.ts"), { tool: "write", args: { path: "total.ts", content: "export const total = (lines: { cents: number; quantity: number }[]) => lines.reduce((sum, line) => sum + line.cents * line.quantity, 0);\n" } }, { tool: "bash", args: { command: "node --input-type=module -e 'import {total} from \"./total.ts\"; if(total([{cents:125,quantity:3}])!==375||total([])!==0)process.exit(1)'", timeout: 10 } }, done], expected: null,
+		script: [read("total.ts"), { tool: "write", args: { path: "total.ts", content: "export const total = (lines: { cents: number; quantity: number }[]) => lines.reduce((sum, line) => sum + line.cents * line.quantity, 0);\n" } }, { tool: "bash", args: { command: nodeBugfixCheck, timeout: 10 } }, done], expected: null,
 	},
 	{
 		id: "log-diagnosis", version: 1,
@@ -251,7 +253,16 @@ export function gradeBehavior(id: string, evidence: TrialEvidence, variant?: "ap
 	const errors: string[] = gradeVerification(id, evidence);
 	if (evidence.status !== "completed") errors.push(evidence.error ?? "Trial did not complete");
 	const calls = evidence.observations.filter((item) => item.event === "tool");
-	if (id === "node-bugfix" && !calls.some((call) => call.name === "bash")) errors.push("The fix was not checked with Node");
+	if (id === "node-bugfix") {
+		const edited = evidence.observations.findLastIndex((item) => item.event === "tool" && item.conversationId === 1 && ["write", "edit"].includes(item.name ?? ""));
+		const verified = evidence.observations.some((item, index) => {
+			if (index <= edited || edited < 0 || item.event !== "tool_result" || item.name !== "bash" || item.conversationId !== 1 || item.isError !== false || item.exitCode !== 0 || !item.callId || (item.args as { command?: string })?.command !== nodeBugfixCheck) return false;
+			const proposed = evidence.observations.findIndex((call) => call.event === "tool" && call.name === "bash" && call.conversationId === 1 && call.callId === item.callId && isDeepStrictEqual(call.args, item.args));
+			const task = evidence.tasks.find((task) => (task as { id?: number }).id === item.taskId) as { kind?: string; conversationId?: number; input?: { kind?: string; callId?: string }; state?: { status?: string; outcome?: { status?: string } } } | undefined;
+			return proposed > edited && proposed < index && task?.kind === "pi.tool" && task.conversationId === 1 && task.input?.kind === "model" && task.input.callId === item.callId && task.state?.status === "terminal" && task.state.outcome?.status === "completed";
+		});
+		if (!verified) errors.push("The fix has no associated successful execution of the declared Node check after editing");
+	}
 	if (id === "clarification" || id === "policy-clarification") {
 		const c = cases.find((item) => item.id === id)!;
 		const supplied = evidence.observations.findIndex((item) => item.event === "clarification");

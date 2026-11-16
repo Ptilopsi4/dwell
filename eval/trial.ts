@@ -166,7 +166,7 @@ try {
 		const key = `${conversationId}:${call.id}`;
 		if (seenTools.has(key)) return;
 		seenTools.add(key);
-		observe({ event: "tool", conversationId, name: call.name, args: call.arguments, at: Date.now() });
+		observe({ event: "tool", conversationId, callId: call.id, name: call.name, args: call.arguments, at: Date.now() });
 		if (evidence.tools! >= config.limits.tools) { fatal ??= "Trial tool budget exceeded"; limitStop = true; return; }
 		evidence.tools = evidence.tools! + 1;
 	};
@@ -197,7 +197,8 @@ try {
 					if (config.background !== undefined && api.conversationId !== 1 && ["write", "edit", "bash"].includes(call.name)) return { block: "This evaluator worker is read-only; return structured results to the parent." };
 				},
 				afterTool: (call, result, api) => {
-					observe({ event: "tool_result", conversationId: api.conversationId as number, taskId: api.taskId as number, name: call.name, args: call.arguments, isError: result.isError === true, at: Date.now() });
+					const output = result.structuredOutput as { exitCode?: number } | undefined;
+					observe({ event: "tool_result", conversationId: api.conversationId as number, taskId: api.taskId as number, callId: call.id, name: call.name, args: call.arguments, isError: result.isError === true, ...(call.name === "bash" && typeof output?.exitCode === "number" ? { exitCode: output.exitCode } : {}), at: Date.now() });
 				},
 			}),
 		],
