@@ -14,7 +14,8 @@ import { ingestBuffer, sniffImageMime } from "../media.ts";
 import { UploadError, type SaveUpload } from "../uploads.ts";
 import { FileError } from "@earendil-works/pi-durable/env";
 import { readWorkspaceFile } from "../guarded-env.ts";
-import { clampMinutes, conversationScope, fileGuardBases, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
+import { fileGuardBases } from "../ext/approval.ts";
+import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
@@ -29,27 +30,28 @@ interface PanelOptions {
 	users: Users;
 	directory: Directory;
 	feishu: FeishuBridge;
+	telegram?: () => string;
 	port: number;
-	/** 视觉描述器（启动装配；无 ZAI key 时为 null，上传图片降级为落盘+提示） */
+	/** Vision is disabled when its selected connection or credential is unavailable. */
 	describer: () => ImageDescriber | null;
 	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 延迟读取探测结果） */
 	sandbox: () => boolean;
 	saveUpload: SaveUpload;
 }
 
-/** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
+/** Channel actions supplied by the entrypoint; the legacy name remains compatible with existing callers. */
 export interface FeishuBridge {
-	/** panel 操作者 open_id */
+	/** The configured panel operator's platform-qualified user ID. */
 	operator(): string;
-	/** 飞书长连接状态（"off" = panel-only 未连接；其余为 SDK WSConnectionState，"failed" 时 /healthz 返回 503） */
+	/** Feishu connection state; Telegram health is supplied separately. */
 	status(): string;
-	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复；附件先以图片/文件消息可见转发到原 chat */
+	/** Forward text and attachments visibly to the original chat before submitting model input. */
 	relay(conversation: Conversation, text: string, attachments?: { path: string; part: string }[]): Promise<void>;
-	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
+	/** Notify the conversation's original chat, if it has one. */
 	notice(conversationId: number, text: string): Promise<void>;
-	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
+	/** Privately notify the configured operator, anchoring replies to the panel task. */
 	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
-	/** panel 审批决定：窗口记账 + 同步飞书卡 + 唤醒全部被拦会话（本线直接续跑，后台子会话经 Reporter） */
+	/** Record the decision, update its channel message, and resume blocked conversations. */
 	decide(key: string, action: "approve" | "deny", minutes: number, requestId?: string): Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -101,10 +103,10 @@ export function checkPanelRequest(
 	if (!isIpv4(name) && !isIpv6(name) && !allowedHosts.has(name)) throw new HttpError(403, "bad host");
 }
 
-/** /healthz 判定：feishu 连接 "failed" 时 503 ok=false（探活可据此告警），其余（含 off/reconnecting）进程仍算存活。sandbox 只透出状态，不影响 ok。 */
-export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean } } {
-	const ok = feishu !== "failed";
-	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox } };
+/** A failed channel fails health; disabled or reconnecting channels and sandbox state do not. */
+export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean, telegram?: string): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean; telegram?: string } } {
+	const ok = feishu !== "failed" && telegram !== "failed";
+	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox, ...(telegram === undefined ? {} : { telegram }) } };
 }
 
 /** 地址归一：IPv4-mapped IPv6（双栈 socket 上的 IPv4 连接）去 `::ffff:`，链路本地地址去 `%scope`。 */
@@ -210,7 +212,7 @@ type AgentDoc = { model?: { provider: string; modelId: string } };
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, port, describer, sandbox, saveUpload }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, telegram, port, describer, sandbox, saveUpload }: PanelOptions): ReturnType<typeof createServer> {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -218,9 +220,16 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		js: "text/javascript; charset=utf-8",
 	};
 
-	/** 会话显示名：手动重命名优先；飞书会话按 key 结构组合群名/用户名；查不到返回 null，由前端回退。 */
-	async function titleOf(c: { key: string; owner: string; name: string; type: string }): Promise<string | null> {
+	type ConvRow = ReturnType<Sessions["listConversations"]>[number] & { parent?: number; busy?: boolean };
+	/** Telegram has no Feishu directory identity; retain explicit ID fallbacks until renamed. */
+	async function titleOf(c: ConvRow): Promise<string | null> {
 		if (c.name !== c.key || c.type === "panel") return c.name;
+		if (c.platform === "telegram") {
+			const destination = sessions.destinationOf(c.id);
+			if (destination.kind !== "telegram") return c.name;
+			if (c.type === "direct") return `Telegram · 用户 ${c.owner.replace(/^tg:/, "") || destination.chatId}`;
+			return `Telegram 群 ${destination.chatId} · ${c.type === "thread" ? `话题 ${destination.threadId ?? ""}` : `用户 ${c.owner.replace(/^tg:/, "")}`}`;
+		}
 		const [chatId = "", rest] = c.key.split("#");
 		if (c.type === "direct") return (await directory.userName(c.owner)) ?? null;
 		const [chat, user] = await Promise.all([directory.chatName(chatId), c.type === "group" ? directory.userName(c.owner) : Promise.resolve(undefined)]);
@@ -228,7 +237,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		const tail = c.type === "thread" ? `话题 ${String(rest ?? "").slice(2, 10)}` : (user ?? c.owner.slice(0, 10));
 		return `${chat ?? "群聊"} · ${tail}`;
 	}
-const json = (res: ServerResponse, code: number, body: unknown): void => {
+	const json = (res: ServerResponse, code: number, body: unknown): void => {
 		res.writeHead(code, { "content-type": "application/json" });
 		res.end(JSON.stringify(body));
 	};
@@ -264,7 +273,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/healthz") {
-			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()), sandbox());
+			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()), sandbox(), telegram?.());
 			json(res, code, body);
 			return;
 		}
@@ -294,7 +303,6 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/conversations") {
-			type ConvRow = ReturnType<Sessions["listConversations"]>[number] & { parent?: number; busy?: boolean };
 			let list: ConvRow[] = [...sessions.listConversations()];
 			if (list.length === 0) {
 				// 本地/空库兜底：root 会话总可用（带默认模型）
@@ -314,7 +322,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const titled = await within(
 				Promise.all(list.map(async (c) => {
 					const title = await titleOf(c);
-					const chatName = c.chatId !== null ? await directory.chatName(c.chatId) : undefined;
+					const chatName = c.chatId === null ? undefined : c.platform === "telegram" ? `Telegram ${c.type === "direct" ? "私聊" : "群"} ${c.chatId.split(":").pop()}` : await directory.chatName(c.chatId);
 					// 群/话题线的组内短名（侧栏按群分组后不再需要群名前缀）
 					const short = title?.split(" · ").pop();
 					return { ...c, title, chatName: chatName ?? null, shortTitle: c.type === "group" || c.type === "thread" ? (short ?? title ?? c.name) : (title ?? c.name) };
@@ -336,7 +344,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		}
 		if (req.method === "GET" && url.pathname === "/api/users") {
 			const list = users.list();
-			const names = (await within(directory.userNames(list.map((u) => u.id)), 2500)) ?? {};
+			const names = (await within(directory.userNames(list.map((u) => u.id).filter((id) => !id.startsWith("tg:"))), 2500)) ?? {};
 			json(res, 200, list.map((u) => ({ ...u, name: names[u.id] ?? null })));
 			return;
 		}
@@ -396,11 +404,15 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		if (req.method === "POST" && url.pathname === "/api/users") {
 			const body = await readBody(req);
 			const id = String(body?.id ?? "");
-			if (!id.startsWith("ou_")) { json(res, 400, { error: "bad open_id" }); return; }
+			if (!/^ou_\w+$/.test(id) && !/^tg:\d+$/.test(id)) { json(res, 400, { error: "需要飞书 open_id 或 Telegram 用户 ID（tg:数字）" }); return; }
 			const action = String(body?.action ?? "");
 			if (action === "remove") {
 				if (users.isAdmin(id) && users.adminCount() <= 1) throw new HttpError(409, "无法移除最后一名管理员");
-				await users.remove(id);
+				try { await users.remove(id, undefined, true); }
+				catch (error) {
+					if (error instanceof Error && error.message.includes("最后一名管理员")) throw new HttpError(400, error.message);
+					throw error;
+				}
 			} else await users.add(id, body?.role === "admin" ? "admin" : "member");
 			json(res, 200, { ok: true });
 			return;
@@ -597,25 +609,24 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 				if ((await sendPathViolation(a.path, cwd)) !== undefined) { json(res, 403, { error: "只能使用本会话工作目录内的附件" }); return; }
 			}
 		}
-		// 模型输入与飞书 relay 同规则：文本 + 各附件 part 合并
+		// Keep direct panel input consistent with channel relay input.
 		const input = [content.trim(), ...attachments.map((a) => a.part)].filter((s) => s !== "").join("\n\n");
 		sessions.touchActivity(conversation.id);
 		const id = conversation.id as number;
-		// 飞书会话：一律以操作者名义转发到原 chat 并由 bot 流式回复；不提供仅进上下文的隐藏通道
-		if (sessions.chatOf(id) !== undefined) {
+		// Channel conversations always pass through the visible relay before model submission.
+		const destination = sessions.destinationOf(id);
+		if (destination.kind !== "panel") {
 			await feishu.relay(conversation, content, attachments);
-			json(res, 200, { ok: true, via: "feishu" });
+			json(res, 200, { ok: true, via: destination.kind });
 			return;
 		}
-		runSender.set(id, feishu.operator());
-		runVia.set(id, "panel");
-		void persistApprovals();
+		if ((await harness.snapshot(PiLiveDoc, conversation.id, BACKGROUND_CONTEXT))?.run === undefined) await setRunAttribution(id, feishu.operator(), "panel");
 		const submission = await conversation.submit(
 			{ type: "input", content: input, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
-		// 飞书通知开关开启时：run 结束后私发操作者结果摘要（回复通知即续接任务）
+		// Operator notifications retain an anchor for continuing the panel task.
 		if (sessions.notifyEnabled(id)) void notifyPanelResult(conversation, submission, feishu);
 		json(res, 200, { ok: true, via: "panel" });
 	}
@@ -655,6 +666,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 	server.listen(port, host, () => {
 		console.log(`[dwell] panel: http://${host ?? "0.0.0.0"}:${port}/`);
 	});
+	return server;
 }
 
 export type { Conversation };

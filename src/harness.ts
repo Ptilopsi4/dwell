@@ -21,7 +21,7 @@ import { configuredSecretEnv, createModelClient, loadModelsConfig, type Resolved
 export const MODEL_CONFIG = loadModelsConfig();
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
-const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DWELL_MODEL_API_KEY", "DWELL_VISION_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "TELEGRAM_BOT_TOKEN", "DWELL_ALLOW", "DWELL_ADMINS"];
+const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DWELL_MODEL_API_KEY", "DWELL_VISION_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "TELEGRAM_BOT_TOKEN", "DWELL_TELEGRAM_CHATS", "DWELL_ALLOW", "DWELL_ADMINS"];
 
 export async function scrubSecretEnv(): Promise<void> {
 	const values: string[] = [];
@@ -91,7 +91,7 @@ export const MODEL: { readonly provider: string; readonly modelId: string } = { 
 /** 当前 provider 的凭证 env 名（smoke 判断是否走真实链路）。 */
 export const MODEL_KEY_ENV = MODEL_CONFIG.main.apiKeyEnv;
 
-const PREAMBLE = `You are dwell, a general-purpose assistant running on a server. People reach you through Feishu chats and a web panel.
+const PREAMBLE = `You are dwell, a general-purpose assistant running on a server. People reach you through Feishu, Telegram, and a web panel.
 - Reply in the language the user writes in; keep technical terms in their original form
 - Lead with the answer or the content; no pleasantries or preamble
 - Keep each reply short (a few sentences); for long material give the key points and expand when asked

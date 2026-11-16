@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload as upload, isLocalSource, localAddresses, resolveDownload } from "../src/web/server.ts";
+import { once } from "node:events";
+import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload as upload, isLocalSource, localAddresses, resolveDownload, startPanel } from "../src/web/server.ts";
 import { Uploads } from "../src/uploads.ts";
+import { conversationScope } from "../src/ext/approval.ts";
 
 const writer = await Uploads.open(tmpdir(), () => ({ enabled: false }));
 async function ingestUpload(cwd: string | undefined, name: unknown, data: unknown, describer: Parameters<typeof upload>[3]) {
@@ -59,6 +61,95 @@ test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting�
 	assert.deepEqual(healthOf("connected", 42, false), { code: 200, body: { ok: true, uptimeSec: 42, feishu: "connected", sandbox: false } });
 	assert.deepEqual(healthOf("reconnecting", 7, true), { code: 200, body: { ok: true, uptimeSec: 7, feishu: "reconnecting", sandbox: true } });
 	assert.deepEqual(healthOf("off", 0, false), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false } });
+});
+
+test("healthOf exposes optional Telegram health and fails when either configured channel fails", () => {
+	assert.deepEqual(healthOf("off", 42, true, "failed"), { code: 503, body: { ok: false, uptimeSec: 42, feishu: "off", sandbox: true, telegram: "failed" } });
+	assert.equal(healthOf("failed", 0, false, "polling").code, 503);
+	for (const telegram of ["off", "ready", "polling"]) {
+		assert.deepEqual(healthOf("off", 0, false, telegram), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false, telegram } });
+	}
+});
+
+type PanelOptions = Parameters<typeof startPanel>[0];
+type ConvRow = ReturnType<PanelOptions["sessions"]["listConversations"]>[number];
+
+async function testPanel(t: import("node:test").TestContext, options: Partial<PanelOptions>): Promise<string> {
+	const previous = { only: process.env.DWELL_PANEL_ONLY, host: process.env.DWELL_PANEL_HOST };
+	process.env.DWELL_PANEL_ONLY = "1";
+	process.env.DWELL_PANEL_HOST = "127.0.0.1";
+	let server: ReturnType<typeof startPanel>;
+	try {
+		server = startPanel({
+			harness: {} as PanelOptions["harness"], sessions: {} as PanelOptions["sessions"],
+			users: {} as PanelOptions["users"], directory: {} as PanelOptions["directory"],
+			feishu: { operator: () => "tg:7", status: () => "off", relay: async () => {}, notice: async () => {}, notifyPanel: async () => {}, decide: async () => ({ ok: true }) },
+			port: 0, describer: () => null, sandbox: () => false, saveUpload: writer.save, ...options,
+		});
+	} finally {
+		if (previous.only === undefined) delete process.env.DWELL_PANEL_ONLY; else process.env.DWELL_PANEL_ONLY = previous.only;
+		if (previous.host === undefined) delete process.env.DWELL_PANEL_HOST; else process.env.DWELL_PANEL_HOST = previous.host;
+	}
+	t.after(async () => { await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); });
+	await once(server, "listening");
+	const address = server.address();
+	assert.ok(address !== null && typeof address !== "string");
+	return `http://127.0.0.1:${address.port}`;
+}
+
+test("panel Telegram send requires the visible channel relay and preserves its platform result", async (t) => {
+	for (const failRelay of [false, true]) await t.test(failRelay ? "relay failure blocks hidden model input" : "relay succeeds", async (t) => {
+		const calls: string[] = [];
+		const conversation = { id: 71, submit: async () => { assert.fail("channel input must be submitted by its visible relay"); } };
+		const base = await testPanel(t, {
+			harness: { conversation: async () => conversation } as unknown as PanelOptions["harness"],
+			sessions: { destinationOf: () => ({ kind: "telegram", botId: "90", chatId: "-100", threadId: "5" }), touchActivity: () => {} } as unknown as PanelOptions["sessions"],
+			feishu: {
+				operator: () => "tg:7", status: () => "off", notice: async () => {}, notifyPanel: async () => {}, decide: async () => ({ ok: true }),
+				relay: async (target, text, attachments) => {
+					assert.equal(target, conversation);
+					assert.equal(text, "hello from panel");
+					assert.deepEqual(attachments, []);
+					calls.push("relay");
+					if (failRelay) throw new Error("Telegram relay unavailable");
+				},
+			},
+		});
+		const result = await fetch(`${base}/api/send`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ conv: 71, content: "hello from panel" }) });
+		assert.equal(result.status, failRelay ? 500 : 200);
+		assert.deepEqual(await result.json(), failRelay ? { error: "Telegram relay unavailable" } : { ok: true, via: "telegram" });
+		assert.deepEqual(calls, ["relay"]);
+	});
+});
+
+test("panel Telegram rows and users never query the Feishu directory", async (t) => {
+	const parent = 420001, child = 420002;
+	const row = (id: number, key: string, owner: string, type: string, chatId: string, name = key): ConvRow => ({ id, key, owner, name, type, chatId, platform: "telegram", archived: false, lastTs: 0, notify: false, emoji: null });
+	const rows = [row(parent, "tg:90:-100#t:5", "tg:7", "thread", "tg:90:-100"), row(420003, "tg:90:7", "tg:7", "direct", "tg:90:7"), row(420004, "tg:90:-200#s:7", "tg:7", "group", "tg:90:-200", "Team task")];
+	const directoryCalls: string[][] = [];
+	conversationScope.set(child, parent);
+	t.after(() => { conversationScope.delete(child); });
+	const base = await testPanel(t, {
+		harness: { snapshot: async (_doc: unknown, id: number) => id === parent ? { agents: { summarize: { conversationId: child } } } : {} } as unknown as PanelOptions["harness"],
+		sessions: { listConversations: () => rows, destinationOf: (id: number) => ({ kind: "telegram", botId: "90", chatId: id === parent ? "-100" : "7", ...(id === parent ? { threadId: "5" } : {}) }) } as unknown as PanelOptions["sessions"],
+		users: { list: () => [{ id: "tg:7", role: "admin" }, { id: "ou_member", role: "member" }] } as unknown as PanelOptions["users"],
+		directory: {
+			userName: async () => { assert.fail("Telegram user is not a Feishu directory identity"); },
+			chatName: async () => { assert.fail("Telegram chat is not a Feishu directory identity"); },
+			userNames: async (ids: string[]) => { directoryCalls.push(ids); return { ou_member: "Member" }; },
+		} as unknown as PanelOptions["directory"],
+	});
+	const conversations = await fetch(`${base}/api/conversations`).then((r) => r.json());
+	assert.equal(conversations[0].title, "Telegram 群 -100 · 话题 5");
+	assert.equal(conversations[0].chatName, "Telegram 群 -100");
+	assert.equal(conversations[1].title, "Telegram · 用户 7");
+	assert.equal(conversations[2].title, "Team task");
+	assert.equal(conversations[3].platform, "telegram");
+	assert.equal(conversations[3].type, "task");
+	assert.equal(conversations[3].title, "🧵 summarize");
+	const users = await fetch(`${base}/api/users`).then((r) => r.json());
+	assert.deepEqual(users, [{ id: "tg:7", role: "admin", name: null }, { id: "ou_member", role: "member", name: "Member" }]);
+	assert.deepEqual(directoryCalls, [["ou_member"]]);
 });
 
 // ── 本机来源拒绝：bash 与 panel 同机，本机源地址 = agent 自己发的请求 ──

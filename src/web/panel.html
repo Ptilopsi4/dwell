@@ -354,7 +354,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 			<div class="menu" id="menu" hidden>
 				<button id="renameBtn">重命名</button>
 				<button id="archiveBtn">归档</button>
-				<button id="notifyBtn" hidden>飞书通知</button>
+				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
 				<hr>
@@ -598,6 +598,7 @@ const names = new Map();
 let nameQueue = new Set(), nameTimer = 0, nameRetry = 0;
 function senderLabel(id, fallback) {
 	if (!id) return fallback;
+	if (id.startsWith("tg:")) return `Telegram 用户 ${id.slice(3)}`;
 	if (names.has(id)) return names.get(id) ?? fallback;
 	nameQueue.add(id);
 	clearTimeout(nameTimer);
@@ -642,6 +643,11 @@ $("scrim").onclick = () => drawer(false);
 function convTitle(c) {
 	if (c.title) return c.title;
 	if (c.name !== c.key) return c.name;
+	if (c.platform === "telegram") {
+		const chat = c.chatId?.split(":").pop() ?? "";
+		if (c.type === "direct") return `Telegram · 用户 ${c.owner.replace(/^tg:/, "") || chat}`;
+		return `Telegram 群 ${chat} · ${c.type === "thread" ? `话题 ${c.key.split("#t:")[1]?.split("#")[0] ?? ""}` : `用户 ${c.owner.replace(/^tg:/, "")}`}`;
+	}
 	const short = (s) => String(s ?? "").replace(/^o[cu]_/, "").slice(0, 8);
 	if (c.type === "direct") return `私聊 ${short(c.owner)}`;
 	if (c.type === "group") return `群 ${short(c.key)} · ${short(c.owner)}`;
@@ -746,10 +752,10 @@ function markActive() {
 	$("convTitle").textContent = title;
 	document.title = `${title} · dwell`;
 	$("convType").hidden = !c;
-	$("convType").textContent = c ? (TYPE_ZH[c.type] ?? c.type) : "";
+	$("convType").textContent = c ? `${c.platform === "telegram" ? "Telegram · " : ""}${TYPE_ZH[c.type] ?? c.type}` : "";
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 	$("notifyBtn").hidden = c?.type !== "panel";
-	$("notifyBtn").textContent = c?.notify ? "飞书通知：开" : "飞书通知：关";
+	$("notifyBtn").textContent = c?.notify ? "私聊通知：开" : "私聊通知：关";
 	$("stopTaskBtn").hidden = c?.type !== "task";
 	$("archBanner").classList.toggle("on", Boolean(c?.archived));
 	refreshComposer();
@@ -777,18 +783,21 @@ function switchConv(id) {
 	es.onerror = () => setStatus(false);
 	if (matchMedia("(hover: hover)").matches) $("input").focus();
 }
-/* ── 运行状态：panel SSE + 飞书长连接（/healthz）合成一个状态点 ── */
-// sseOn：null = 尚未打开任何会话流（不算断开）；feishu：/healthz 的 WSConnectionState，"off" = panel-only
-let sseOn = null, feishuState = null;
-const FEISHU_LABEL = { connected: "已连接", off: "panel-only", idle: "飞书未启动", connecting: "飞书连接中", reconnecting: "飞书重连中", failed: "飞书断开" };
+/* ── 运行状态：panel SSE 与聊天入口（/healthz）合成一个状态点 ── */
+// A null SSE state means no conversation has been opened yet.
+let sseOn = null, feishuState = null, telegramState = null;
 function setStatus(on) { sseOn = on; paintStatus(); }
 function paintStatus() {
 	const f = feishuState;
-	const level = sseOn === false || f === "failed" || f === "unreachable" ? "off" : f === "idle" || f === "connecting" || f === "reconnecting" ? "warn" : "ok";
-	$("status").textContent = sseOn === false ? "重连中…" : f === "unreachable" ? "服务无响应" : (FEISHU_LABEL[f] ?? (f === null ? "连接中" : f));
+	const channels = [{ name: "飞书", state: f }, { name: "Telegram", state: telegramState }];
+	const failed = channels.find((c) => c.state === "failed");
+	const pending = channels.find((c) => ["idle", "connecting", "reconnecting"].includes(c.state));
+	const level = sseOn === false || failed || f === "unreachable" ? "off" : pending ? "warn" : "ok";
+	const labels = { idle: "未启动", connecting: "连接中", reconnecting: "重连中" };
+	$("status").textContent = sseOn === false ? "重连中…" : f === "unreachable" ? "服务无响应" : failed ? `${failed.name}断开` : pending ? `${pending.name}${labels[pending.state]}` : f === null ? "连接中" : channels.every((c) => c.state === null || c.state === "off") ? "panel-only" : "已连接";
 	$("statusDot").classList.toggle("off", level === "off");
 	$("statusDot").classList.toggle("warn", level === "warn");
-	$("status").parentElement.title = `panel 实时通道：${sseOn === false ? "重连中" : sseOn ? "正常" : "未打开会话"}\n飞书长连接：${f ?? "未知"}`;
+	$("status").parentElement.title = `panel 实时通道：${sseOn === false ? "重连中" : sseOn ? "正常" : "未打开会话"}\n飞书长连接：${f ?? "未知"}${telegramState === null ? "" : `\nTelegram：${telegramState}`}`;
 }
 
 /* ── transcript ── */
@@ -879,7 +888,7 @@ function appendEntry(entry) {
 		if (entry.data?.via === "panel") {
 			const tag = document.createElement("span");
 			tag.className = "tag";
-			tag.textContent = entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
+			tag.textContent = entry.kind === "chat.message" ? `经 panel 发到${currentConv()?.platform === "telegram" ? " Telegram" : "飞书"}` : "panel";
 			el.querySelector(".hd time").before(tag);
 		} else if (entry.data?.via === "schedule" || entry.data?.via === "background" || entry.data?.via === "proc") {
 			// 自治输入（定时/后台/进程）以创建者身份进 transcript（run 归属），展示层标注来源以免误读为用户亲手发送
@@ -950,8 +959,8 @@ function appendEntry(entry) {
 		if (row.open) fillToolBody(row);
 	}
 }
-/** 产物下载：dwell.lark.send / write 成功后工具行加下载链接（服务端限本会话工作目录，强制 attachment）。 */
-const DOWNLOAD_TOOLS = new Set(["dwell.lark.send", "write"]);
+/** Offer artifacts from send/write tools; the server restricts downloads to this workspace. */
+const DOWNLOAD_TOOLS = new Set(["dwell.send", "dwell.lark.send", "write"]);
 function addDownload(row) {
 	const path = row._call?.arguments?.path;
 	if (!DOWNLOAD_TOOLS.has(row._call?.name) || typeof path !== "string" || path === "" || convId === null || row.querySelector("a.dl")) return;
@@ -1209,12 +1218,13 @@ composer.addEventListener("drop", (e) => {
 const currentConv = () => convs.find((c) => String(c.id) === String(convId));
 function refreshComposer() {
 	const c = currentConv();
-	const feishu = Boolean(c?.chatId);
+	const chat = Boolean(c?.chatId);
+	const platform = c?.platform === "telegram" ? "Telegram" : "飞书";
 	const where = c?.type === "direct" ? "对方" : "群成员";
-	$("input").placeholder = !feishu ? "输入消息" : `发到飞书：${where}会看到「From admin: …」，bot 在飞书回复`;
+	$("input").placeholder = !chat ? "输入消息" : `发到${platform}：${where}会看到「From admin: …」，bot 在${platform}回复`;
 	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
 	$("hint").classList.toggle("busy", running);
-	$("hint").innerHTML = !running ? keys : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
+	$("hint").innerHTML = !running ? keys : chat ? `<span>运行中：消息会发到${platform}并插入当前任务</span>` : "<span>运行中：发送的消息会插入当前任务</span>";
 }
 const autosize = () => { const el = $("input"); el.style.height = ""; el.style.height = Math.min(el.scrollHeight, 220) + "px"; };
 $("send").onclick = send;
@@ -1251,7 +1261,7 @@ $("notifyBtn").onclick = async () => {
 	try {
 		const r = await api("notify", { id: Number(convId), on: !c.notify });
 		c.notify = r.on;
-		toast(r.on ? "任务结束后飞书私发通知你，回复通知即可继续这个任务" : "已关闭飞书通知");
+		toast(r.on ? "任务结束后私聊通知你，回复通知即可继续这个任务" : "已关闭私聊通知");
 	} catch (e) { toast(e.message, true); }
 	markActive();
 };
@@ -1352,7 +1362,7 @@ async function openUsers() {
 	$("sheetTitle").textContent = "用户管理";
 	$("sheetBody").innerHTML = `
 		<div style="display:flex;gap:.4rem;margin-bottom:.6rem">
-			<input class="input" type="text" id="uId" placeholder="open_id（ou_ 开头）" style="flex:1">
+			<input class="input" type="text" id="uId" placeholder="飞书 ou_… 或 Telegram tg:数字" style="flex:1">
 			<button class="btn" data-variant="outline" data-size="sm" id="uAdd" type="button">添加成员</button>
 			<button class="btn" data-variant="outline" data-size="sm" id="uAddAdmin" type="button">添加管理员</button>
 		</div>
@@ -1366,7 +1376,7 @@ async function openUsers() {
 		row.innerHTML = `<span class="av"></span><div class="who"><div></div><small></small></div>
 			<span class="role${u.role === "admin" ? " admin" : ""}">${u.role === "admin" ? "管理员" : "成员"}</span>
 			<button class="btn" data-variant="ghost" data-size="icon-xs" title="移除" type="button">${ic("x", "sm")}</button>`;
-		row.querySelector(".who div").textContent = u.name ?? "（未获取到姓名）";
+		row.querySelector(".who div").textContent = u.name ?? (u.id.startsWith("tg:") ? `Telegram 用户 ${u.id.slice(3)}` : "（未获取到姓名）");
 		row.querySelector(".av").textContent = u.name ? initial(u.name) : "?";
 		row.querySelector(".who small").textContent = u.id;
 		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, async () => {
@@ -1377,7 +1387,7 @@ async function openUsers() {
 	if (!$("sheet").open) $("sheet").showModal();
 	const add = async (role) => {
 		const id = $("uId").value.trim();
-		if (!/^ou_\w+$/.test(id)) { toast("需要 ou_ 开头的 open_id", true); return; }
+		if (!/^ou_\w+$/.test(id) && !/^tg:\d+$/.test(id)) { toast("需要飞书 open_id 或 Telegram 用户 ID（tg:数字）", true); return; }
 		try { await api("users", { id, role }); openUsers(); } catch (e) { toast(e.message, true); }
 	};
 	$("uAdd").onclick = () => add("member");
@@ -1397,9 +1407,10 @@ function paintAlerts() {
 	$("alertsBtn").title = unread > 0 ? `运行告警（${unread} 条未读）` : "运行告警";
 }
 async function loadHealth() {
-	// /healthz 在飞书 failed 时是 503 但仍带 JSON；请求本身失败才算服务无响应
+	// A failed channel returns 503 with JSON; only a failed request means the server is unreachable.
 	const health = await fetch("/healthz").then((r) => r.json()).catch(() => null);
 	feishuState = health?.feishu ?? "unreachable";
+	telegramState = health?.telegram ?? null;
 	paintStatus();
 	const list = await api("reports").catch(() => null);
 	if (list !== null) { reports = list; paintAlerts(); }
