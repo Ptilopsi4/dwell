@@ -259,6 +259,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	const limits = runBudgetLimits();
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
 	let harness: Harness | undefined;
+	let env: (options: { cwd?: string; readScope?: string }) => ReturnType<typeof GuardedExecutionEnv.create>;
 	const budgets = makeBudgetController({
 		limits,
 		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
@@ -275,40 +276,47 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		[...approvalDecisions.values()].some((decision) => decision.deliveryTargets.some((target) => target.conversationId === conversationId && target.status === "pending")),
 	);
 
-	const registry = createRegistry();
-	registry.install(CodingTools);
-	registry.install(DwellExtension);
-	registry.install(budgets.extension);
-	registry.install(makeWorkspaceExtension(() => harness));
-	registry.install(makeApprovalExtension(() => harness));
-	registry.install(work.extension);
-	for (const extension of extraExtensions) registry.install(extension);
-	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
-	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
-	if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
-
-	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
-	// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
-	const env = async ({ cwd, readScope }: { cwd?: string; readScope?: string }) => {
-		if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
-		return GuardedExecutionEnv.create({
-			cwd: resolve(cwd ?? DEFAULT_CWD),
-			shellEnv: { ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
-			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
-			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
-		}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
-			data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
-	};
 	const telemetry = new RuntimeTelemetry();
-	await telemetry.start();
 	try {
+		const registry = createRegistry();
+		registry.install(CodingTools);
+		registry.install(DwellExtension);
+		registry.install(budgets.extension);
+		registry.install(makeWorkspaceExtension(() => harness));
+		registry.install(makeApprovalExtension(() => harness));
+		registry.install(work.extension);
+		for (const extension of extraExtensions) registry.install(extension);
+		// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
+		const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
+		if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
+
+		// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
+		// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
+		env = async ({ cwd, readScope }) => {
+			if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
+			return GuardedExecutionEnv.create({
+				cwd: resolve(cwd ?? DEFAULT_CWD),
+				shellEnv: { ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
+				// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
+				...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
+			}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
+				data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
+		};
+		await telemetry.start();
 		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } } }, context);
-	} catch (error) { await telemetry.close().catch(() => {}); throw error; }
-	telemetryByHarness.set(harness, telemetry);
-	harness.subscribeClose(() => { void telemetry.flush().catch(() => {}); });
-	harness.subscribeClose(() => { void work.close(); });
-	budgetsByHarness.set(harness, budgets);
-	try {
+		telemetryByHarness.set(harness, telemetry);
+		// SDK close listeners run synchronously at shutdown admission and do not await cleanup.
+		harness.subscribeClose(() => telemetry.stop());
+		const telemetryClosed = harness.closed.then(() => telemetry.close());
+		void telemetryClosed.catch(() => {});
+		const closeHarness = harness.close.bind(harness);
+		harness.close = async (closeContext) => {
+			const results = await Promise.allSettled([closeHarness(closeContext), telemetryClosed]);
+			const failure = results.find((result) => result.status === "rejected");
+			if (failure?.status === "rejected") throw failure.reason;
+		};
+		harness.subscribeClose(() => { void work.close(); });
+		budgetsByHarness.set(harness, budgets);
 		await checkResumableModels(harness, models);
 		if (MODEL_CONFIG.path !== undefined) {
 			const roots = await harness.commit(async (tx) => {
@@ -329,14 +337,14 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		await budgets.attach(harness);
 		await work.attach(harness);
 		await registerLegacyWorkspaces(harness);
+		// The caller captures credentials and scrubs the environment before resuming tasks.
+		return harness;
 	} catch (error) {
-		await budgets.close();
-		await work.close();
-		await harness.close(context);
+		await Promise.allSettled([budgets.close(), work.close()]);
+		await (harness === undefined ? storage.close(context) : harness.close(context)).catch(() => {});
+		await telemetry.close().catch(() => {});
 		throw error;
 	}
-	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥
-	return harness;
 }
 
 /** taskGraph 中有活跃前台任务的会话集合。节点状态在 state.status（不是 status——两个已上线修复曾因读错字段静默失效），用官方类型防再错。

@@ -39,6 +39,7 @@ export class RuntimeTelemetry {
 	#closing?: Promise<void>;
 	#closed = false;
 	#started = false;
+	#stopped = false;
 	constructor(file = stateFile("runtime-telemetry.json")) {
 		this.#file = file;
 		const instrument = (name: string, kind: Metric["kind"]) => (value: number, attributes?: SpanAttributes): void => {
@@ -97,7 +98,7 @@ export class RuntimeTelemetry {
 		this.context = makeContext();
 	}
 	async start(): Promise<void> {
-		if (this.#started || this.#closed) return;
+		if (this.#started || this.#closed || this.#stopped) return;
 		this.#started = true;
 		try {
 			if ((await stat(this.#file)).size > 4 * 1024 * 1024) throw new Error("snapshot too large");
@@ -124,9 +125,12 @@ export class RuntimeTelemetry {
 					...(typeof row.parentId === "string" && uuid.test(row.parentId) ? { parentId: row.parentId } : {}) });
 			}
 		} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] 运行观测快照无法恢复，开始新记录"); }
-		this.#timer = setInterval(() => { void this.flush().catch(() => {}); }, 30_000);
-		this.#timer.unref();
+		if (!this.#stopped) {
+			this.#timer = setInterval(() => { void this.flush().catch(() => {}); }, 30_000);
+			this.#timer.unref();
+		}
 	}
+	stop(): void { this.#stopped = true; clearInterval(this.#timer); this.#timer = undefined; }
 	snapshot(): RuntimeTelemetrySnapshot { return structuredClone({ version: 1, updatedAt: Date.now(), startedAt: this.#startedAt, metrics: [...this.#metrics.values()], traces: this.#traces }); }
 	flush(): Promise<void> {
 		if (this.#flush) return this.#flush;
@@ -141,6 +145,7 @@ export class RuntimeTelemetry {
 		return this.#flush;
 	}
 	close(): Promise<void> {
-		return this.#closing ??= (async () => { clearInterval(this.#timer); await this.#flush?.catch(() => {}); try { await this.flush(); } finally { this.#closed = true; } })();
+		this.stop();
+		return this.#closing ??= (async () => { await this.#flush?.catch(() => {}); try { if (this.#started) await this.flush(); } finally { this.#closed = true; } })();
 	}
 }

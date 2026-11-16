@@ -114,6 +114,16 @@ test("concurrent flushes and repeated close preserve the last admitted snapshot"
 	assert.equal(JSON.parse(await readFile(file, "utf8")).metrics[0].sum, 3);
 });
 
+test("closing an unstarted collector preserves the prior runtime snapshot", async (t) => {
+	const { telemetry, file } = await fixture(t);
+	telemetry.context.metrics!.counter("pi.durable.reports").add(4, { type: "task_error" });
+	await telemetry.close();
+	const before = await readFile(file, "utf8");
+	const unstarted = new RuntimeTelemetry(file);
+	await unstarted.close();
+	assert.equal(await readFile(file, "utf8"), before);
+});
+
 test("restore rejects malformed statistics and unsupported schema names", async (t) => {
 	const { telemetry, file } = await fixture(t);
 	telemetry.context.metrics!.counter("pi.durable.reports").add(1, { type: "task_error" });
