@@ -2,11 +2,14 @@
 // 窗口键 = (conversationId, sender)：谁触发谁申请，互不搭车。
 // 注意：正则与路径检查是减速带，硬边界是凭证擦除（harness.scrubSecretEnv）+ 部署隔离（容器/systemd）。
 import { readFile, readlink, realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 import type { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, stateFile, writeStateJson } from "../state.ts";
+import { filePathViolation, type PathBases } from "../file-policy.ts";
+export type { PathBases } from "../file-policy.ts";
 
 /** conversationId → 当前 run 的发起者（submit 前设置，run 归属判定用）。 */
 export const runSender = new Map<number, string>();
@@ -116,9 +119,17 @@ export function rmRecursiveMatch(command: string): string | null {
 
 /** 状态文件与凭证面兜底：路径已移出 agent 可写域，此检查防 cwd 相对猜测与 /proc 回读（减速带非硬墙）。 */
 const STATE_FILES = /users\.json|sessions\.json|message-map\.json|approvals\.json|(?:^|[\s"'=/\\])\.env\b|(?<![\w-])state[\\/]|\/proc\/[^\s/]*\/environ/;
+let modelConfigPaths: string[] = [];
+
+/** Protect only the selected connection file; project files may also be named models.json. */
+export function setModelConfigGuard(path: string | undefined): void {
+	modelConfigPaths = path === undefined ? [] : [...new Set([resolve(path), realpathSync(path)])];
+}
 
 export function stateFileBlocked(command: string): boolean {
-	return STATE_FILES.test(command);
+	return STATE_FILES.test(command) || (modelConfigPaths.length > 0 && (
+		modelConfigPaths.some((path) => command.includes(path)) || /\$(?:DWELL_MODELS_FILE\b|\{DWELL_MODELS_FILE(?:\}|[:?+\-]))/.test(command)
+	));
 }
 
 /** 返回命中的敏感片段（如 "rm -rf"），未命中返回 null。 */
@@ -180,26 +191,15 @@ const STATE_PATH = resolve(STATE_DIR);
 const DATA_PATH = resolve(DATA_DIR);
 const SQLITE_FILE = join(DATA_PATH, "dwell.sqlite");
 
-// 应用根子树拒读，但 data/（会话工作目录与上传物所在）除外——data 常就部署在应用根下
-const READ_FORBIDDEN = (path: string, bases: PathBases): boolean =>
-	path === bases.state || path.startsWith(bases.state + sep)
-	|| path.startsWith(bases.sqlite) // 含 -wal/-shm
-	|| ((path === bases.appRoot || path.startsWith(bases.appRoot + sep)) && !(path === bases.data || path.startsWith(bases.data + sep)));
-
-/** 路径判定基准（均为绝对路径）。目标与基准必须同形态（同为字面 resolve 或同为 realpath）才可比。 */
-export type PathBases = { cwd: string; tmp: string; state: string; appRoot: string; data: string; sqlite: string };
-
 /** 字面基准（不做软链解析）：fileToolViolation 用。 */
-const literalBases = (cwd: string): PathBases => ({ cwd: resolve(cwd), tmp: tmpdir(), state: STATE_PATH, appRoot: APP_ROOT, data: DATA_PATH, sqlite: SQLITE_FILE });
+const literalBases = (cwd: string): PathBases => ({ cwd: resolve(cwd), tmp: tmpdir(), state: STATE_PATH, appRoot: APP_ROOT, data: DATA_PATH, sqlite: SQLITE_FILE, modelConfig: modelConfigPaths[0] });
+
+export const fileGuardBases = literalBases;
 
 /** 判定核心：`abs` 与 `bases` 同形态。`rawPath` 用于 /proc 的原始路径检查（Windows 下 resolve 会把 POSIX 绝对路径变成盘符路径）。 */
 function violationOf(tool: string, rawPath: string, abs: string, bases: PathBases): string | undefined {
-	if (tool === "read") {
-		if (rawPath.startsWith("/proc/") || abs.startsWith("/proc/") || READ_FORBIDDEN(abs, bases)) return `Reading ${abs} is not allowed (state files, the application directory, the database, and /proc are outside the readable area).`;
-		return undefined;
-	}
-	if (abs === bases.cwd || abs.startsWith(bases.cwd + sep) || abs.startsWith(bases.tmp + sep)) return undefined;
-	return `Writes are limited to this session's working directory and the system temp directory (denied: ${abs}).`;
+	if (rawPath === "/proc" || rawPath.startsWith("/proc/")) return "Access to /proc is not allowed.";
+	return filePathViolation(tool, abs, bases);
 }
 
 /**
@@ -238,7 +238,8 @@ export async function fileToolViolationReal(tool: string, path: string, cwd: str
 	const [rcwd, rtmp, rstate, rappRoot, rdata, rsqlite] = await Promise.all(
 		[resolve(cwd), tmpdir(), STATE_PATH, APP_ROOT, DATA_PATH, SQLITE_FILE].map((p) => resolveReal(p)),
 	);
-	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite });
+	const modelConfig = modelConfigPaths[0] === undefined ? undefined : await resolveReal(modelConfigPaths[0]);
+	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite, modelConfig });
 }
 
 /** dwell.lark.send 的来源判定：目标与 cwd 都 realpath 后判包含，不放行系统临时目录（外发比写盘更严）。 */

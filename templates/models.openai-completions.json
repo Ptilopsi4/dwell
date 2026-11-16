@@ -1,0 +1,22 @@
+{
+  "main": {
+    "api": "openai-completions",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "replace-with-your-model-id",
+    "apiKeyEnv": "LOCAL_MODEL_API_KEY",
+    "reasoning": false,
+    "input": [
+      "text"
+    ],
+    "contextWindow": 32768,
+    "maxTokens": 4096,
+    "cost": null,
+    "compat": {
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "supportsReasoningEffort": false,
+      "maxTokensField": "max_tokens"
+    }
+  },
+  "vision": null
+}

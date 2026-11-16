@@ -7,10 +7,10 @@
     "node": ">=26"
   },
   "scripts": {
-    "smoke": "node src/smoke.ts",
+    "smoke": "node --env-file-if-exists=.env src/smoke.ts",
     "check": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\"",
-    "start": "node src/index.ts"
+    "start": "node --env-file-if-exists=.env src/index.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
