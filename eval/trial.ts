@@ -55,8 +55,8 @@ function scriptedFactory(): FauxResponseFactory {
 			const result = ctx.messages.filter((item) => item.role === "toolResult" && item.toolName === "dwell.work").at(-1);
 			const state = JSON.parse(textOf(result?.content));
 			if (state.verification?.status !== "verified" || !state.verification.receipt?.checks?.length) throw new Error("No successful host verification receipt is available for review");
-			const evidence = Object.entries(state.availableEvidence ?? {}).filter(([, value]) => (value as { toolName?: string }).toolName === "bash").map(([id]) => Number(id));
-			return toolMessage("dwell.work", { action: "ready", blockers: [], progress: "The declared artifacts and checks are complete.", evidence, review: "The declared Node checks passed against the recorded artifact versions; request operator review." });
+			if (state.nextCall?.name !== "dwell.work" || state.nextCall.arguments?.action !== "ready") throw new Error("Successful verification did not provide a ready call");
+			return toolMessage(state.nextCall.name, state.nextCall.arguments);
 		}
 		throw new Error("Unsupported faux response step");
 	};
@@ -282,7 +282,6 @@ try {
 		}
 		await root.waitForIdle(context);
 	}
-	observe({ event: "work_final", text: JSON.stringify(await getWork(harness, root.id)), at: Date.now() });
 	if (fatal !== undefined) throw new Error(fatal);
 	evidence.status = "completed";
 } catch (error) {
@@ -301,6 +300,10 @@ try {
 				const conversation = await harness.conversation(item.id, context);
 				if (conversation !== undefined) evidence.transcripts.push({ conversationId: item.id as number, entries: [...(await conversation.entries({ order: "ascending" }, 1000, undefined, context)).items] });
 			}
+		} catch (error) { evidence.status = "error"; evidence.error ??= String(error); }
+		try {
+			const root = await harness.root(context);
+			observe({ event: "work_final", text: JSON.stringify(await getWork(harness, root.id)), at: Date.now() });
 		} catch (error) { evidence.status = "error"; evidence.error ??= String(error); }
 		try { await harness.close(context); } catch (error) { evidence.status = "error"; evidence.error ??= String(error); }
 	}

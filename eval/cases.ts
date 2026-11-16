@@ -210,9 +210,12 @@ function gradeVerification(id: string, evidence: TrialEvidence): string[] {
 			return errors;
 		}
 		if (!isDeepStrictEqual(receipt.checks.map(({ name, command }) => ({ name, command })), contract?.checks)) errors.push("The host receipt does not cover every declared verification check");
+		if ((receipt.revision ?? 0) !== (verification.revision ?? 0)) errors.push("The host receipt belongs to an older verification revision");
 		const verificationResult = evidence.observations.findIndex((item) => item.event === "tool_result" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "verify" && item.taskId === receipt.taskId && item.isError === false);
 		const ready = evidence.observations.findIndex((item) => item.event === "tool_result" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready" && item.isError === false);
 		if (verificationResult < 0 || ready <= verificationResult) errors.push("Review was not requested after the successful host verification");
+		const readyTask = evidence.tasks.find((item) => (item as { id?: number }).id === evidence.observations[ready]?.taskId) as { kind?: string; conversationId?: number; input?: { kind?: string }; state?: { status?: string; outcome?: { status?: string; result?: { control?: { terminate?: boolean } } } } } | undefined;
+		if (readyTask?.kind !== "pi.tool" || readyTask.conversationId !== 1 || readyTask.input?.kind !== "model" || readyTask.state?.status !== "terminal" || readyTask.state.outcome?.status !== "completed" || readyTask.state.outcome.result?.control?.terminate !== true) errors.push("Successful review did not terminate its model-issued run through the host");
 		for (const check of receipt.checks) {
 			const task = evidence.tasks.find((item) => (item as { id?: number }).id === check.taskId) as { kind?: string; conversationId?: number; input?: { kind?: string; parent?: number; call?: { name?: string; arguments?: { command?: string } } }; state?: { status?: string; outcome?: { status?: string } } } | undefined;
 			const result = evidence.observations.findIndex((item) => item.event === "tool_result" && item.taskId === check.taskId && item.conversationId === 1 && item.name === "bash" && (item.args as { command?: string })?.command === check.command && item.isError === false);

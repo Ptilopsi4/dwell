@@ -130,7 +130,7 @@ test("eval: reports sanitize endpoints and unknown pricing never becomes a zero-
 test("eval: verification guidance versions the revised scenarios and explicit Node check", () => {
 	const revised = ["invoice-workflow-repair", "ledger-reconciliation", "policy-clarification", "release-background-audit"];
 	for (const c of cases) {
-		assert.equal(c.version, revised.includes(c.id) ? 2 : c.id === "node-bugfix" ? 2 : 1, c.id);
+		assert.equal(c.version, revised.includes(c.id) ? 3 : c.id === "node-bugfix" ? 2 : 1, c.id);
 		assert.equal(c.comparabilityNote === undefined, !revised.includes(c.id) && c.id !== "node-bugfix", c.id);
 		if (c.id === "node-bugfix") {
 			assert.match(c.comparabilityNote!, /not directly comparable/);
@@ -213,8 +213,8 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 			const observed = JSON.parse(await readFile(join(result.root, `${id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
 			const manifest = JSON.parse(await readFile(join(result.root, `${id}-1`, "manifest.json"), "utf8"));
 			const outcome = JSON.parse(await readFile(join(result.root, `${id}-1`, "result.json"), "utf8"));
-			assert.equal(manifest.caseVersion, 2);
-			assert.equal(outcome.caseVersion, 2);
+			assert.equal(manifest.caseVersion, 3);
+			assert.equal(outcome.caseVersion, 3);
 			assert.equal(manifest.comparabilityNote, c.comparabilityNote);
 			assert.equal(outcome.comparabilityNote, c.comparabilityNote);
 			assert.deepEqual(gradeFiles(id, files), []);
@@ -235,6 +235,11 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 			const fixture = Object.keys(c.fixtures).find((name) => !c.mutable?.includes(name))!;
 			assert.ok(gradeFiles(id, { ...files, [fixture]: "tampered" }).length > 0);
 			if (id === "policy-clarification") {
+					const clarified = observed.observations.findIndex((item) => item.event === "clarification");
+					const resolved = observed.observations.findIndex((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string; blockers?: string[] })?.action === "checkpoint" && (item.args as { blockers?: string[] }).blockers?.length === 0);
+					const readyCall = observed.observations.find((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready");
+					assert.ok(resolved > clarified, "the scripted actor explicitly resolves the clarification before review");
+					assert.deepEqual(Object.keys(readyCall!.args as object).sort(), ["action", "review"], "readyWork preserves the host recipe without silently clearing blockers");
 				const final = observed.observations.find((item) => item.event === "work_final")!;
 				const saved = JSON.parse(final.text!);
 				assert.equal(saved.records[saved.current].creator, "eval-user");
@@ -263,6 +268,26 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 		assert.equal(summary.caseSummary["policy-clarification"].assisted, 1);
 		assert.equal(summary.budget.actualBill, null);
 	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("eval: faux review cannot silently clear an unresolved clarification blocker", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-blocker-"));
+	const c = cases.find((item) => item.id === "policy-clarification")!;
+	const original = c.script;
+	try {
+		c.script = original.filter((step) => !("tool" in step && step.tool === "dwell.work" && step.args.action === "checkpoint" && Array.isArray(step.args.blockers) && step.args.blockers.length === 0));
+		const result = await run({ mode: "faux", cases: [c.id], trials: 1, out: directory, limits: { deadlineMs: 20_000, requests: 32, tools: 64 } });
+		assert.equal(result.passed, false);
+		const observed = JSON.parse(await readFile(join(result.root, `${c.id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
+		const before = JSON.parse(observed.observations.find((item) => item.event === "work_before_restart")!.text!);
+		const final = JSON.parse(observed.observations.find((item) => item.event === "work_final")!.text!);
+		const record = final.records[final.current];
+		assert.equal(record.verification.status, "verified");
+		assert.equal(record.status, "active");
+		assert.deepEqual(record.blockers, before.records[before.current].blockers);
+		assert.ok(record.blockers.length > 0);
+		assert.ok(!observed.observations.some((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready"));
+	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
 test("eval: invoice repair requires the failing acceptance result before an edit", () => {
@@ -297,6 +322,57 @@ test("eval: request exhaustion aborts before a second provider call and preserve
 		assert.match(record.error ?? "", /request budget exceeded/);
 		assert.ok(record.transcripts.length > 0);
 	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("eval: aborted work retains its declared contract without replacing the original failure", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-aborted-work-"));
+	try {
+		const result = await run({ mode: "faux", cases: ["invoice-workflow-repair"], trials: 1, out: directory, limits: { deadlineMs: 15_000, requests: 2, tools: 10 } });
+		assert.equal(result.passed, false);
+		const trial = join(result.root, "invoice-workflow-repair-1");
+		const record = JSON.parse(await readFile(join(trial, "evidence.json"), "utf8")) as TrialEvidence;
+		assert.equal(record.requests, 2);
+		assert.match(record.error ?? "", /request budget exceeded/);
+		const observations = record.observations.filter((item) => item.event === "work_final");
+		assert.equal(observations.length, 1);
+		const doc = JSON.parse(observations[0]!.text!);
+		const work = doc.records[doc.current];
+		assert.equal(work.status, "active");
+		assert.ok(work.verification.contract.checks.length > 0);
+		assert.deepEqual(work.verification.contract.allowedChanges, ["money.ts", "invoice.ts"]);
+		const graded = JSON.parse(await readFile(join(trial, "result.json"), "utf8"));
+		assert.ok(graded.assertions.some((item: string) => item.includes("request budget exceeded")));
+		assert.ok(!graded.assertions.some((item: string) => item.includes("No strict declared Node verification contract")));
+	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("eval: a corrected check revision recovers in the same work and finishes without a final model response", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-revise-"));
+	const c = cases.find((item) => item.id === "invoice-workflow-repair")!;
+	const original = c.script;
+	try {
+		const first = structuredClone(original[0]!);
+		assert.ok("tool" in first);
+		const contract = first.args.verification as { checks: { name: string; command: string }[] };
+		const corrected = structuredClone(contract.checks);
+		contract.checks = [{ name: "incorrect preliminary expectation", command: "node --input-type=module -e 'import assert from \"node:assert/strict\"; import {invoice} from \"./invoice.ts\"; assert.equal(invoice([{price:\"1\",quantity:1}],200,80),80)'" }];
+		const beforeVerify = original.findIndex((item) => "tool" in item && item.tool === "dwell.work" && item.args.action === "verify");
+		c.script = [first, ...original.slice(1, beforeVerify + 1), { tool: "dwell.work", args: { action: "revise", checks: corrected, reason: "The requirement adds shipping only to a positive discounted subtotal; the preliminary expectation was incorrect." } }, ...original.slice(beforeVerify)];
+		const result = await run({ mode: "faux", cases: [c.id], trials: 1, out: directory, limits: { deadlineMs: 20_000, requests: 32, tools: 64 } });
+		assert.equal(result.passed, true, JSON.stringify(result.results));
+		const observed = JSON.parse(await readFile(join(result.root, `${c.id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
+		const final = JSON.parse(observed.observations.find((item) => item.event === "work_final")!.text!);
+		const work = final.records[final.current];
+		assert.equal(Object.keys(final.records).length, 1);
+		assert.equal(work.status, "ready_for_review");
+		assert.equal(work.verification.revision, 1);
+		assert.equal(work.verification.revisionHistory.length, 1);
+		assert.equal(work.verification.receipt.revision, 1);
+		assert.ok(observed.observations.some((item) => item.event === "tool_result" && (item.args as { action?: string })?.action === "verify" && item.isError));
+		const ready = observed.observations.findIndex((item) => item.event === "tool_result" && (item.args as { action?: string })?.action === "ready" && !item.isError);
+		assert.ok(ready >= 0);
+		assert.ok(!observed.observations.slice(ready + 1).some((item) => item.event === "request"));
+	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
 test("eval: successful exit cannot bypass unfinished hidden Node assertions", async () => {
