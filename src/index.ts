@@ -1,6 +1,6 @@
 // dwell 主程序：harness + 飞书 Channel + 多用户会话路由 + 权限矩阵 + 消息管线。
 import { resolve } from "node:path";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { LiveDoc, type Conversation, type ConversationId, type Harness, type SubmissionId, type SubmissionRecord, type TaskId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
 import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, runtimeBudgets, runtimeTelemetry, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { Uploads } from "./uploads.ts";
@@ -21,6 +21,7 @@ import { formatTelegramText } from "./telegram-format.ts";
 import { TelegramInbox, TelegramInputWorkers, telegramApprovalData, telegramApprovalMatch, type TelegramCommandReceipt, type TelegramInputReceipt } from "./telegram-entry.ts";
 import { Directory } from "./feishu/directory.ts";
 import { mirrorRestoredSubmission } from "./feishu/recovery.ts";
+import { FeishuDeliveries, type FeishuDelivery } from "./feishu-delivery.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
 import { approvalDecisions, approvals, captureApprovalRevocation, claimApprovalNotification, clampMinutes, conversationScope, decisionInput, drainApprovalDecisions, failApprovalNotification, fileGuardBases, grantApprovalWindow, loadApprovalState, makePathGuardExtension, pendingApprovals, revokeApprovalSnapshot, revokeApprovalWindows, runSender, runVia, scopeOf, setApprovalCallback, setPendingApprovalCard, setRunAttribution, takeDecision, windowKey, type ApprovalDecision, type ApprovalTarget, type RunVia } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
@@ -38,6 +39,7 @@ let sessions: Sessions;
 let channel: LarkChannel;
 let telegram: TelegramBot | undefined;
 let telegramInbox: TelegramInbox;
+let feishuDeliveries: FeishuDeliveries | undefined;
 let telegramWorkers: TelegramInputWorkers;
 const telegramAdmissions = new Map<number, Promise<unknown>>();
 const telegramChats = new Set((process.env.DWELL_TELEGRAM_CHATS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
@@ -97,9 +99,8 @@ async function main(): Promise<void> {
 	const attributeRun = (conversationId: number, creator: string): Promise<void> =>
 		setRunAttributionIfIdle(conversationId, creator, sessions.destinationOf(conversationId).kind);
 	const onAutonomousRun = async (conversationId: number, submissionId: SubmissionId, header: string): Promise<void> => {
-		// Telegram's receipt must survive before the durable producer finishes announcing.
-		if (sessions.destinationOf(conversationId).kind === "telegram") await openAutonomousCard(conversationId, submissionId, header);
-		else void openAutonomousCard(conversationId, submissionId, header);
+		// Each bot's presentation receipt must survive before its producer finishes announcing.
+		await openAutonomousCard(conversationId, submissionId, header);
 	};
 	// 定时任务：sleep → 触发 → 周期续睡；后台子代理：锚任务持有子会话，Reporter 投递与回报
 	// 子代理移除的扩展对象经 getter 延迟取（backgroundExt 自引用，装配后才存在）
@@ -179,6 +180,10 @@ async function main(): Promise<void> {
 	sessions = new Sessions(harness, (cwd) => uploads.register(cwd));
 	await sessions.load();
 	telegramInbox = new TelegramInbox(harness);
+	feishuDeliveries = new FeishuDeliveries(harness, { deliver: presentFeishuAutonomous, report: (receipt, alert) => {
+		const reason = { capacity: "待发回报已达上限，生产任务保留投递阶段等待空位", delayed: "回报排队超过 30 分钟，仍保留等待投递", uncertain: "回报发送结果不确定，未自动重发，请核对飞书与任务记录", missing: "回报关联的任务输入已不可用，未发送", storage: "回报状态处理失败，将保留记录重试" }[alert];
+		onReport(new Error(`飞书自治回报 #${receipt.submissionId}：${reason}`), { type: "extension_error", extension: "dwell-feishu-delivery", conversationId: receipt.conversationId as ConversationId });
+	} });
 	telegramWorkers = new TelegramInputWorkers(telegramInbox, processTelegramInput, async (id, row, error, terminal) => {
 		console.error(`[dwell] Telegram 输入预处理${terminal ? "失败，已保留原始消息" : "稍后重试"}（${id}）:`, error);
 		if (terminal) await replyNotice({ chatId: telegramChatKey(row.destination.botId, row.destination.chatId), messageId: row.replyTo, destination: row.destination }, "消息预处理失败，请重新发送；原始消息已保留供排查。");
@@ -283,6 +288,7 @@ async function main(): Promise<void> {
 		onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); void shutdown(1); },
 	});
 	if (!connected() && telegram === undefined) throw new Error("请配置飞书或 TELEGRAM_BOT_TOKEN，或启用 panel-only 模式");
+	await feishuDeliveries.recover();
 	// 部署重启会切断活跃 run 与原流式卡的绑定（watcher 死在旧进程）：为续跑中的飞书会话重挂镜像卡
 	await reattachStreams();
 	await reattachTelegramReplies();
@@ -299,6 +305,7 @@ async function main(): Promise<void> {
 	if (githubEnabled()) void githubCheck();
 	await replayApprovalDecisions();
 	// resume 放在擦除密钥与飞书重挂之后：续跑任务（含其 bash）从这里才开跑
+	if (connected()) await feishuDeliveries.start();
 	harness.resume();
 	telegramWorkers.start();
 	telegram?.start();
@@ -603,6 +610,7 @@ async function streamReplyCore(
 	submission: Awaited<ReturnType<Conversation["submit"]>>,
 	s: MarkdownStreamController,
 	context: typeof BACKGROUND_CONTEXT,
+	throwOnError = false,
 ): Promise<string> {
 	const keeper = cardKeeper(s);
 	const append = keeper.append;
@@ -728,6 +736,7 @@ async function streamReplyCore(
 	} catch (err) {
 		// 流式帧处理失败：卡片已创建，最多丢部分流式效果
 		console.error("[dwell] 流式帧处理失败:", err);
+		if (throwOnError) throw err;
 	} finally {
 		keeper.stop();
 	}
@@ -736,7 +745,7 @@ async function streamReplyCore(
 
 /** run 结束后的卡片终态替换：流式 element 更新受飞书流式窗口限制，message.patch 不依赖 streaming_mode，
  *  把卡片全量替换为最终内容；patch 不生效或内容超 30KB 时退回发一条普通消息。 */
-async function finalizeCard(chatId: string, messageId: string, full: string): Promise<void> {
+async function finalizeCard(chatId: string, messageId: string, full: string, throwOnError = false): Promise<void> {
 	try {
 		if (Buffer.byteLength(full, "utf8") <= 28_000) {
 			await channel.updateCard(messageId, {
@@ -754,6 +763,7 @@ async function finalizeCard(chatId: string, messageId: string, full: string): Pr
 		await channel.send(chatId, { markdown: clipped }, { replyTo: messageId });
 	} catch (err) {
 		console.error("[dwell] 终态兜底消息发送失败:", err);
+		if (throwOnError) throw err;
 	}
 }
 
@@ -776,8 +786,7 @@ async function submitAndReplyPlain(
 	}
 }
 
-/** 定时触发/后台回报的自治 run 开回复卡：与用户消息同一套锚点/话题规则；会话忙时等 followUp 出队再开卡（上限 30 分钟），
- *  避免与正在进行的回答同卡串流。panel 会话（无 chat）走通知开关私发摘要。 */
+/** Persist bot presentation before the producer finishes; panel summaries keep their notification switch. */
 async function openAutonomousCard(conversationId: number, submissionId: SubmissionId, header: string): Promise<void> {
 	const context = BACKGROUND_CONTEXT;
 	const submission = await harness.submission(submissionId, context);
@@ -789,39 +798,32 @@ async function openAutonomousCard(conversationId: number, submissionId: Submissi
 		return;
 	}
 	const chatId = sessions.chatOf(conversationId);
-	if (chatId === undefined || !connected()) {
+	if (chatId === undefined) {
 		if (sessions.notifyEnabled(conversationId)) void notifyAutonomousPanelResult(conversationId, submission);
 		return;
 	}
-	try {
-		const deadline = Date.now() + 30 * 60_000;
-		for (;;) {
-			const record = await submission.status(context);
-			if (record.status !== "queued") break;
-			if (Date.now() > deadline) {
-				console.error(`[dwell] 自治 run 排队超过 30 分钟，未开卡 #${conversationId}：${header}`);
-				return;
-			}
-			await new Promise((r) => setTimeout(r, 2000));
-		}
-		const conversation = await harness.conversation(conversationId as ConversationId, context);
-		if (conversation === undefined) return;
-		const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
-		const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
-		let streamed = "";
-		const sent = await channel.stream(
-			chatId,
-			{ markdown: async (s) => {
-				await s.append(`${header}\n\n`);
-				streamed = `${header}\n\n${await streamReplyCore(conversation, submission, s, context)}`;
-			} },
-			anchor === undefined ? undefined : { replyTo: anchor, replyInThread: kind === "thread" },
-		);
-		if (streamed !== "") await finalizeCard(chatId, sent.messageId, streamed);
-		await sessions.anchor(sent.messageId, conversationId as ConversationId);
-	} catch (err) {
-		console.error("[dwell] 自治 run 开卡失败:", err);
-	}
+	const kind = sessions.listConversations().find((c) => c.id === conversationId)?.type;
+	const anchor = kind === "direct" ? undefined : sessions.lastAnchor(conversationId as ConversationId);
+	if (feishuDeliveries === undefined) throw new Error("飞书自治投递尚未就绪");
+	await feishuDeliveries.enqueue({ conversationId, submissionId: submissionId as number, chatId, header, ...(anchor === undefined ? {} : { replyTo: anchor, replyInThread: kind === "thread" }) });
+}
+
+async function presentFeishuAutonomous(receipt: FeishuDelivery, signal: AbortSignal): Promise<void> {
+	const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
+	const conversation = await harness.conversation(receipt.conversationId as ConversationId, context);
+	const submission = await harness.submission(receipt.submissionId as SubmissionId, context);
+	if (conversation === undefined || submission === undefined) throw new Error("飞书自治回报的任务输入已不可用");
+	signal.throwIfAborted();
+	let streamed = "";
+	const sent = await channel.stream(receipt.chatId, { markdown: async (s) => {
+		signal.throwIfAborted();
+		await s.append(`${receipt.header}\n\n`);
+		streamed = `${receipt.header}\n\n${await streamReplyCore(conversation, submission, s, context, true)}`;
+	} }, receipt.replyTo === undefined ? undefined : { replyTo: receipt.replyTo, replyInThread: receipt.replyInThread });
+	signal.throwIfAborted();
+	if (streamed !== "") await finalizeCard(receipt.chatId, sent.messageId, streamed, true);
+	signal.throwIfAborted();
+	await sessions.anchor(sent.messageId, receipt.conversationId as ConversationId);
 }
 
 /** panel 会话的自治 run（定时/后台）结束后私发结果摘要（通知开关开启时；回复通知即续接任务线）。 */
@@ -1664,6 +1666,9 @@ async function reattachStreams(): Promise<void> {
 			const live = await harness.snapshot(LiveDoc, conversation.id, context);
 			const input = live?.run?.inputs[0];
 			if (input === undefined) continue;
+			const kind = sessions.listConversations().find((c) => c.id === id)?.type;
+			const autonomousAnchor = kind === "direct" ? undefined : sessions.lastAnchor(id as ConversationId);
+			if (await feishuDeliveries?.adoptActive({ conversationId: id, submissionId: input as number, chatId, ...(autonomousAnchor === undefined ? {} : { replyTo: autonomousAnchor, replyInThread: kind === "thread" }) })) continue;
 			const submission = await harness.submission(input, context);
 			if (submission === undefined) continue;
 			console.log(`[dwell] 重启后续跑 #${id}，重挂流式卡`);
@@ -1716,9 +1721,11 @@ function shutdown(code = 0): Promise<void> {
 		for (const stop of telegramPreparationActivities.values()) stop();
 		telegramPreparationActivities.clear();
 		if (approvalReplayTimer !== undefined) clearTimeout(approvalReplayTimer);
+		const feishuClosed = feishuDeliveries?.close();
 		try {
 			const closed = await Promise.allSettled([telegram?.close(), telegramWorkers?.close(), channel?.disconnect()]);
 			if (closed.some((result) => result.status === "rejected")) { shutdownCode = 1; console.error("[dwell] 聊天入口关闭失败"); }
+			await feishuClosed;
 			await harness?.close(BACKGROUND_CONTEXT);
 			await runtimeTelemetry(harness)?.close();
 			panel?.closeAllConnections();

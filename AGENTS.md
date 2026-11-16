@@ -19,6 +19,7 @@ src/
   index.ts          Bot assembly, shared message routing/commands, platform delivery, approvals, panel bridge, autonomous replies and scope recovery
   telegram.ts       Bot API transport: normalization, long polling/cursors, ordered plain-text sends, files and inline callbacks
   telegram-entry.ts Durable input/command receipts and approval callback authority checks
+  feishu-delivery.ts Durable autonomous reply delivery, restart recovery and uncertain-send records
   harness.ts        Harness.open：storage + provider + registry（CodingTools/dwell/审批/web）+ NodeExecutionEnv；凭证清理；视觉 describer；GitHub 接入（开关、非交互 env、提示词段、token 自检）
   models.ts         Shared connection loader/client factory; pi-ai protocol adapters and configuration templates, with opaque model IDs
   workspace.ts      Persistent read-only child roles and workspace write leases, including parent handoff and startup reconciliation
