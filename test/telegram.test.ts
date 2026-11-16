@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import { TelegramBot, TelegramError, normalizeTelegramUpdate, telegramChatKey, telegramMessageKey,
 	type TelegramUpdate, type TelegramCallback } from "../src/telegram.ts";
 import type { NormalizedMessage, TelegramDestination } from "../src/pipeline.ts";
@@ -28,7 +28,8 @@ function blocked(signal: AbortSignal): Promise<Response> {
 	});
 }
 async function until(predicate: () => boolean): Promise<void> {
-	for (let i = 0; i < 300; i++) { if (predicate()) return; await setImmediate(); }
+	const deadline = performance.now() + 5_000;
+	while (performance.now() < deadline) { if (predicate()) return; await delay(1); }
 	assert.fail("condition was not reached");
 }
 async function fixture(t: TestContext, options: {
@@ -66,8 +67,87 @@ async function fixture(t: TestContext, options: {
 		});
 	} catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
 	t.after(async () => { await bot.close(); await rm(dir, { recursive: true, force: true }); });
-	return { bot, stateFile, dir, requests, waits, errors, messages, callbacks };
+	return { bot, stateFile, dir, requests, waits, errors, messages, callbacks, advanceClock: (ms: number) => { clock += ms; } };
 }
+
+test("Telegram activity merges same-topic leases, rotates topics once per chat interval, and stops on release", async (t) => {
+	const f = await fixture(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const first = { ...destination, chatId: "-42", threadId: "7" };
+	const second = { ...first, threadId: "8" };
+	const stopFirst = f.bot.startActivity(first);
+	const stopDuplicate = f.bot.startActivity(first);
+	const controller = new AbortController();
+	f.bot.startActivity(second, controller.signal);
+	await setImmediate();
+	const actions = () => f.requests.filter((request) => request.method === "sendChatAction");
+	assert.deepEqual(actions().map((request) => request.body), [{ chat_id: "-42", message_thread_id: 7, action: "typing" }]);
+	f.advanceClock(4_000); t.mock.timers.tick(4_000); await setImmediate();
+	assert.deepEqual(actions().map((request) => (request.body as Record<string, unknown>).message_thread_id), [7, 8]);
+	stopFirst();
+	f.advanceClock(4_000); t.mock.timers.tick(4_000); await setImmediate();
+	assert.deepEqual(actions().map((request) => (request.body as Record<string, unknown>).message_thread_id), [7, 8, 7]);
+	stopDuplicate(); controller.abort();
+	f.advanceClock(8_000); t.mock.timers.tick(8_000); await setImmediate();
+	assert.equal(actions().length, 3);
+	const stopRestarted = f.bot.startActivity(first);
+	await setImmediate();
+	assert.equal(actions().length, 4);
+	stopRestarted();
+	const stopImmediate = f.bot.startActivity(first);
+	await setImmediate();
+	assert.equal(actions().length, 4, "Restarting a lease cannot bypass the chat activity interval");
+	stopImmediate();
+});
+
+test("Telegram activity yields to queued messages and an in-flight action cannot block a real reply", async (t) => {
+	const f = await fixture(t, { respond: (request) => request.method === "sendChatAction" ? blocked(request.signal) : ok({ message_id: 7 }) });
+	const stop = f.bot.startActivity(destination);
+	await until(() => f.requests.some((request) => request.method === "sendChatAction"));
+	await f.bot.send(destination, "Real answer");
+	assert.deepEqual(f.waits, [], "Activity must not consume a formal message's send interval");
+	const action = f.requests.find((request) => request.method === "sendChatAction")!;
+	stop();
+	assert.equal(action.signal.aborted, true);
+
+	let release!: () => void;
+	const queued = await fixture(t, { respond: async (request) => {
+		if (request.method === "sendMessage") await new Promise<void>((resolve) => { release = resolve; });
+		return ok({ message_id: 8 });
+	} });
+	const reply = queued.bot.send(destination, "Pending reply");
+	await until(() => queued.requests.some((request) => request.method === "sendMessage"));
+	const stopQueued = queued.bot.startActivity(destination);
+	await setImmediate();
+	assert.equal(queued.requests.filter((request) => request.method === "sendChatAction").length, 0);
+	stopQueued(); release(); await reply;
+});
+
+test("Telegram activity failures are quiet, never retry immediately, and respect token cooldown", async (t) => {
+	for (const code of [400, 401, 429, 500]) {
+		const f = await fixture(t, { respond: (request) => request.method === "sendChatAction" ? failure(code, code === 429 ? 1 : undefined) : ok({ message_id: 7 }) });
+		const stop = f.bot.startActivity(destination);
+		await setImmediate();
+		assert.equal(f.requests.filter((request) => request.method === "sendChatAction").length, 1);
+		assert.equal(f.bot.status(), "ready");
+		assert.deepEqual(f.errors, []);
+		stop();
+		await f.bot.send(destination, "Ordinary input remains available");
+		assert.deepEqual(f.waits, code === 429 ? [1_000] : []);
+	}
+});
+
+test("Telegram close aborts an activity request and clears its heartbeat", async (t) => {
+	const f = await fixture(t, { respond: (request) => blocked(request.signal) });
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	f.bot.startActivity(destination);
+	await until(() => f.requests.some((request) => request.method === "sendChatAction"));
+	const action = f.requests.find((request) => request.method === "sendChatAction")!;
+	await f.bot.close();
+	assert.equal(action.signal.aborted, true);
+	f.advanceClock(12_000); t.mock.timers.tick(12_000); await setImmediate();
+	assert.equal(f.requests.filter((request) => request.method === "sendChatAction").length, 1);
+});
 
 test("unchanged message edits are idempotent while other 400 responses remain failures", async (t) => {
 	const f = await fixture(t, { respond: (request) => Response.json({ ok: false, error_code: 400, description: request.method === "editMessageText" ? "Bad Request: message is not modified: specified content is exactly the same" : "Bad Request: message is not modified" }, { status: 400 }) });

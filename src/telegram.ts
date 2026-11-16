@@ -142,6 +142,16 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 const DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const UPLOAD_LIMIT = 50 * 1024 * 1024;
+const ACTIVITY_INTERVAL_MS = 4_000;
+type ActivityGroup = {
+	leases: Map<symbol, TelegramDestination>;
+	stops: Set<() => void>;
+	timer?: ReturnType<typeof setInterval>;
+	next: number;
+	active?: Promise<void>;
+	controller?: AbortController;
+	destination?: TelegramDestination;
+};
 
 export class TelegramBot {
 	readonly identity: TelegramIdentity;
@@ -157,6 +167,9 @@ export class TelegramBot {
 	#cooldown = 0;
 	#queues = new Map<string, Promise<unknown>>();
 	#lastSend = new Map<string, number>();
+	#activities = new Map<string, ActivityGroup>();
+	#lastActivity = new Map<string, number>();
+	#activityRequests = new Set<Promise<void>>();
 	#invalidEntityErrors = new WeakSet<TelegramError>();
 	#now: () => number;
 	#sleep: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -213,9 +226,10 @@ export class TelegramBot {
 	}
 	async close(): Promise<void> {
 		this.#state = "off";
+		for (const group of this.#activities.values()) for (const stop of [...group.stops]) stop();
 		this.#controller.abort();
 		await this.#poll;
-		await Promise.allSettled([...this.#queues.values()]);
+		await Promise.allSettled([...this.#queues.values(), ...this.#activityRequests]);
 		this.#token = "";
 	}
 
@@ -224,18 +238,20 @@ export class TelegramBot {
 		if (ms > 0) await this.#sleep(ms, this.#controller.signal);
 	}
 
-	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination): Promise<T> {
+	async #api<T>(method: string, body: Record<string, unknown> | FormData, mutates = false, destination?: TelegramDestination, activitySignal?: AbortSignal): Promise<T> {
+		const activity = method === "sendChatAction";
 		for (let attempt = 0; ; attempt++) {
 			await this.#wait(0);
 			const chatKey = destination ? telegramChatKey(destination.botId, destination.chatId) : undefined;
 			const interval = destination?.chatId.startsWith("-") ? this.#options.timing?.groupIntervalMs ?? 3000 : this.#options.timing?.privateIntervalMs ?? 1000;
 			for (;;) {
 				const deadline = Math.max(this.#cooldown, chatKey ? (this.#lastSend.get(chatKey) ?? -Infinity) + interval : 0);
+				if (activity && (activitySignal?.aborted || chatKey !== undefined && this.#queues.has(chatKey) || deadline > this.#now())) return undefined as T;
 				if (deadline <= this.#now()) break;
 				await this.#wait(Math.min(60_000, deadline - this.#now()));
 			}
-			if (chatKey) this.#lastSend.set(chatKey, this.#now());
-			const signal = AbortSignal.any([this.#controller.signal, AbortSignal.timeout(method === "getUpdates" ? 35_000 : 30_000)]);
+			if (chatKey && !activity) this.#lastSend.set(chatKey, this.#now());
+			const signal = AbortSignal.any([this.#controller.signal, ...(activitySignal === undefined ? [] : [activitySignal]), AbortSignal.timeout(activity ? 2_000 : method === "getUpdates" ? 35_000 : 30_000)]);
 			let response: Response;
 			let payload: { ok?: boolean; result?: T; error_code?: number; description?: string; parameters?: { retry_after?: number } };
 			try {
@@ -256,12 +272,12 @@ export class TelegramBot {
 			const retryAfter = typeof rawRetry === "number" && Number.isFinite(rawRetry) && rawRetry >= 0 ? rawRetry : undefined;
 			if (code === 429) {
 				this.#cooldown = Math.max(this.#cooldown, this.#now() + (retryAfter ?? 1) * 1000);
-				if (attempt < 2 && (retryAfter ?? 1) <= 60) continue;
+					if (!activity && attempt < 2 && (retryAfter ?? 1) <= 60) continue;
 			}
 			const error = new TelegramError(`Telegram API 请求失败（${code}）`, { code, retryAfter });
 			if (code === 400 && typeof payload.description === "string"
 				&& /\bentit(?:y|ies)\b|\bENTITY_BOUNDS_INVALID\b/i.test(payload.description)) this.#invalidEntityErrors.add(error);
-			if (code === 401 || code === 409) this.#fail(error);
+				if (!activity && (code === 401 || code === 409)) this.#fail(error);
 			throw error;
 		}
 	}
@@ -324,6 +340,58 @@ export class TelegramBot {
 			...(destination.threadId !== undefined ? { message_thread_id: Number(destination.threadId) } : {}),
 			// Reply anchors always belong to this chat; a deleted anchor must not discard the result.
 			...(replyTo ? { reply_parameters: { message_id: this.#numericMessage(destination, replyTo), allow_sending_without_reply: true } } : {}) };
+	}
+
+	/** Optional activity never enters the message queue or consumes its send interval. */
+	startActivity(destination: TelegramDestination, signal?: AbortSignal): () => void {
+		this.#validateDestination(destination);
+		if (this.#controller.signal.aborted || signal?.aborted) return () => {};
+		const key = telegramChatKey(destination.botId, destination.chatId);
+		let group = this.#activities.get(key);
+		const first = group === undefined;
+		if (group === undefined) {
+			group = { leases: new Map(), stops: new Set(), next: 0 };
+			this.#activities.set(key, group);
+			const active = group;
+			group.timer = setInterval(() => this.#activityPulse(key, active), ACTIVITY_INTERVAL_MS);
+			group.timer.unref?.();
+		}
+		const active = group;
+		const lease = Symbol();
+		active.leases.set(lease, { ...destination });
+		const stop = (): void => {
+			if (!active.leases.delete(lease)) return;
+			active.stops.delete(stop);
+			signal?.removeEventListener("abort", stop);
+			if (active.leases.size === 0) {
+				clearInterval(active.timer);
+				if (this.#activities.get(key) === active) this.#activities.delete(key);
+			}
+			if (active.destination !== undefined && ![...active.leases.values()].some((target) => target.threadId === active.destination!.threadId)) active.controller?.abort();
+		};
+		active.stops.add(stop);
+		signal?.addEventListener("abort", stop, { once: true });
+		if (first) this.#activityPulse(key, active);
+		return stop;
+	}
+
+	#activityPulse(key: string, group: ActivityGroup): void {
+		if (group.active !== undefined || group.leases.size === 0 || this.#controller.signal.aborted) return;
+		if (this.#now() - (this.#lastActivity.get(key) ?? -Infinity) < ACTIVITY_INTERVAL_MS) return;
+		const destinations = [...new Map([...group.leases.values()].map((target) => [target.threadId ?? "", target])).values()];
+		const destination = destinations[group.next++ % destinations.length]!;
+		this.#lastActivity.set(key, this.#now());
+		const controller = new AbortController();
+		group.controller = controller;
+		group.destination = destination;
+		const request = this.#api("sendChatAction", { ...this.#address(destination), action: "typing" }, false, destination, controller.signal).then(() => {}, () => {}).finally(() => {
+			group.active = undefined;
+			group.controller = undefined;
+			group.destination = undefined;
+			this.#activityRequests.delete(request);
+		});
+		group.active = request;
+		this.#activityRequests.add(request);
 	}
 	#markup(buttons?: TelegramButton[][]): Record<string, unknown> | undefined {
 		if (!buttons) return undefined;

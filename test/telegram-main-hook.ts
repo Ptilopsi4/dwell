@@ -149,7 +149,7 @@ globalThis.fetch = async (input, init) => {
 	}
 	if (url.origin === "https://api.telegram.org" && /^\/bot100:SYNTHETIC_TEST_TOKEN\/[a-zA-Z]+$/.test(url.pathname)) {
 		const method = url.pathname.split("/").at(-1)!;
-		if (["getMe", "getWebhookInfo", "getUpdates", "getFile", "sendMessage", "editMessageText", "answerCallbackQuery"].includes(method)) {
+		if (["getMe", "getWebhookInfo", "getUpdates", "getFile", "sendMessage", "editMessageText", "answerCallbackQuery", "sendChatAction"].includes(method)) {
 			const reply = body.reply_parameters as { message_id?: number; allow_sending_without_reply?: boolean } | undefined;
 			const replyTo = reply?.message_id;
 			if (method === "sendMessage" && replyTo !== undefined && (rejectedReplies.has(replyTo) || deletedReplies.has(replyTo) && !reply?.allow_sending_without_reply)) {
@@ -158,6 +158,7 @@ globalThis.fetch = async (input, init) => {
 			}
 			const sent = method === "sendMessage" ? nextId("messageId") : undefined;
 			report({ kind: "telegram", method, body, ...(sent === undefined ? {} : { messageId: sent }) });
+			if (method === "sendChatAction" && process.env.DWELL_TEST_ACTIVITY_FAILURE === "1") return Response.json({ ok: false, error_code: 401, description: "synthetic-private-action-error" }, { status: 401 });
 			switch (method) {
 				case "getMe": return ok({ id: 100, is_bot: true, username: "AcceptanceBot", first_name: "Acceptance" });
 				case "getWebhookInfo": return ok({ url: "" });

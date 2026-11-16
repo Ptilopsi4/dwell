@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { JsonRecord } from "./telegram-main-hook.ts";
 import { mainFixture, message } from "./telegram-main-fixture.ts";
 
@@ -44,6 +45,7 @@ test("main Telegram persists a blocked attachment while another chat and cancell
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([message(210, "Analyze slow attachment", { document: { file_id: "hold-cancel", file_name: "slow.txt" } })]);
 		await f.until((event) => event.method === "media.waiting");
+		await f.until((event) => event.method === "sendChatAction");
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 211);
 		f.updates([
 			message(211, "Another chat ordinary input", { from: { id: 201, first_name: "Other" }, chat: { id: 201, type: "private" } }),
@@ -52,6 +54,9 @@ test("main Telegram persists a blocked attachment while another chat and cancell
 		await f.until((event) => event.method === "sendMessage" && event.body.text === "已中止当前任务。");
 		await f.until((event) => event.method === "editMessageText" && event.body.text === "Other chat completed.");
 		assert.equal(f.requests("checkpoint", "media.downloaded").length, 0);
+		const activityCount = f.requests("telegram", "sendChatAction").length;
+		await delay(4_100);
+		assert.equal(f.requests("telegram", "sendChatAction").length, activityCount, "Cancelled preprocessing must release its activity while the download is still blocked");
 		f.release("file:hold-cancel");
 		await f.until((event) => event.method === "telegram.prepared" && event.body.id === "tg-update:100:210");
 		await f.stop();
@@ -62,6 +67,29 @@ test("main Telegram persists a blocked attachment while another chat and cancell
 		assert.equal(f.requests("model").length, 1, "Cancelled preprocessing must not start a delayed model run");
 		passed = true;
 	} finally { await f.close(passed); }
+});
+
+for (const failActivity of [false, true]) test(`main Telegram attachment preparation is visible before model admission${failActivity ? " even when the activity endpoint fails" : ""}`, { timeout: 60_000 }, async (t) => {
+	const f = await mainFixture(t, [{ text: "ATTACHMENT_PROCESSED" }], { failActivity });
+	let passed = false;
+	try {
+		await f.until((event) => event.method === "getUpdates");
+		f.updates([message(215, "Read this attachment.", { document: { file_id: "hold-activity", file_name: "notes.txt" } })]);
+		const activity = await f.until((event) => event.method === "sendChatAction");
+		await f.until((event) => event.method === "media.waiting");
+		assert.deepEqual(activity.body, { chat_id: "200", action: "typing" });
+		assert.equal(f.requests("model").length, 0);
+		assert.equal(f.requests("telegram", "sendMessage").length, 0, "The activity must not create a persistent progress message");
+		f.release("file:hold-activity");
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:215" && event.body.state === "done");
+		assert.equal(f.requests("model").length, 1);
+		assert.equal(f.requests("telegram", "editMessageText").filter((event) => event.body.text === "ATTACHMENT_PROCESSED").length, 1);
+		const count = f.requests("telegram", "sendChatAction").length;
+		await delay(4_100);
+		assert.equal(f.requests("telegram", "sendChatAction").length, count, "Prepared input must release its activity before ordinary model handling");
+		assert.equal(f.requests("unexpected").length, 0);
+		passed = true;
+	} finally { f.release("file:hold-activity"); await f.close(passed); }
 });
 
 test("main Telegram recovers the persisted raw attachment after cursor advancement and a hard restart", { timeout: 60_000 }, async (t) => {

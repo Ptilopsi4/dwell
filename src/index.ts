@@ -41,6 +41,7 @@ let telegramWorkers: TelegramInputWorkers;
 const telegramAdmissions = new Map<number, Promise<unknown>>();
 const telegramChats = new Set((process.env.DWELL_TELEGRAM_CHATS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
 const telegramReplies = new Set<string>();
+const telegramPreparationActivities = new Map<string, () => void>();
 const users = new Users();
 let directory: Directory;
 /** 审批后续跑后台子会话的投递器（main 装配；定义与投递语义见 ext/background.ts） */
@@ -914,9 +915,16 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	if (!row.prepared) {
 		content = msg.content.trim();
 		if (msg.resources.length > 0) {
-			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
-			const attachment = await describeResources(msg, cwd, { download: (key) => telegram!.download(key), describer: imageDescriber, save: uploads.save });
-			content = [content, attachment].filter(Boolean).join("\n\n");
+			const stopActivity = telegram!.startActivity(row.destination, signal);
+			telegramPreparationActivities.set(id, stopActivity);
+			try {
+				const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
+				const attachment = await describeResources(msg, cwd, { download: (key) => telegram!.download(key), describer: imageDescriber, save: uploads.save });
+				content = [content, attachment].filter(Boolean).join("\n\n");
+			} finally {
+				stopActivity();
+				if (telegramPreparationActivities.get(id) === stopActivity) telegramPreparationActivities.delete(id);
+			}
 		}
 		if (signal.aborted) return;
 		await telegramInbox.prepared(id, content);
@@ -1164,6 +1172,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			}
 			if (receipt !== undefined) {
 				await telegramInbox.cancelInputs(receipt.cancelInputIds ?? []);
+				for (const id of receipt.cancelInputIds ?? []) { telegramPreparationActivities.get(id)?.(); telegramPreparationActivities.delete(id); }
 				if (receipt.cancelTaskId !== undefined) await harness.abortTask(receipt.cancelTaskId as TaskId, context);
 			} else await conversation.abort(context);
 			await replyTo(target, "已中止当前任务。");
@@ -1639,6 +1648,8 @@ function shutdown(code = 0): Promise<void> {
 		const deadline = setTimeout(() => { console.error("[dwell] 关闭超过 30 秒，强制退出"); process.exit(1); }, 30_000);
 		const panelClosed = panel === undefined ? Promise.resolve() : new Promise<void>((resolve) => panel!.close(() => resolve()));
 		telegramWorkers?.stop();
+		for (const stop of telegramPreparationActivities.values()) stop();
+		telegramPreparationActivities.clear();
 		if (approvalReplayTimer !== undefined) clearTimeout(approvalReplayTimer);
 		try {
 			const closed = await Promise.allSettled([telegram?.close(), telegramWorkers?.close(), channel?.disconnect()]);
