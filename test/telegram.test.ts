@@ -171,6 +171,17 @@ test("Telegram IDs include bot and chat while topic remains a delivery field", (
 	assert.deepEqual(normalized.destination, { ...destination, threadId: "88" });
 });
 
+test("Telegram retains empty asks for host guidance while attachment-only asks remain media", () => {
+	assert.equal(normalizeTelegramUpdate(update("/ask"), identity)?.content, "/ask");
+	assert.equal(normalizeTelegramUpdate(update("/ask@DwellTestBot \n\t"), identity)?.content, "/ask");
+	assert.equal(normalizeTelegramUpdate(update("/start@DwellTestBot"), identity)?.content, "/start");
+	for (const attachment of [{ photo: [{ file_id: "image" }] }, { document: { file_id: "document", file_name: "notes.txt" } }]) {
+		const normalized = normalizeTelegramUpdate(update("", { text: undefined, caption: "/ask@DwellTestBot", ...attachment }), identity)!;
+		assert.equal(normalized.content, "");
+		assert.equal(normalized.resources.length, 1);
+	}
+});
+
 test("Telegram privacy mode admits addressed commands or actual replies, never a topic alone", () => {
 	const group = { chat: { id: -42, type: "supergroup" }, message_thread_id: 88 };
 	assert.equal(normalizeTelegramUpdate(update("hello", group), identity), null);

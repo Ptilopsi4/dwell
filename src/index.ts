@@ -398,7 +398,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 		await setRunAttributionIfIdle(conversation.id as number, msg.senderId, sessions.destinationOf(conversation.id as number).kind);
 
 		const content = msg.content.trim();
-		const action = messageAction(content, (msg.resources?.length ?? 0) > 0);
+		const action = messageAction(content, (msg.resources?.length ?? 0) > 0, msg.platform);
 		if (action === "command") {
 			const executeCommand = async (): Promise<void> => {
 			let commandReceipt: TelegramCommandReceipt | undefined;
@@ -1108,9 +1108,26 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 	const isOwner = msg.senderId === owner;
 
 	switch (cmd) {
+		case "/ask":
+			await replyTo(target, `请在命令后写下任务，例如：/ask@${telegram!.identity.username} 帮我整理这段文字。\n也可以附上图片或文件；私聊可直接发送内容。\n发送 /help 查看完整用法。`, conversation);
+			break;
+		case "/start":
 		case "/help": {
 			if (msg.platform === "telegram") {
-				await replyTo(target, "/ask@bot 内容：群聊提问，或回复 bot 继续\n/new：开启新任务线\n/newgoal：开启新目标，保留聊天历史\n/cancel：中止当前任务（线主/管理员）\n/approve [分钟]：批准危险命令\n/deny：关闭批准窗口\n/status：查看运行中任务（管理员）\n/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员\n/whoami：查看你的 ID 和当前聊天 ID", conversation);
+				const bot = `@${telegram!.identity.username}`;
+				const guide = [
+					`私聊：直接发送文字、图片或文件，也可使用 /ask 内容。`,
+					`群聊：使用 /ask${bot} 内容，或回复 ${bot} 的消息继续；群聊需先获准使用。`,
+					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
+					"/newgoal：开启新目标，保留聊天历史与旧任务记录（线主/管理员）",
+					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
+					"/approve [分钟]：开启危险命令批准窗口，默认 10 分钟",
+					"/deny：关闭批准窗口并取消待审请求",
+					"/whoami：查看你的 ID 和当前聊天 ID",
+					"/help：查看完整使用说明",
+					...(cmd === "/help" ? ["管理员命令：", "/status：查看运行中任务", "/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员"] : []),
+				];
+				await replyTo(target, guide.join("\n"), conversation);
 				break;
 			}
 			const sent = await channel.send(target.chatId, { card: helpCard() }, { replyTo: target.messageId });

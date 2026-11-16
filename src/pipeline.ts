@@ -84,8 +84,9 @@ export function fallbackRoute(msg: NormalizedMessage): FallbackRoute {
 }
 
 /** 消息动作判定：命令优先于媒体——带资源的命令文本仍走命令（与原判定顺序一致）。 */
-export function messageAction(content: string, hasResources: boolean): "command" | "media" | "input" {
-	if (KNOWN_COMMANDS.has(content.split(/\s+/)[0] ?? "")) return "command";
+export function messageAction(content: string, hasResources: boolean, platform?: NormalizedMessage["platform"]): "command" | "media" | "input" {
+	const command = content.split(/\s+/)[0] ?? "";
+	if (KNOWN_COMMANDS.has(command) || platform === "telegram" && (command === "/start" || content === "/ask")) return "command";
 	if (hasResources) return "media";
 	return "input";
 }

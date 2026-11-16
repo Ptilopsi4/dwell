@@ -80,14 +80,14 @@ export function normalizeTelegramUpdate(update: TelegramUpdate, identity: Telegr
 	const repliesToBot = message.reply_to_message?.from?.is_bot === true
 		&& String(message.reply_to_message.from.id) === identity.id;
 	if (message.chat.type !== "private" && !directed && !repliesToBot) return null;
-	if (command) {
-		const body = content.slice(command[0].length).trimStart();
-		content = command[1]!.toLowerCase() === "ask" ? body : `/${command[1]}${body ? ` ${body}` : ""}`;
-	}
 	const destination = destinationFor(message, identity);
 	const resources: NormalizedMessage["resources"] = [];
 	if (message.photo?.length) resources.push({ type: "image", fileKey: message.photo.at(-1)!.file_id });
 	if (message.document) resources.push({ type: "file", fileKey: message.document.file_id, fileName: message.document.file_name });
+	if (command) {
+		const body = content.slice(command[0].length).trimStart();
+		content = command[1]!.toLowerCase() === "ask" ? body || (resources.length ? "" : "/ask") : `/${command[1]}${body ? ` ${body}` : ""}`;
+	}
 	let rawContentType = message.text !== undefined ? "text" : "unknown";
 	if (resources.length) rawContentType = resources[0]!.type;
 	else for (const kind of ["audio", "voice", "video", "sticker", "animation"] as const) {

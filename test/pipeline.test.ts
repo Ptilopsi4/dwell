@@ -109,6 +109,16 @@ test("messageAction：已知命令（含带参数）→ command", () => {
 	assert.equal(messageAction("/approve 30", false), "command");
 });
 
+test("Telegram host guidance commands leave Feishu input behavior unchanged", () => {
+	for (const content of ["/start", "/start welcome", "/ask"]) {
+		assert.equal(messageAction(content, false, "telegram"), "command");
+		assert.equal(messageAction(content, false, "feishu"), "input");
+		assert.equal(messageAction(content, false), "input");
+	}
+	assert.equal(messageAction("", true, "telegram"), "media");
+	assert.equal(messageAction("Ordinary ask body", false, "telegram"), "input");
+});
+
 test("messageAction：未知斜杠文本（路径）当普通输入", () => {
 	assert.equal(messageAction("/usr/bin 下有什么", false), "input");
 	assert.equal(messageAction("/helpx", false), "input");
