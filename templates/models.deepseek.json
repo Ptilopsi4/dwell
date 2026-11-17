@@ -1,0 +1,38 @@
+{
+  "main": {
+    "api": "openai-completions",
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "cost": {
+      "input": 1.32,
+      "output": 3.96,
+      "cacheRead": 0.044,
+      "cacheWrite": 0
+    },
+    "name": "deepseek-v4-pro",
+    "reasoning": true,
+    "input": [
+      "text"
+    ],
+    "contextWindow": 1000000,
+    "maxTokens": 384000,
+    "compat": {
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "maxTokensField": "max_tokens",
+      "requiresReasoningContentOnAssistantMessages": true,
+      "thinkingFormat": "deepseek",
+      "supportsStrictMode": true,
+      "supportsMidConvoSystemMessages": true
+    },
+    "thinkingLevelMap": {
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": "high",
+      "max": "max"
+    }
+  },
+  "vision": null
+}

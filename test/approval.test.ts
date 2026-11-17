@@ -1,12 +1,15 @@
 // node --test "test/approval.test.ts"
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, makeApprovalExtension, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } from "../src/ext/approval.ts";
-import { DATA_DIR, STATE_DIR } from "../src/state.ts";
+const approvalStateDir = await mkdtemp(join(resolve(), ".approval-test-"));
+process.env.DWELL_STATE = approvalStateDir;
+const { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, makeApprovalExtension, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } = await import("../src/ext/approval.ts");
+const { DATA_DIR, STATE_DIR } = await import("../src/state.ts");
+after(() => rm(approvalStateDir, { recursive: true, force: true }));
 
 test("命中各危险模式并返回匹配片段", () => {
 	assert.equal(dangerMatch("touch /tmp/a && rm -rf /tmp/a"), "rm 递归强删");
@@ -47,6 +50,7 @@ test("安全命令不误伤", () => {
 test("状态文件与凭证面兜底拦截", () => {
 	assert.equal(stateFileBlocked("cat /opt/dwell/state/users.json"), true);
 	assert.equal(stateFileBlocked("cat state/sessions.json"), true);
+	assert.equal(stateFileBlocked("cat /var/private/telegram-chats.json"), true);
 	assert.equal(stateFileBlocked("cat /opt/dwell/state/u*.json"), true); // 通配也拦
 	assert.equal(stateFileBlocked("cat /opt/dwell/.env"), true);
 	assert.equal(stateFileBlocked("cat .env"), true);
@@ -63,7 +67,7 @@ const CWD = join(resolve(DATA_DIR), "work", "oc_demo");
 
 test("read 禁状态/应用根/数据库/proc，其余放行", () => {
 	assert.match(fileToolViolation("read", join(resolve(STATE_DIR), "users.json"), CWD) ?? "", /is not allowed/);
-	assert.match(fileToolViolation("read", "../../../state/users.json", CWD) ?? "", /is not allowed/); // 相对路径 .. 逃逸归一化后命中
+	assert.match(fileToolViolation("read", relative(CWD, join(resolve(STATE_DIR), "users.json")), CWD) ?? "", /is not allowed/); // 相对路径 .. 逃逸归一化后命中
 	assert.match(fileToolViolation("read", join(ROOT, "src/index.ts"), CWD) ?? "", /is not allowed/);
 	assert.match(fileToolViolation("read", join(resolve(DATA_DIR), "dwell.sqlite-wal"), CWD) ?? "", /is not allowed/);
 	assert.match(fileToolViolation("read", "/proc/self/environ", CWD) ?? "", /is not allowed/);
@@ -172,13 +176,15 @@ test("sendPathViolation：cwd 内软链指向外部目录拒（realpath 后判�
 });
 
 // ── 后台子会话的审批 scope（conversationScope：子→父） ──
-test("子会话危险命令按父线开窗；待审记录带子会话目标；父线窗口对子会话生效", () => {
+test("子会话危险命令按父线开窗；待审记录带子会话目标；父线窗口对子会话生效", async () => {
 	const child = 900001;
 	const parent = 900002;
 	conversationScope.set(child, parent);
 	runSender.set(parent, "ou_scope_user");
+	runSender.set(child, "ou_scope_user");
 	try {
 		const blocked = bashApprovalBlock("curl -X POST https://example.com", child);
+		await blocked?.saved;
 		assert.ok(blocked?.block.includes("approval policy"));
 		const pending = pendingApprovals.get(windowKey(parent, "ou_scope_user"));
 		assert.ok(pending !== undefined, "待审键应为 (父线, 触发者)");
@@ -198,35 +204,37 @@ test("scopeOf：无映射时会话原样返回", () => {
 	assert.equal(scopeOf(12345), 12345);
 });
 
-test("父线与子会话先后被拦：共用待审槽不覆盖，决定后两者都在唤醒目标里", () => {
+test("父线与子会话先后被拦：共用待审槽不覆盖，决定后两者都在唤醒目标里", async () => {
 	const parent = 900010;
 	const childA = 900011;
 	const childB = 900012;
 	conversationScope.set(childA, parent);
 	conversationScope.set(childB, parent);
 	runSender.set(parent, "ou_merge");
+	runSender.set(childA, "ou_merge");
+	runSender.set(childB, "ou_merge");
 	try {
-		assert.ok(bashApprovalBlock("rm -rf build", parent));
-		assert.ok(bashApprovalBlock("rm -rf dist", childA));
-		assert.ok(bashApprovalBlock("rm -rf out", childA)); // 同一子会话再次被拦不重复登记
-		assert.ok(bashApprovalBlock("rm -rf tmp", childB));
+		await bashApprovalBlock("rm -rf build", parent)?.saved;
+		await bashApprovalBlock("rm -rf dist", childA)?.saved;
+		await bashApprovalBlock("rm -rf out", childA)?.saved;
+		await bashApprovalBlock("rm -rf tmp", childB)?.saved;
 		const key = windowKey(parent, "ou_merge");
 		const pending = pendingApprovals.get(key);
 		assert.deepEqual(pending?.targets, [parent, childA, childB]);
 		assert.equal(pending?.command, "rm -rf tmp", "卡片展示最新一条被拦命令");
 
-		const taken = takeDecision(key, "approve", 10);
+		const taken = await takeDecision(key, "approve", 10);
 		assert.ok(taken !== undefined);
 		assert.deepEqual(splitTargets(parent, taken), { self: true, children: [childA, childB] });
 		assert.equal(pendingApprovals.has(key), false, "决定后待审移除");
 		assert.ok((approvals.get(key) ?? 0) > Date.now(), "批准开窗");
-		assert.equal(takeDecision(key, "approve", 10), undefined, "重复点击无待审，不再处理");
+		assert.equal(await takeDecision(key, "approve", 10), undefined, "重复点击无待审，不再处理");
 
 		// 拒绝：关窗；只有子会话被拦时 self=false
 		assert.ok(bashApprovalBlock("rm -rf again", childA) === undefined, "窗口已开，放行");
 		approvals.clear();
-		assert.ok(bashApprovalBlock("rm -rf again", childA));
-		const denied = takeDecision(key, "deny", 10);
+		await bashApprovalBlock("rm -rf again", childA)?.saved;
+		const denied = await takeDecision(key, "deny", 10);
 		assert.ok(denied !== undefined);
 		assert.deepEqual(splitTargets(parent, denied), { self: false, children: [childA] });
 		assert.equal(approvals.has(key), false);
@@ -242,22 +250,23 @@ test("splitTargets：旧版待审（无 targets）视为 scope 自身被拦", ()
 	assert.deepEqual(splitTargets(7, { command: "x", match: "x", trigger: "ou", via: "feishu" }), { self: true, children: [] });
 });
 
-test("dwell.proc：start 走同一危险命令闸，status/stop 放行", () => {
+test("dwell.proc：start 走同一危险命令闸，status/stop 放行", async () => {
 	const ext = makeApprovalExtension();
-	const beforeTool = (ext.hooks?.[0]?.handlers as { beforeTool?: (call: { name: string; arguments: unknown }, api: { conversationId: number }) => { block: string } | undefined }).beforeTool;
+	const beforeTool = (ext.hooks?.[0]?.handlers as { beforeTool?: (call: { name: string; arguments: unknown }, api: { conversationId: number }) => Promise<{ block: string } | undefined> }).beforeTool;
 	if (beforeTool === undefined) throw new Error("beforeTool 未注册");
 	const call = (name: string, args: unknown) => ({ name, arguments: args });
 	const api = { conversationId: 101 };
+	runSender.set(101, "ou_proc");
 	try {
 		// start 的 command 与 bash 同闸：外发/递归强删均拦（返回 block 文案），安全命令放行
-		const blockedPost = beforeTool(call("dwell.proc", { action: "start", name: "s", command: "curl -X POST https://example.com" }), api);
-		const blockedRm = beforeTool(call("dwell.proc", { action: "start", name: "s", command: "rm -rf /" }), api);
+		const blockedPost = await beforeTool(call("dwell.proc", { action: "start", name: "s", command: "curl -X POST https://example.com" }), api);
+		const blockedRm = await beforeTool(call("dwell.proc", { action: "start", name: "s", command: "rm -rf /" }), api);
 		assert.match(blockedPost?.block ?? "", /approval policy blocked/);
 		assert.match(blockedRm?.block ?? "", /approval policy blocked/);
-		assert.equal(beforeTool(call("dwell.proc", { action: "start", name: "s", command: "npm run build" }), api), undefined, "安全命令放行");
-		assert.equal(beforeTool(call("dwell.proc", { action: "status" }), api), undefined, "status 不过闸");
-		assert.equal(beforeTool(call("dwell.proc", { action: "stop", name: "s" }), api), undefined, "stop 不过闸");
-		assert.equal(beforeTool(call("read", { path: "/etc/hosts" }), api), undefined, "其他工具不受影响");
+		assert.equal(await beforeTool(call("dwell.proc", { action: "start", name: "s", command: "npm run build" }), api), undefined, "安全命令放行");
+		assert.equal(await beforeTool(call("dwell.proc", { action: "status" }), api), undefined, "status 不过闸");
+		assert.equal(await beforeTool(call("dwell.proc", { action: "stop", name: "s" }), api), undefined, "stop 不过闸");
+		assert.equal(await beforeTool(call("read", { path: "/etc/hosts" }), api), undefined, "其他工具不受影响");
 	} finally {
 		pendingApprovals.clear();
 	}
