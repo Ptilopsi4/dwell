@@ -68,6 +68,8 @@ export type BackgroundDeps = {
 	/** 当前 run 发起者（后台任务创建者，回报归属用） */
 	senderOf: (conversationId: number) => string | undefined;
 	viaOf?: (conversationId: number) => RunVia | undefined;
+	isAllowed?: (creator: string, conversationId: number, creatorVia?: RunVia) => boolean;
+	inputMode?: (parentConversationId: number) => "steer" | "followUp";
 	/** 子代理 agent 变更中要移除的扩展对象（防递归派生；AgentChange 按对象引用，getter 延迟取装配产物） */
 	forbidden: () => readonly Extension[];
 	budgetStopReason?: (conversationId: number, budgetId?: string) => Promise<string | undefined>;
@@ -79,7 +81,7 @@ export type BackgroundDeps = {
 export type BackgroundDeliverer = {
 	/** 子会话所属的后台任务名（名册已删 = 已 stop） */
 	nameOf: (parent: number, child: number) => Promise<string | undefined>;
-	/** 在父线上建 Reporter 投递 content；false = 无名册（已 stop）或 harness 未就绪 */
+	/** 在父线上创建 Reporter；false 表示任务已停止、权限已撤销或目标不可用。 */
 	deliver: (parent: number, child: number, content: string, approval?: BackgroundApprovalDelivery) => Promise<boolean>;
 };
 
@@ -123,11 +125,14 @@ export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => 
 		deliver: async (parent, child, content, approval) => {
 			const harness = getHarness();
 			if (harness === undefined) return false;
+			const creator = approval?.sender ?? deps.senderOf(parent) ?? "";
+			const via = approval === undefined ? deps.viaOf?.(parent) : approval.via;
 			return harness.commit(async (tx) => {
 				const receipts = approval === undefined ? undefined : await tx.doc(BackgroundDeliveryDoc, parent as ConversationId);
 				if (approval !== undefined && receipts?.receipts[approval.deliveryId] !== undefined) {
 					return true;
 				}
+				if (deps.isAllowed?.(creator, parent, via) === false) return false;
 				const roster = await tx.doc(BackgroundDoc, parent as ConversationId);
 				if ((await tx.doc(BackgroundStopDoc, parent as ConversationId)).children[String(child)] === true) return false;
 				const name = Object.entries(roster.agents).find(([, v]) => v.conversationId === child)?.[0];
@@ -137,9 +142,11 @@ export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => 
 				// Throwing leaves the decision journal pending; false would permanently discard its delivery.
 				if (cap !== undefined) throw new Error(cap);
 				await checkBackgroundWorkspace(tx, parent, child);
+				const work = (await workIdentity(tx, child, approval?.budgetId)) ?? null;
+				if (deps.isAllowed?.(creator, parent, via) === false) return false;
 				const taskId = await tx.createTask(
 					Reporter,
-					{ name, parent, child, message: content, creator: approval?.sender ?? deps.senderOf(parent) ?? "", ...actorVia(deps, parent, approval?.via), work: (await workIdentity(tx, child, approval?.budgetId)) ?? null, followUp: false, ...(approval === undefined ? {} : { approval }) },
+					{ name, parent, child, message: content, creator, ...(via === undefined ? {} : { creatorVia: via }), work, followUp: false, ...(approval === undefined ? {} : { approval }) },
 					{ ownership: { kind: "conversation" }, background: true, conversationId: parent as ConversationId },
 				);
 				if (approval !== undefined && receipts !== undefined) receipts.receipts[approval.deliveryId] = taskId as number;
@@ -274,14 +281,23 @@ export async function reconcileBackgroundStops(harness: Harness): Promise<void> 
 type ReporterInput = { name: string; parent: number; child: number; message: string; creator: string; creatorVia?: RunVia; work?: WorkIdentity | null; followUp: boolean; approval?: BackgroundApprovalDelivery };
 type ReporterState = { phase: "deliver" } | { phase: "report"; report?: string };
 
-function actorVia(deps: BackgroundDeps, parent: number, override?: RunVia): { creatorVia?: RunVia } {
-	const via = override ?? deps.viaOf?.(parent);
+function actorVia(deps: BackgroundDeps, parent: number): { creatorVia?: RunVia } {
+	const via = deps.viaOf?.(parent);
 	return via === undefined ? {} : { creatorVia: via };
 }
 
 function actorEntry(input: ReporterInput) {
 	const via = creatorVia(input.creator, input.creatorVia);
 	return { kind: "chat.message", data: { sender: input.creator, via: "background", work: input.work ?? null, ...(via === undefined ? {} : { authorityVia: via }) } };
+}
+
+/** 被拒绝的投递未启动新工作，不能释放先前提交仍在使用的租约。 */
+async function releaseUndeliveredWorkspace(tx: Tx, child: number, reporterId: TaskId): Promise<void> {
+	if ((await tx.doc(LiveDoc, child as ConversationId)).run !== undefined || (await tx.doc(InboxDoc, child as ConversationId)).items.length > 0) return;
+	const doc = await tx.doc(WorkspaceDoc);
+	for (const [key, writer] of Object.entries(doc.writers)) {
+		if (writer.conversationId === child && writer.reporterId === reporterId) delete doc.writers[key];
+	}
 }
 
 /** 报告任务：把消息投给子会话，等答案，再以 followUp 回报父会话。requestId 保证重启后不重发。导出供测试直接建任务。 */
@@ -293,6 +309,12 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 		phases: {
 			deliver: async (task, runtime, context) => {
 				const input = task.input;
+				const revoked = () => deps.isAllowed?.(input.creator, input.parent, input.creatorVia) === false;
+				const refuse = () => runtime.commit(async (tx) => {
+					await releaseUndeliveredWorkspace(tx, input.child, runtime.taskId);
+					return { status: "terminal", outcome: { status: "aborted" } };
+				}, context);
+				if (revoked()) { await refuse(); return; }
 				const stopped = async () => (await runtime.snapshot(BackgroundStopDoc, input.parent as ConversationId, context))?.children[String(input.child)] === true;
 				if (await stopped()) {
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context);
@@ -316,8 +338,9 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context);
 					return;
 				}
+				if (revoked()) { await refuse(); return; }
 				const submission = await child.submit(
-					{ type: "input", content, requestId: `bg:${String(runtime.taskId)}`, whenBusy: input.approval !== undefined || input.followUp ? "followUp" : "steer", entry: input.approval === undefined ? actorEntry(input) : { kind: input.approval.budgetId === undefined ? "dwell.approval.legacy" : "dwell.approval", data: { sender: input.approval.sender, via: input.approval.via ?? creatorVia(input.creator, input.creatorVia) ?? "feishu", work: input.work ?? null, ...(input.approval.budgetId === undefined ? {} : { budgetId: input.approval.budgetId }) } } },
+					{ type: "input", content, requestId: `bg:${String(runtime.taskId)}`, whenBusy: input.approval !== undefined || input.followUp || deps.inputMode?.(input.parent) === "followUp" ? "followUp" : "steer", entry: input.approval === undefined ? actorEntry(input) : { kind: input.approval.budgetId === undefined ? "dwell.approval.legacy" : "dwell.approval", data: { sender: input.approval.sender, via: input.approval.via ?? creatorVia(input.creator, input.creatorVia) ?? "feishu", work: input.work ?? null, ...(input.approval.budgetId === undefined ? {} : { budgetId: input.approval.budgetId }) } } },
 					context,
 				);
 				const settled = await submission.wait(context);
@@ -341,6 +364,12 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 				}, context);
 			},
 			report: async (task, runtime, context) => {
+				const revoked = () => deps.isAllowed?.(task.input.creator, task.input.parent, task.input.creatorVia) === false;
+				const refuse = () => runtime.commit(async (tx) => {
+					await releaseUndeliveredWorkspace(tx, task.input.child, runtime.taskId);
+					return { status: "terminal", outcome: { status: "aborted" } };
+				}, context);
+				if (revoked()) { await refuse(); return; }
 				const stopped = async () => (await runtime.snapshot(BackgroundStopDoc, task.input.parent as ConversationId, context))?.children[String(task.input.child)] === true;
 				if (await stopped()) {
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context);
@@ -355,6 +384,7 @@ export const makeBackgroundReporter = (deps: BackgroundDeps) =>
 					}
 					const parent = await runtime.conversation(task.input.parent as ConversationId, context);
 					if (parent !== undefined) {
+						if (revoked()) { await refuse(); return; }
 						const submission = await parent.submit(
 							{ type: "input", content: report, requestId: `bg-report:${String(runtime.taskId)}`, whenBusy: "followUp", entry: actorEntry(task.input) },
 							context,
@@ -425,6 +455,10 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 			}
 			const message = (args.message ?? "").trim();
 			if (message === "") return text(`${args.action} needs a message.`, true);
+			const creator = deps.senderOf(api.conversationId) ?? "";
+			const via = actorVia(deps, api.conversationId);
+			const revoked = () => deps.isAllowed?.(creator, api.conversationId, via.creatorVia) === false;
+			if (revoked()) return text("The creator no longer has access to this conversation.", true);
 
 			if (args.action === "send") {
 				if (args.mode !== undefined) return text("Task mode is fixed at start. Stop it and start a new task to choose a different mode.", true);
@@ -437,7 +471,9 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					const cap = backgroundCapViolation(live.filter((t) => (t.conversationId as number) === (api.conversationId as number)).length, live.length);
 					if (cap !== undefined) return cap;
 					await checkBackgroundWorkspace(tx, api.conversationId, existing.conversationId, api.taskId);
-					const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: existing.conversationId, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), work: (await workIdentity(tx, existing.conversationId)) ?? null, followUp: args.followUp === true }, { ownership: { kind: "conversation" }, background: true });
+					const work = (await workIdentity(tx, existing.conversationId)) ?? null;
+					if (revoked()) return "The creator no longer has access to this conversation.";
+					const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: existing.conversationId, message, creator, ...via, work, followUp: args.followUp === true }, { ownership: { kind: "conversation" }, background: true });
 					await prepareBackgroundWorkspace(tx, api.conversationId, existing.conversationId, reporter);
 					return undefined;
 				}, context);
@@ -460,6 +496,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 					const violation = await workspaceStartViolation(tx, api.conversationId, workspace, api.taskId);
 					if (violation !== undefined) return { ok: false, error: violation };
 				}
+				if (revoked()) return { ok: false, error: "The creator no longer has access to this conversation." };
 				const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
 				// 子会话由锚持有：复制父 agent（cwd/模型/工具），再收掉递归派生工具
 				const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
@@ -474,7 +511,7 @@ function makeBackgroundTool(deps: BackgroundDeps, Reporter: ReturnType<typeof ma
 						`Do the job you were given, then end with a concise, self-contained summary of the result: your final answer is reported back to the main agent verbatim.`,
 				});
 				doc.agents[name] = { conversationId: child.id as number };
-				const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: child.id as number, message, creator: deps.senderOf(api.conversationId as number) ?? "", ...actorVia(deps, api.conversationId), work: (await workIdentity(tx, child.id)) ?? null, followUp: false }, { ownership: { kind: "conversation" }, background: true });
+				const reporter = await tx.createTask(Reporter, { name, parent: api.conversationId as number, child: child.id as number, message, creator, ...via, work: (await workIdentity(tx, child.id)) ?? null, followUp: false }, { ownership: { kind: "conversation" }, background: true });
 				await registerBackgroundWorkspace(tx, api.conversationId, child.id, mode, workspace, reporter);
 				return { ok: true, child: child.id as number };
 			}, context);

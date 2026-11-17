@@ -146,6 +146,64 @@ test("纯函数：列表格式", () => {
 	assert.match(out, /- c · taskId 3 · starting/);
 });
 
+test("process access is rechecked before spawn and report without killing an already running process", { skip: procSkip }, async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-proc-access-"));
+	const workDir = resolve(join(dir, "work"));
+	await mkdir(workDir);
+	let allowed = false;
+	let revokeInEnv = false;
+	let fired = 0;
+	const checks: unknown[][] = [];
+	const deps: ProcDeps = {
+		attribute: async () => {}, onFired: () => { fired++; }, getHarness: () => undefined,
+		senderOf: () => "current-admin", viaOf: () => "panel", shell: () => shell,
+		isAllowed: (creator, id, via) => { checks.push([creator, id, via]); return allowed && creator === "tg:42" && via === "telegram"; },
+	};
+	const extension = makeProcExtension(deps);
+	const registry = createRegistry(); registry.install(extension);
+	const faux = fauxProvider(); faux.setResponses([fauxAssistantMessage(fauxText("ack"))]);
+	const models = createModels(); models.setProvider(faux.provider);
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), {
+		models, registry,
+		env: async () => { if (revokeInEnv) allowed = false; return new NodeExecutionEnv({ cwd: workDir }); },
+	}, context);
+	try {
+		const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" }, cwd: workDir } }, context);
+		const create = (name: string, command: string) => conversation.commit((tx) => tx.createTask(makeProcTask(deps), {
+			name, command, notify: true, creator: "tg:42", creatorVia: "telegram", conversationId: conversation.id,
+		}, { ownership: { kind: "conversation" }, background: true }), context);
+		const wait = (id: TaskId) => until(async () => (await harness.getTask(id, context))?.state.status === "terminal");
+		const marker = join(workDir, "marker");
+		const denied = await create("queued", `echo denied > ${quote(marker)}`);
+		harness.resume();
+		await wait(denied);
+		await assert.rejects(readFile(marker), { code: "ENOENT" });
+		allowed = true; revokeInEnv = true;
+		const beforeSpawn = await create("before-spawn", `echo denied > ${quote(marker)}`);
+		await wait(beforeSpawn);
+		await assert.rejects(readFile(marker), { code: "ENOENT" });
+		allowed = true; revokeInEnv = false;
+		const running = await create("running", `echo started; sleep 0.4; echo completed > ${quote(marker)}`);
+		await until(async () => {
+			const record = await harness.getTask(running, context);
+			return record?.state.status === "running" && (record.state.checkpoint as { phase: string }).phase === "watch";
+		});
+		allowed = false;
+		await wait(running);
+		assert.equal((await readFile(marker, "utf8")).trim(), "completed");
+		assert.match(await readFile(join(privateState, "proc-logs", String(conversation.id), `${running}.log`), "utf8"), /started/);
+		assert.equal((await conversation.entries({}, 100, undefined, context)).items.length, 0);
+		assert.equal(fired, 0);
+		allowed = true;
+		const permitted = await create("allowed", "echo permitted");
+		await wait(permitted);
+		assert.equal(fired, 1);
+		assert.match(JSON.stringify((await conversation.entries({}, 100, undefined, context)).items), /permitted/);
+		assert.ok(checks.every(([creator, id, via]) => creator === "tg:42" && id === conversation.id && via === "telegram"));
+	} finally { await harness.close(context); await cleanupDir(dir); }
+});
+
 test("集成：自然退出回报会话并带日志尾；归属先于开卡", { skip: procSkip }, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-proc-"));
 	const order: string[] = [];

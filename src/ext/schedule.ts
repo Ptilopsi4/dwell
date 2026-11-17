@@ -48,8 +48,8 @@ export type ScheduleDeps = {
 	/** 当前 run 发起者（schedule 创建者记录用） */
 	senderOf: (conversationId: number) => string | undefined;
 	viaOf?: (conversationId: number) => RunVia | undefined;
-	/** 创建者是否仍在白名单：被 /disallow 后终止任务并告警（缺省不检查，测试/无 users 场景） */
-	isAllowed?: (openId: string) => boolean;
+	/** 按原会话复查创建者权限；独立使用时可省略检查。 */
+	isAllowed?: (creator: string, conversationId: number, creatorVia?: RunVia) => boolean;
 	/** 创建者被移出白名单时的告警（report 管线，仅记日志） */
 	onCreatorRevoked?: (input: ScheduleInput) => void;
 };
@@ -246,7 +246,7 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 				const input = task.input;
 				const { n, at } = task.state.checkpoint;
 				// 创建者已被移出白名单：终止任务并告警（防止被 /disallow 的成员留下的定时任务继续以其身份触发）
-				if (input.creator !== "" && deps.isAllowed !== undefined && !deps.isAllowed(input.creator)) {
+				if (input.creator !== "" && deps.isAllowed !== undefined && !deps.isAllowed(input.creator, input.conversationId, input.creatorVia)) {
 					deps.onCreatorRevoked?.(input);
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 					return;
@@ -256,6 +256,11 @@ export const makeScheduleRunTask = (deps: ScheduleDeps) =>
 				const conversation = await runtime.conversation(input.conversationId as ConversationId, context);
 				if (conversation === undefined) {
 					runtime.report(new Error(`Scheduled task ${input.id}: conversation ${input.conversationId} is missing`));
+					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+					return;
+				}
+				if (input.creator !== "" && deps.isAllowed !== undefined && !deps.isAllowed(input.creator, input.conversationId, input.creatorVia)) {
+					deps.onCreatorRevoked?.(input);
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 					return;
 				}
@@ -341,6 +346,8 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 				return text(`Cancelled ${id}.`);
 			}
 			// create
+			const creator = deps.senderOf(api.conversationId) ?? "";
+			const via = deps.viaOf?.(api.conversationId);
 			const instruction = (args.instruction ?? "").trim();
 			if (instruction === "") return text("instruction is required for create.", true);
 			if ((args.delayMinutes === undefined) === (args.at === undefined)) return text("Provide exactly one of delayMinutes or at.", true);
@@ -365,6 +372,7 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 				const intent = await tx.doc(ScheduleIntent, api.taskId);
 				// doc 值是事务内的 overlay，commit 后再读会抛 settled overlay：拷出普通对象再返回
 				if (intent.scheduled !== undefined) return { ok: true, scheduled: JSON.parse(JSON.stringify(intent.scheduled)) as ScheduleInput };
+				if (deps.isAllowed?.(creator, api.conversationId, via) === false) return { ok: false, error: "The creator no longer has access to this conversation." };
 				const live = await scanLiveTasks(tx, { conversationId: api.conversationId, kind: SCHEDULE_TASK_KIND });
 				if (live.length >= MAX_SCHEDULES) return { ok: false, error: `This conversation already has ${live.length} scheduled tasks (max ${MAX_SCHEDULES}); cancel some first.` };
 				const scheduled: ScheduleInput = {
@@ -373,10 +381,11 @@ function makeScheduleTool(deps: ScheduleDeps, ScheduleRun: ReturnType<typeof mak
 					instruction,
 					firstAt: runAt,
 					...(repeat === undefined ? {} : { repeat }),
-					creator: deps.senderOf(api.conversationId as number) ?? "",
-					...(deps.viaOf?.(api.conversationId) === undefined ? {} : { creatorVia: deps.viaOf!(api.conversationId)! }),
+					creator,
+					...(via === undefined ? {} : { creatorVia: via }),
 					tz: timezone,
 				};
+				if (deps.isAllowed?.(creator, api.conversationId, via) === false) return { ok: false, error: "The creator no longer has access to this conversation." };
 				intent.scheduled = scheduled;
 				await tx.createTask(ScheduleRun, scheduled, { ownership: { kind: "conversation" }, background: true });
 				return { ok: true, scheduled };

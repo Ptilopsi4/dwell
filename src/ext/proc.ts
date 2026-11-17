@@ -57,6 +57,7 @@ export type ProcDeps = {
 	/** 当前 run 发起者（进程创建者记录用） */
 	senderOf: (conversationId: number) => string | undefined;
 	viaOf?: (conversationId: number) => RunVia | undefined;
+	isAllowed?: (creator: string, conversationId: number, creatorVia?: RunVia) => boolean;
 	/** spawn 用的 shell（沙箱 wrapper 或系统 bash）；空 path = 不可用，start 阶段报错 */
 	shell: () => { readonly path: string; readonly sandboxed: boolean };
 };
@@ -314,6 +315,11 @@ export const makeProcTask = (deps: ProcDeps) =>
 		initial: () => ({ phase: "start" }),
 		phases: {
 			start: async (task, runtime, context) => {
+				const revoked = () => deps.isAllowed?.(task.input.creator, task.input.conversationId, task.input.creatorVia) === false;
+				if (revoked()) {
+					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+					return;
+				}
 				// Persist intent before spawning; replay must never execute the command twice.
 				if (await runtime.memo<boolean>("spawned", context) !== undefined) {
 					await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report", code: null, lost: true, startedAt: runtime.now(), logVersion: 1 } }), context);
@@ -332,6 +338,11 @@ export const makeProcTask = (deps: ProcDeps) =>
 					return;
 				}
 				if (runtime.signal.aborted) { await log.close(); return; }
+				if (revoked()) {
+					await log.close();
+					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+					return;
+				}
 				let child: ChildProcess;
 				try {
 					child = spawn(shell.path, ["-c", task.input.command], {
@@ -381,8 +392,9 @@ export const makeProcTask = (deps: ProcDeps) =>
 			},
 			report: async (task, runtime, context) => {
 				const input = task.input;
+				const revoked = () => deps.isAllowed?.(input.creator, input.conversationId, input.creatorVia) === false;
 				const ck = task.state.checkpoint.phase === "report" ? task.state.checkpoint : undefined;
-				if (ck !== undefined && (input.notify || ck.note !== undefined)) {
+				if (!revoked() && ck !== undefined && (input.notify || ck.note !== undefined)) {
 					await deps.attribute(input.conversationId, input.creator);
 					const conversation = await runtime.conversation(input.conversationId as ConversationId, context);
 					if (conversation === undefined) runtime.report(new Error(`Process task ${input.name}: conversation ${input.conversationId} is missing`));
@@ -393,6 +405,11 @@ export const makeProcTask = (deps: ProcDeps) =>
 						const content = ck.note === undefined
 							? formatProcExitReport(input.name, ck.code, ck.lost, Math.round((runtime.now() - ck.startedAt) / 1000), tail, runtime.taskId as number)
 							: `[Background process ${input.name}] taskId: ${runtime.taskId}. ${ck.note}\n${tail}`;
+						if (revoked()) {
+							await cleanupLogs(runtime);
+							await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+							return;
+						}
 						const submission = await conversation.submit(
 							{ type: "input", content, requestId: `proc:${String(runtime.taskId)}:exit`, whenBusy: "followUp", entry: { kind: "chat.message", data: { sender: input.creator, via: "proc", work: input.work ?? null, ...(creatorVia(input.creator, input.creatorVia) === undefined ? {} : { authorityVia: creatorVia(input.creator, input.creatorVia)! }) } } },
 							context,
@@ -468,13 +485,17 @@ function makeProcTool(deps: ProcDeps, ProcRun: ReturnType<typeof makeProcTask>) 
 			// start
 			const command = (args.command ?? "").trim();
 			if (command === "") return text("start needs a command.", true);
+			const creator = deps.senderOf(api.conversationId) ?? "";
+			const via = deps.viaOf?.(api.conversationId);
 			type StartResult = { ok: false; error: string } | { ok: true; taskId: number };
 			const created = await api.commit<StartResult>(async (tx) => {
 				const live = await scanLiveTasks(tx, { kind: PROC_TASK_KIND }, 500);
 				if (live.some((t) => (t.input as ProcInput).name === name && (t.input as ProcInput).conversationId === api.conversationId)) return { ok: false, error: `${name} is already running; use status to list processes or stop to end one.` };
 				const cap = procCapViolation(live.filter((t) => (t.input as ProcInput).conversationId === api.conversationId).length, live.length);
 				if (cap !== undefined) return { ok: false, error: cap };
-				const taskId = await tx.createTask(ProcRun, { name, command, notify: args.notify !== false, creator: deps.senderOf(api.conversationId as number) ?? "", ...(deps.viaOf?.(api.conversationId) === undefined ? {} : { creatorVia: deps.viaOf!(api.conversationId)! }), work: (await workIdentity(tx, api.conversationId)) ?? null, conversationId: api.conversationId as number }, { ownership: { kind: "conversation" }, background: true });
+				const work = (await workIdentity(tx, api.conversationId)) ?? null;
+				if (deps.isAllowed?.(creator, api.conversationId, via) === false) return { ok: false, error: "The creator no longer has access to this conversation." };
+				const taskId = await tx.createTask(ProcRun, { name, command, notify: args.notify !== false, creator, ...(via === undefined ? {} : { creatorVia: via }), work, conversationId: api.conversationId as number }, { ownership: { kind: "conversation" }, background: true });
 				return { ok: true, taskId: taskId as number };
 			}, context);
 			if (!created.ok) return text(created.error, true);
