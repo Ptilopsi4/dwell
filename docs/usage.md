@@ -14,13 +14,15 @@ Bot commands require user authorization. Telegram `/whoami` also works before au
 | `/newgoal` | Start a new work goal while retaining history, old records, and budgets | Thread owner, admins |
 | `/cancel` | Abort the current task | Thread owner, admins |
 | `/status` | List running tasks | Admins |
-| `/approve [minutes]` | Open your approval window for dangerous commands; resume a waiting command | Everyone, for themselves |
+| `/approve [minutes]` | Open your approval window for dangerous commands; resume a waiting command | Explicitly authorized users; group-only users require an admin |
 | `/deny` | Close your approval window and deny a waiting command; admins close all windows of the thread | Everyone |
-| `/allow <user> [admin]` | Add a member or admin | Admins |
-| `/disallow <user>` | Remove a user; the last admin cannot be removed | Admins |
-| `/allowchat [group ID]` (Telegram) | Enable a group immediately; omit its ID when sent in that group | Admins |
+| `/allow <user> [admin]` | Clear a block and grant explicit membership or admin access | Admins |
+| `/disallow <user>` | Block a user, overriding group grants; the last admin cannot be removed | Admins |
+| `/allowgroup` (Telegram) | Let members use the current group; its ID is detected automatically | Admins |
+| `/disallowgroup` (Telegram) | Disable the current group; no ID argument needed | Admins |
+| `/allowchat [group ID]` (Telegram) | Enable a group for explicitly authorized users; omit its ID in that group | Admins |
 | `/disallowchat [group ID]` (Telegram) | Close group input and later delivery; retain existing work | Admins |
-| `/chats` (Telegram) | List this bot's enabled groups | Admins |
+| `/chats` (Telegram) | List this bot's enabled groups and access modes | Admins |
 | `/whoami` | Show your platform user ID | Everyone |
 | `/help` | Show usage guidance | Everyone |
 | `/start` (Telegram) | Show startup guidance without calling the model | Authorized users |
@@ -34,7 +36,7 @@ Commands match the known command list exactly. Approval windows default to 10 mi
 
 A bash command is held when it matches `rm -rf`, remote `ssh`/`scp`/`rsync`, `curl` with data or a non-GET method, `wget --post`, global package installs (`npm install -g`, `apt install`, `pip install`), `docker`, `systemctl`, or `crontab`. `sudo` and commands that touch state files are refused outright. These checks are part of the [security boundaries](security.md).
 
-When a command is held, the person who triggered it can send `/approve`; this opens a window only for their dangerous commands in that thread. The trigger, thread owner, and admins can also approve with the original card/button. Sending `/approve` for another person's request only opens your own window and leaves that request pending. Command decisions update the original card when it remains available. Panel tasks send approval requests only to the panel operator in a direct message, never to the group.
+When a command is held for an explicitly authorized user, the person who triggered it can send `/approve`; this opens a window only for their dangerous commands in that thread. The trigger, thread owner, and admins can also approve with the original card/button. Sending `/approve` for another person's request only opens your own window and leaves that request pending. Telegram users with group-only access need a dwell admin to approve on the original card; they cannot open a window or approve a request, but can reject their own with `/deny`. Command decisions update the original card when it remains available. Panel tasks send approval requests only to the panel operator in a direct message, never to the group.
 
 The decision is saved before its continuation is submitted. Failed state writes leave the pending request and existing window unchanged. Saved decisions retry delivery at startup and with backoff using the same delivery ID; background continuations return through their reporting task. Replaying a decision keeps the original expiry and cannot extend an expired window. This recovery does not guarantee exactly-once external effects or durability through machine power loss.
 
@@ -63,23 +65,30 @@ Start a private chat and send `/whoami` to obtain your `tg:<numeric user ID>`. T
 
 Authorized users can send `/start` or `/help` for guidance. `/ask` without text shows how to submit a task; a photo or document attached to `/ask` still submits that attachment. These guidance replies do not call the model. Telegram's `/` suggestions require a command list registered through BotFather or `setMyCommands`; starting dwell does not register or overwrite the bot menu. Menu visibility does not grant command permission.
 
-Private chats accept text, photos, and documents from authorized users. Groups require both an enabled chat in the bot's persistent allowlist and an allowed sender. Keep group privacy mode enabled. Use a directed command such as `/ask@your_bot summarize this`, or reply to an actual message from this bot. A plain `@your_bot` mention does not start a task. `/whoami@your_bot` also shows the chat ID before the group is enabled. An unlisted group receives setup guidance without creating a conversation, downloading attachments, or calling a model. Channels, messages sent as a group/channel, and messages from bots are ignored.
+Private chats accept text, photos, and documents from explicitly authorized users. Groups must be enabled: allowlist mode requires an explicit user grant, while members mode accepts real users posting in that group unless blocked. Keep group privacy mode enabled. Use a directed command such as `/ask@your_bot summarize this`, or reply to an actual message from this bot. A plain `@your_bot` mention does not start a task. `/whoami@your_bot` also shows the chat ID before the group is enabled. An unlisted group receives setup guidance without creating a conversation, downloading attachments, or calling a model. Channels, messages sent as a group/channel, and messages from bots are ignored.
 
-A dwell admin can send `/allowchat@your_bot` in an unlisted group or use its Enable this group button. In a private chat, provide the negative numeric ID, for example `/allowchat -1001234567890`. `/disallowchat` closes new group input and later delivery operations immediately; an operation already sent cannot be recalled. Existing conversations, admitted runs, schedules, and processes remain, with their original cancellation controls. Enabling a group does not authorize its members. Group commands and buttons recheck the current dwell role; Telegram group administrators do not automatically receive it. Replayed control requests do not undo a later allowlist change.
+A dwell admin sends `/allowgroup@your_bot` in the target group to open member access, or presses its Allow group members button. The group ID comes from that message; private use redirects the admin to the target group. The bare `/allowgroup` works only when Telegram actually delivers it. With privacy mode enabled, use the qualified command or send it as a reply to this bot. `/allowchat@your_bot` selects strict allowlist mode instead; its existing private form accepts a negative ID, for example `/allowchat -1001234567890`. Old group records retain allowlist mode until explicitly changed. `/chats` shows the current modes.
+
+Group-only access grants no private-chat or administrative permission and does not add users to the global member list. Dangerous commands follow the [admin approval rule](#approving-dangerous-commands); explicit global members retain their existing approval rules. `/disallow tg:123456789` blocks a user even in member-enabled groups; `/allow` clears that block and grants global access.
+
+`/disallowgroup` disables the current group; `/disallowchat` also accepts an explicit ID. Disabling closes new group input and later delivery operations; a network operation already sent cannot be recalled. Schedules, background agents, managed processes, and approval continuations recheck the creator's current permission against the originating group before starting new work or returning a result. Blocking a creator or revoking their group grant prevents those later operations. Existing work, running children/processes, logs, and history remain, with their original cancellation controls. dwell does not track current Telegram membership or stop work automatically when a member leaves. Commands and buttons recheck the current dwell role; Telegram group administrators do not automatically receive it. Replayed controls do not undo later policy changes.
 
 ### Conversation routing and commands
 
 | Message | Task thread it goes to |
 |---|---|
 | Private message | Your current personal thread |
-| `/ask@your_bot text` in a regular group | Your current thread in that group |
-| `/ask@your_bot text` in a forum topic | The topic's shared thread |
-| Reply to a bot message with a known task anchor | That message's thread |
+| `/ask@your_bot text` in a members-mode group or forum topic | Your current thread for that bot, group, and topic, with your own working directory |
+| `/ask@your_bot text` in a strict-mode regular group | Your current thread in that group, with a shared group working directory |
+| `/ask@your_bot text` in a strict-mode forum topic | The topic's shared thread and group working directory |
+| Reply to your own isolated thread's known bot message | That thread, including an old thread retained after `/new` |
+| Reply to another member's thread or a legacy shared thread in members mode | Your own current thread, with a redirection notice |
+| Reply to a known bot message in an existing strict-mode shared thread | That message's thread |
 | Reply to a bot message whose anchor is no longer known | Your current thread, with a fallback notice |
 
-Group threads share a working directory and the [workspace writer rules](agent.md). Text received during a run steers it. Use bot suffixes for group commands, for example `/approve@your_bot 10` and `/cancel@your_bot`, or send the command as a reply to this bot.
+Members-mode threads separate each sender's routes and working directory, including within a forum topic. A thread keeps this actor scope after later group-mode changes. Inputs arriving while it runs wait for a later run, including panel input and background reports. Existing strict-mode shared threads retain their routing, shared directories, and in-run steering. All threads follow the [workspace writer rules](agent.md). Separate directories are not a hard tenant boundary; read access and other limits are described in [Security](security.md#access-and-shared-trust).
 
-Telegram `/new` creates a new default conversation. The old task thread stays accessible through replies and the panel. Dangerous-command requests use inline approval buttons with the same actor and thread permission checks as Feishu; `/approve` and `/deny` also work.
+Telegram `/new` creates a new default conversation and preserves the old thread and its scope. A new isolated thread reuses your working directory; your old thread stays accessible through replies and the panel. Use bot suffixes for group commands, for example `/cancel@your_bot`, or send the command as a reply to this bot. Dangerous-command requests use inline approval buttons and the [approval permissions](#approving-dangerous-commands) above.
 
 ### Reply updates and formatting
 

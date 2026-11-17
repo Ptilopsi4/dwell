@@ -315,6 +315,21 @@ const approvalFixture = () => {
 	return { pending, callback, permissions, entries: new Map([[approvalKey, pending]]) };
 };
 
+test("group-only approval admission carries the destination and requires an administrator even for the thread owner", () => {
+	const { callback, permissions, entries } = approvalFixture();
+	const seen: string[] = [];
+	const groupPolicy = {
+		...permissions,
+		allowed: (sender: string, actual: TelegramDestination) => { seen.push(`${sender}:${actual.chatId}`); return actual.botId === destination.botId && actual.chatId === destination.chatId; },
+		canApprove: (sender: string, actual: TelegramDestination, trigger: string) => sender === "tg:900" && actual.chatId === destination.chatId && trigger === "tg:300",
+	};
+	for (const senderId of ["tg:300", "tg:301", "tg:302"]) assert.equal(telegramApprovalMatch({ ...callback, senderId }, entries, groupPolicy, approvalNow), undefined);
+	assert.deepEqual(telegramApprovalMatch({ ...callback, senderId: "tg:900" }, entries, groupPolicy, approvalNow), { key: approvalKey, action: "approve", minutes: 10 });
+	assert.deepEqual(telegramApprovalMatch({ ...callback, data: telegramApprovalData(approvalId, "deny") }, entries, groupPolicy, approvalNow), { key: approvalKey, action: "deny", minutes: 10 });
+	assert.ok(seen.includes("tg:300:-200"));
+	assert.equal(telegramApprovalMatch(callback, entries, { ...groupPolicy, allowed: (sender) => sender !== "tg:300" }, approvalNow), undefined, "a revoked creator cannot be approved through a previously issued card");
+});
+
 test("Telegram approval buttons bind the opaque request to the actual authorized sender", () => {
 	const { pending, callback, permissions, entries } = approvalFixture();
 	for (const [action, minutes] of [["approve", 10], ["approve", 30], ["deny", 10]] as const) {

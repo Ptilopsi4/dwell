@@ -79,7 +79,9 @@ export function normalizeTelegramUpdate(update: TelegramUpdate, identity: Telegr
 	const directed = command?.[2]?.toLowerCase() === identity.username.toLowerCase();
 	const repliesToBot = message.reply_to_message?.from?.is_bot === true
 		&& String(message.reply_to_message.from.id) === identity.id;
-	if (message.chat.type !== "private" && !directed && !repliesToBot) return null;
+	// 本 bot 最后在群里发言时，Telegram 可能投递不带 bot 后缀的命令。
+	const groupControl = command?.[2] === undefined && ["allowgroup", "disallowgroup"].includes(command?.[1]?.toLowerCase() ?? "");
+	if (message.chat.type !== "private" && !directed && !repliesToBot && !groupControl) return null;
 	const destination = destinationFor(message, identity);
 	const resources: NormalizedMessage["resources"] = [];
 	if (message.photo?.length) resources.push({ type: "image", fileKey: message.photo.at(-1)!.file_id });
@@ -98,7 +100,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate, identity: Telegr
 		chatId: telegramChatKey(identity.id, message.chat.id), chatType: message.chat.type === "private" ? "p2p" : "group",
 		messageId: telegramMessageKey(destination, message.message_id), senderId: `tg:${message.from.id}`,
 		senderName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" ") || message.from.username,
-		content, rawContentType, resources, mentions: [], mentionAll: false, mentionedBot: directed || repliesToBot,
+		content, rawContentType, resources, mentions: [], mentionAll: false, mentionedBot: directed || repliesToBot || groupControl,
 		...(destination.threadId !== undefined ? { threadId: destination.threadId } : {}),
 		...(message.reply_to_message ? { replyToMessageId: telegramMessageKey(destination, message.reply_to_message.message_id) } : {}),
 		createTime: message.date * 1000,

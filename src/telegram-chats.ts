@@ -3,7 +3,8 @@ import type { TelegramDestination } from "./pipeline.ts";
 import { stateFile, writeStateJson } from "./state.ts";
 
 const REQUEST_LIMIT = 10_000;
-type SavedBot = { chats: string[]; requests: string[] };
+export type TelegramChatAccess = "allowlist" | "members";
+type SavedBot = { chats: string[]; memberChats?: string[]; requests: string[] };
 type SavedChats = { version: 1; bots: Record<string, SavedBot> };
 
 export function isTelegramGroupId(id: string): boolean {
@@ -16,6 +17,8 @@ function savedChats(value: unknown): SavedChats {
 	for (const [id, bot] of Object.entries(value.bots)) {
 		if (!/^[1-9]\d*$/.test(id) || bot === null || typeof bot !== "object"
 			|| !Array.isArray(bot.chats) || !bot.chats.every((chat: unknown) => typeof chat === "string" && isTelegramGroupId(chat))
+			|| ("memberChats" in bot && (!Array.isArray(bot.memberChats)
+				|| !bot.memberChats.every((chat: unknown) => typeof chat === "string" && isTelegramGroupId(chat) && bot.chats.includes(chat))))
 			|| !Array.isArray(bot.requests) || !bot.requests.every((request: unknown) => typeof request === "string" && request.length > 0)) throw new Error("Telegram 群白名单状态格式无效");
 	}
 	return value as SavedChats;
@@ -56,20 +59,34 @@ export class TelegramChats {
 			&& (!destination.chatId.startsWith("-") || this.#saved.bots[this.botId]!.chats.includes(destination.chatId));
 	}
 
+	accessMode(destination: TelegramDestination): TelegramChatAccess | undefined {
+		if (!this.#loaded || destination.botId !== this.botId || !isTelegramGroupId(destination.chatId)) return undefined;
+		const bot = this.#saved.bots[this.botId]!;
+		if (!bot.chats.includes(destination.chatId)) return undefined;
+		return bot.memberChats?.includes(destination.chatId) ? "members" : "allowlist";
+	}
+
 	list(): string[] {
 		return [...(this.#saved.bots[this.botId]?.chats ?? [])];
 	}
 
-	change(chatId: string, allowed: boolean, requestId: string): Promise<"changed" | "unchanged" | "replayed"> {
+	change(chatId: string, allowed: boolean, requestId: string, accessMode: TelegramChatAccess = "allowlist"): Promise<"changed" | "unchanged" | "replayed"> {
 		const run = async (): Promise<"changed" | "unchanged" | "replayed"> => {
 			if (!this.#loaded) throw new Error("Telegram 群白名单尚未加载");
-			if (!isTelegramGroupId(chatId) || requestId.length === 0) throw new Error("Telegram 群白名单命令参数无效");
+			if (!isTelegramGroupId(chatId) || requestId.length === 0 || (accessMode !== "allowlist" && accessMode !== "members")) throw new Error("Telegram 群白名单命令参数无效");
 			const previous = this.#saved.bots[this.botId]!;
 			if (previous.requests.includes(requestId)) return "replayed";
 			const chats = new Set(previous.chats);
-			const changed = chats.has(chatId) !== allowed;
+			const memberChats = new Set(previous.memberChats);
+			const previousAccess = memberChats.has(chatId) ? "members" : "allowlist";
+			const changed = chats.has(chatId) !== allowed || (allowed && previousAccess !== accessMode);
 			if (allowed) chats.add(chatId); else chats.delete(chatId);
-			const bot = { chats: [...chats], requests: [...previous.requests, requestId].slice(-REQUEST_LIMIT) };
+			if (allowed && accessMode === "members") memberChats.add(chatId); else memberChats.delete(chatId);
+			const bot: SavedBot = {
+				chats: [...chats],
+				...(memberChats.size > 0 ? { memberChats: [...memberChats] } : {}),
+				requests: [...previous.requests, requestId].slice(-REQUEST_LIMIT),
+			};
 			const saved: SavedChats = { version: 1, bots: { ...this.#saved.bots, [this.botId]: bot } };
 			// Publish the policy and its receipt only after the atomic replacement succeeds.
 			await writeStateJson(this.#file, saved);

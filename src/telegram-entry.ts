@@ -259,14 +259,15 @@ export function telegramApprovalData(requestId: string, action: "approve" | "den
 export function telegramApprovalMatch(
 	callback: TelegramCallback,
 	pending: ReadonlyMap<string, PendingApproval>,
-	permissions: { allowed: (sender: string) => boolean; admin: (sender: string) => boolean; owner: (scope: number) => string | undefined; chatAllowed: (destination: TelegramDestination) => boolean },
+	permissions: { allowed: (sender: string, destination: TelegramDestination, via?: RunVia) => boolean; canApprove?: (sender: string, destination: TelegramDestination, trigger: string) => boolean; admin: (sender: string) => boolean; owner: (scope: number) => string | undefined; chatAllowed: (destination: TelegramDestination) => boolean },
 	now = Date.now(),
 ): { key: string; action: "approve" | "deny"; minutes: number } | undefined {
 	const parsed = /^a:([a-zA-Z0-9-]+):(10|30|d)$/.exec(callback.data);
-	if (parsed === null || !permissions.allowed(callback.senderId) || !permissions.chatAllowed(callback.destination)) return undefined;
+	if (parsed === null || !permissions.allowed(callback.senderId, callback.destination, "telegram") || !permissions.chatAllowed(callback.destination)) return undefined;
 	for (const [key, value] of pending) {
 		if (value.requestId !== parsed[1] || value.cardMessageId !== callback.messageId || value.cardDestination?.kind !== "telegram") continue;
 		if (!sameDestination(value.cardDestination, callback.destination)) return undefined;
+		if (parsed[2] !== "d" && (!permissions.allowed(value.trigger, callback.destination, value.via) || permissions.canApprove?.(callback.senderId, callback.destination, value.trigger) === false)) return undefined;
 		if (value.createdAt === undefined || now - value.createdAt > 24 * 3600_000 || now < value.createdAt) return undefined;
 		const scope = Number(key.split(":")[0]);
 		if (callback.senderId !== value.trigger && callback.senderId !== permissions.owner(scope) && !permissions.admin(callback.senderId)) return undefined;

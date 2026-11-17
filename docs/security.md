@@ -6,9 +6,13 @@ From hardest to softest, the layers are container/system isolation, the bash san
 
 ## Access and shared trust
 
-User allowlists use Feishu `ou_...` IDs and Telegram `tg:<numeric user ID>` identities. Telegram groups also require `DWELL_TELEGRAM_CHATS`. Rejected users can use Telegram `/whoami` to obtain their ID, but cannot submit tasks. See [Configuration](configuration.md) for allowlist settings and [Usage](usage.md) for chat commands.
+Global roles use Feishu `ou_...` IDs and Telegram `tg:<numeric user ID>` identities. Telegram private chats require an explicit role. Enabled groups use either strict mode, which also requires that role, or members mode, which admits real users posting in that group. A persisted user block overrides either grant. Member access creates no global role and grants no private-chat or administrative access. Group-only dangerous commands require a dwell admin's approval on the original card; explicit global members keep their existing approval permissions. Rejected users can use Telegram `/whoami` to obtain their ID, but cannot submit tasks. See [Configuration](configuration.md) for persisted policy and [Usage](usage.md) for commands.
 
-A group chat is a shared trust zone. Members share its working directory, and anyone in the group can join another member's thread by replying in it and see what that thread has handled. Use direct messages for sensitive content.
+Feishu groups and existing Telegram strict-mode threads share their group working directory, and members can join another member's thread by replying in it. Telegram members mode gives each bot/group/topic/sender its own route and working directory. Replies to another member's thread or an old shared thread redirect to the sender's own line. Actor scope remains attached to an isolated line after a mode change or `/new`; `/new` reuses that person's directory. Group messages and bot replies remain visible to the group, and the trusted panel can access all conversations.
+
+Actor-scoped lines and their background children restrict file-tool reads, writes, and directory listings to their working directory, using resolved paths. That restriction persists after group-mode changes and restart. Existing strict-mode and other shared lines retain their current file policy. Separate routes and directories do not provide hard tenant isolation. bash isolation depends on the sandbox, temporary storage is shared, and network access is unrestricted. Use an appropriate host/container boundary before accepting mutually untrusted workloads. Use direct messages for content that must stay out of the group.
+
+New scheduled firings, background inputs and reports, managed-process starts and reports, and approval continuations recheck the durable creator and originating group against current permissions. Revocation does not kill an already running child or process, recall an external operation, or remove stored files and history. dwell does not query live Telegram membership, so leaving a group does not itself revoke access or stop existing work.
 
 ## Credentials
 
@@ -40,7 +44,7 @@ The sandbox does not isolate the network. The panel's local-source check blocks 
 
 ## File tools and uploads
 
-`write` and `edit` can write only the conversation's working directory and the system temp directory. `read` cannot read the state directory, application directory, database, or `/proc`; other system paths are readable. A fixed POSIX helper checks directory identities and holds the final file descriptor for byte access. It rejects multiply linked files and path changes, with one helper-process startup per file operation.
+Ordinary lines limit `write` and `edit` to the conversation's working directory and the system temp directory. `read` cannot read the state directory, application directory, database, or `/proc`. Actor-scoped Telegram lines and their children restrict all file-tool access, including writes and directory listings, to their own working directory; other lines retain access to nonprotected system paths. A fixed POSIX helper checks directory identities and holds the final file descriptor for byte access. It rejects multiply linked files and path changes, with one helper-process startup per file operation.
 
 Guarded file access is unavailable on Windows. Rename, removal, and watch are unsupported by this backend. Shell access follows the separate sandbox and command rules.
 

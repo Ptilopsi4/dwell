@@ -47,7 +47,8 @@ test("main Telegram host guidance uses the real username and preserves admission
 		}
 		assert.match(String(sentFor(9).body.text), /管理员命令：[\s\S]*\/status：[\s\S]*\/allow tg:用户ID \[admin\]、\/disallow tg:用户ID/);
 		assert.match(String(sentFor(9).body.text), /\/allowchat \[负数群ID\]、\/disallowchat \[负数群ID\]/);
-		assert.match(String(sentFor(9).body.text), /\/chats：查看当前 bot 已启用的群/);
+		assert.match(String(sentFor(9).body.text), /\/allowgroup、\/disallowgroup：在目标群开放全体成员或停用本群，无需填写 ID/);
+		assert.match(String(sentFor(9).body.text), /\/chats：查看各群的开放模式/);
 		for (const id of [7, 10]) assert.doesNotMatch(String(sentFor(id).body.text), /\/status|\/allow|\/disallow/);
 		for (const id of [8, 11]) {
 			assert.match(String(sentFor(id).body.text), /^请在命令后写下任务，例如：\/ask@AcceptanceBot/);

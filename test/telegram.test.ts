@@ -15,6 +15,16 @@ function update(text = "hello", overrides: Record<string, unknown> = {}): Telegr
 	return { update_id: 9, message: { message_id: 7, date: 10, chat: { id: 42, type: "private" },
 		from: { id: 55, first_name: "Test" }, text, ...overrides } } as TelegramUpdate;
 }
+
+test("delivered unqualified group controls identify the current group without admitting ordinary chat", () => {
+	for (const command of ["/allowgroup", "/disallowgroup", "/allowgroup@DwellTestBot"]) {
+		const normalized = normalizeTelegramUpdate(update(command, { chat: { id: -400, type: "supergroup" } }), identity);
+		assert.equal(normalized?.destination?.kind, "telegram");
+		assert.equal(normalized?.chatId, "tg:123:-400");
+		assert.equal(normalized?.mentionedBot, true);
+	}
+	for (const text of ["hello", "/allowgroup@AnotherBot", "@DwellTestBot hello"]) assert.equal(normalizeTelegramUpdate(update(text, { chat: { id: -400, type: "supergroup" } }), identity), null);
+});
 function ok(result: unknown): Response { return Response.json({ ok: true, result }); }
 function failure(code: number, retryAfter?: number): Response {
 	return Response.json({ ok: false, error_code: code, description: `secret ${token}`,

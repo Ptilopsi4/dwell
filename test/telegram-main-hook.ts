@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Server } from "node:http";
 import { TelegramInbox } from "../src/telegram-entry.ts";
+import { Harness } from "@earendil-works/pi-durable";
 
 export type JsonRecord = Record<string, unknown>;
 export type ModelReply = ({ text: string } | { tool: string; arguments: JsonRecord } | { error: string; status: number }) & { wait?: string; match?: string; partial?: { text: string; wait: string } };
@@ -20,6 +21,24 @@ const deletedReplies = new Set<number>();
 const rejectedCallbacks = new Set<string>();
 const released = new Set<string>();
 const waitingModels = new Map<string, () => void>();
+let holdAttribution = false;
+const openHarness = Harness.open;
+Harness.open = async function (storage, options, context) {
+	const harness = await openHarness(storage, options, context);
+	const taskGraph = harness.taskGraph;
+	harness.taskGraph = async (context) => {
+		const graph = await taskGraph.call(harness, context);
+		if (holdAttribution) {
+			holdAttribution = false;
+			await new Promise<void>((resolve) => {
+				waitingModels.set("attribution", resolve);
+				report({ kind: "checkpoint", method: "attribution.waiting", body: {} });
+			});
+		}
+		return graph;
+	};
+	return harness;
+};
 let waitingUpdates: ((updates: unknown[]) => void) | undefined;
 const counterFile = process.env.DWELL_TEST_TRANSPORT_STATE;
 const counters: { messageId: number; responseId: number } = counterFile !== undefined && existsSync(counterFile)
@@ -64,6 +83,7 @@ TelegramInbox.prototype.admitted = async function (id, submissionId) {
 const prepared = TelegramInbox.prototype.prepared;
 TelegramInbox.prototype.prepared = async function (id, content) {
 	await prepared.call(this, id, content);
+	if (id === process.env.DWELL_TEST_HOLD_ATTRIBUTION) holdAttribution = true;
 	report({ kind: "checkpoint", method: "telegram.prepared", body: { id } });
 };
 const enqueue = TelegramInbox.prototype.enqueue;
@@ -199,6 +219,7 @@ globalThis.fetch = async (input, init) => {
 			report({ kind: "telegram", method, body, ...(sent === undefined ? {} : { messageId: sent }) });
 			if (method === "sendChatAction" && process.env.DWELL_TEST_ACTIVITY_FAILURE === "1") return Response.json({ ok: false, error_code: 401, description: "synthetic-private-action-error" }, { status: 401 });
 			if (method === "answerCallbackQuery" && rejectedCallbacks.has(String(body.callback_query_id))) return Response.json({ ok: false, error_code: 400, description: "Synthetic expired callback" }, { status: 400 });
+			if (method === "answerCallbackQuery" && body.text === "已批准" && process.env.DWELL_TEST_HOLD_ATTRIBUTION === "approval") holdAttribution = true;
 			switch (method) {
 				case "getMe": return ok({ id: 100, is_bot: true, username: "AcceptanceBot", first_name: "Acceptance" });
 				case "getWebhookInfo": return ok({ url: "" });

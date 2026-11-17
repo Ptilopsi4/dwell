@@ -82,11 +82,11 @@ Configure either bot or both. Telegram-only needs no Feishu credentials. See [Bo
 | `DWELL_ADMINS` | Admin IDs, comma-separated: Feishu `ou_...`, Telegram `tg:<numeric user ID>` |
 | `DWELL_ALLOW` | Member IDs in the same format, comma-separated |
 
-`DWELL_TELEGRAM_CHATS` seeds a bot's groups only when it has no record in `$DWELL_STATE/telegram-chats.json`. Afterwards that bot's persisted list is authoritative, including an empty list for private chats only. Use admin commands `/allowchat`, `/disallowchat`, and `/chats` to manage it without restarting. Changing the environment does not restore a revoked group. An unreadable or invalid group state prevents startup. Allowed groups still require user permission.
+`DWELL_TELEGRAM_CHATS` seeds strict allowlist groups only when the bot has no record in `$DWELL_STATE/telegram-chats.json`. Afterwards that bot's persisted list is authoritative, including an empty list for private chats only. `/allowgroup` opens member access in the current group; `/allowchat` selects explicit-user access. `/disallowgroup`, `/disallowchat`, and `/chats` manage the policy without restarting. Optional `memberChats` records member-enabled groups; old records without it remain strict. Changing the environment does not restore a revoked group. Unreadable or invalid group state prevents startup.
 
-`DWELL_ADMINS` and `DWELL_ALLOW` seed `state/users.json` once, when the file does not exist. After that, `users.json` is the source of truth. Manage it with `/allow`, `/disallow`, or the panel. For example, `/allow tg:123456789 admin` adds a Telegram admin and `/disallow tg:123456789` removes that user. Existing Feishu IDs stay unchanged.
+`DWELL_ADMINS` and `DWELL_ALLOW` seed `state/users.json` only when it does not exist. Afterwards that file is authoritative. `/allow tg:123456789 admin` grants a Telegram admin and clears any block; `/disallow tg:123456789` removes explicit roles and persists a block that overrides group access. The panel uses the same operations. Old files without `blocked` load with an empty block list. Invalid or unreadable role state prevents startup without replacing it with environment seeds. Existing Feishu IDs stay unchanged.
 
-An empty user allowlist denies task execution. Telegram `/whoami` remains available to find the ID to authorize.
+An empty global allowlist denies private and strict-group tasks; member-enabled groups use their own scoped grant. Telegram `/whoami` remains available to find the ID to authorize.
 
 ## Panel settings
 

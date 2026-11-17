@@ -37,7 +37,7 @@ test("main Telegram administrators manage group admission before routing, attach
 		assert.equal(sends.find((event) => replyId(event) === 2)!.body.text, "群白名单管理仅 dwell 管理员可用。");
 		assert.match(String(sends.find((event) => replyId(event) === 3)!.body.text), /私聊必须明确指定/);
 		assert.match(String(sends.find((event) => replyId(event) === 6)!.body.text), /^已启用群 -301/);
-		assert.equal(sends.find((event) => replyId(event) === 7)!.body.text, "当前 bot 已启用的群：\n-300\n-301");
+		assert.equal(sends.find((event) => replyId(event) === 7)!.body.text, "当前 bot 已启用的群：\n-300 · 仅授权用户\n-301 · 仅授权用户");
 		assert.equal(f.requests("telegram", "getFile").length, 0);
 		assert.equal(f.requests("model").length, 0);
 		await assert.rejects(readFile(join(f.directory, "state", "sessions.json")), { code: "ENOENT" });
@@ -70,7 +70,7 @@ test("main Telegram group buttons use current dwell roles and persist effects ev
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([message(30, "/whoami@AcceptanceBot", group)]);
 		const card = await f.until((event) => event.method === "sendMessage" && event.body.reply_markup !== undefined);
-		assert.deepEqual(card.body.reply_markup, { inline_keyboard: [[{ text: "启用本群", callback_data: "dwell:allowchat" }]] });
+		assert.deepEqual(card.body.reply_markup, { inline_keyboard: [[{ text: "允许本群成员使用", callback_data: "dwell:allowgroup" }], [{ text: "仅允许已授权用户", callback_data: "dwell:allowchat" }]] });
 		f.rejectCallbacks(["original-grant"]);
 		f.updates([
 			callback(31, 201, "member", card), callback(32, 999, "unknown", card),

@@ -17,6 +17,7 @@ import { connectChannel, downloadMessageResource, matchMention, type CardActionE
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
 import { TelegramChats, isTelegramGroupId } from "./telegram-chats.ts";
+import { creatorVia } from "./ext/approval.ts";
 import { createTelegramStreamPresenter } from "./telegram-stream.ts";
 import { formatTelegramText } from "./telegram-format.ts";
 import { TelegramInbox, TelegramInputWorkers, telegramApprovalData, telegramApprovalMatch, type TelegramCommandReceipt, type TelegramInputReceipt } from "./telegram-entry.ts";
@@ -112,10 +113,12 @@ async function main(): Promise<void> {
 		getHarness: () => harness,
 		senderOf: (id) => runSender.get(id),
 		viaOf: (id) => runVia.get(id),
-		isAllowed: (id) => users.isAllowed(id),
-		onCreatorRevoked: (input) => console.error(`[dwell] 定时任务 ${input.id} 已终止：创建者 ${input.creator} 不在白名单`),
+		isAllowed: conversationActorAllowed,
+		onCreatorRevoked: (input) => console.error(`[dwell] 定时任务 ${input.id} 已终止：创建者 ${input.creator} 已无当前入口的使用权限`),
 	});
 	const backgroundExt = makeBackgroundExtension({
+		isAllowed: conversationActorAllowed,
+		inputMode: conversationInputMode,
 		getHarness: () => harness,
 		budgetStopReason: async (id, budgetId) => runtimeBudgets(harness)?.stopReason(id, budgetId),
 		attribute: attributeRun,
@@ -129,6 +132,7 @@ async function main(): Promise<void> {
 		forbidden: () => [scheduleExt, backgroundExt, procExt],
 	});
 	const procExt = makeProcExtension({
+		isAllowed: conversationActorAllowed,
 		attribute: attributeRun,
 		onFired: onAutonomousRun,
 		getHarness: () => harness,
@@ -139,6 +143,8 @@ async function main(): Promise<void> {
 	});
 	// 审批续跑后台子会话的投递器：在父线上建 Reporter，结果按 followUp 回父线
 	backgroundDeliverer = makeBackgroundDeliverer({
+		isAllowed: conversationActorAllowed,
+		inputMode: conversationInputMode,
 		budgetStopReason: async (id, budgetId) => runtimeBudgets(harness)?.stopReason(id, budgetId),
 		attribute: attributeRun,
 		onFired: onAutonomousRun,
@@ -176,7 +182,10 @@ async function main(): Promise<void> {
 		scheduleExt,
 		backgroundExt,
 		procExt,
-	], onReport);
+	], onReport,
+		(_conversationId, sender, via) => users.isAllowed(sender) || (via === "panel" && sender === panelUser),
+		(id) => sessions?.isActorScoped(scopeOf(id)) === true,
+	);
 	uploads = await Uploads.open(resolve(DATA_DIR, "work"), () => sandboxState);
 	await uploads.register(DEFAULT_CWD);
 	sessions = new Sessions(harness, (cwd) => uploads.register(cwd));
@@ -197,7 +206,7 @@ async function main(): Promise<void> {
 	console.log(`[dwell] 模型 ${MODEL.provider}/${MODEL.modelId}${realigned > 0 ? `（${realigned} 个会话已切换到该模型）` : ""}`);
 	await users.load();
 	if (users.list().length === 0) {
-		console.error("[dwell] 白名单为空，dwell 将拒绝所有消息（用 /allow 添加或配置 DWELL_ALLOW/DWELL_ADMINS）");
+		console.error("[dwell] 全局用户名单为空，私聊与逐人授权群将拒绝任务；群成员开放仍按群策略检查（首次启动可配置 DWELL_ALLOW/DWELL_ADMINS）");
 	}
 
 	setApprovalCallback((conversationId, sender, command, match) => {
@@ -334,7 +343,7 @@ async function setRunAttributionIfIdle(conversationId: number, sender: string, v
 }
 
 /** 会话路由：私聊 chat 级 / 群平消息 per-sender / 话题 per-thread / replyTo 跟随。 */
-async function route(msg: NormalizedMessage): Promise<{ conversation: Conversation; degraded: boolean } | null> {
+async function route(msg: NormalizedMessage): Promise<{ conversation: Conversation; degraded: boolean; isolated?: boolean } | null> {
 	const destination = messageDestination(msg);
 	if (msg.platform === "telegram" && msg.requestId !== undefined) {
 		const receipt = await telegramInbox.input(msg.requestId) ?? await telegramInbox.command(msg.requestId);
@@ -344,6 +353,7 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 			return { conversation, degraded: false };
 		}
 	}
+	const members = destination.kind === "telegram" && msg.chatType === "group" && telegramChats?.accessMode(destination) === "members";
 	// replyTo 跟随（优先级最高，群聊/私聊通用）
 	if (msg.replyToMessageId !== undefined) {
 		const target = sessions.follow(msg.replyToMessageId);
@@ -351,12 +361,18 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 			const conversation = await sessions.byConversation(target);
 			const previousDestination = sessions.destinationOf(target);
 			const panelReply = destination.kind === "telegram" && msg.chatType === "p2p" && msg.senderId === panelUser && previousDestination.kind === "panel";
-			if (conversation !== undefined && (msg.platform !== "telegram" || sameDestination(destination, previousDestination) || panelReply)) return { conversation, degraded: false };
+			if (conversation !== undefined && (msg.platform !== "telegram" || sameDestination(destination, previousDestination) || panelReply)) {
+				if (members || sessions.isActorScoped(target)) {
+					if (sessions.isActorScoped(target) && sessions.ownerOf(target) === msg.senderId) return { conversation, degraded: false };
+					return { conversation: await sessions.forTelegram(msg, undefined, true), degraded: false, isolated: true };
+				}
+				return { conversation, degraded: false };
+			}
 		}
 		// 未命中（未记录或已被上限淘汰）——降级到自己的线，由调用方显式提示
 	}
 	const fb = fallbackRoute(msg);
-	if (msg.platform === "telegram") return { conversation: await sessions.forTelegram(msg), degraded: fb.degraded };
+	if (msg.platform === "telegram") return { conversation: await sessions.forTelegram(msg, undefined, members), degraded: fb.degraded };
 	switch (fb.kind) {
 		case "direct":
 			return { conversation: await sessions.forDirect(msg.chatId, msg.senderId), degraded: fb.degraded };
@@ -379,8 +395,8 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 			if (telegram !== undefined && destination.botId === telegram.identity.id && msg.chatType === "group") {
 				try {
 					const admin = users.isAdmin(msg.senderId);
-					const instruction = admin ? `你可点击“启用本群”，或发送 /allowchat@${telegram.identity.username}。` : "请让 dwell 管理员启用这个群。";
-					await telegram.sendControl(destination, `这个群尚未启用，暂时不能在这里执行任务。\n\n聊天 ID：${destination.chatId}\n你的 ID：${msg.senderId}\n\n${instruction}启用后，已授权成员才能提交任务。\n使用 /ask@${telegram.identity.username} 内容，或回复我的消息。`, { replyTo: msg.messageId, ...(admin ? { buttons: [[{ text: "启用本群", data: "dwell:allowchat" }]] } : {}) });
+					const instruction = admin ? `你可点击“允许本群成员使用”，或在本群发送 /allowgroup@${telegram.identity.username}。` : "请让 dwell 管理员在本群发送 /allowgroup，开放群成员使用。";
+					await telegram.sendControl(destination, `这个群尚未启用，暂时不能在这里执行任务。\n\n聊天 ID：${destination.chatId}\n你的 ID：${msg.senderId}\n\n${instruction}\n使用 /ask@${telegram.identity.username} 内容，或回复我的消息。`, { replyTo: msg.messageId, ...(admin ? { buttons: [[{ text: "允许本群成员使用", data: "dwell:allowgroup" }], [{ text: "仅允许已授权用户", data: "dwell:allowchat" }]] } : {}) });
 				} catch (error) { console.error("[dwell] Telegram 群接入提示未能送达:", error instanceof TelegramError ? error.message : "发送失败"); }
 			}
 			return;
@@ -389,7 +405,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 			await replyTo(target, `你的 ID：${msg.senderId}；聊天 ID：${destination.kind === "telegram" ? destination.chatId : "?"}`).catch((error: unknown) => console.error("[dwell] 身份回复失败:", error));
 			return;
 		}
-		if (!users.isAllowed(msg.senderId)) {
+		if (!actorAllowed(msg.senderId, destination, msg.platform === "telegram" ? "telegram" : "feishu")) {
 			await replyTo(target, "未授权使用，请联系管理员开通。").catch((error: unknown) => console.error("[dwell] 准入提示失败:", error));
 			return;
 		}
@@ -407,13 +423,15 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 
 		const routed = await route(msg);
 		if (routed === null) return;
-		const { conversation, degraded } = routed;
+		const { conversation, degraded, isolated } = routed;
 		sessions.touchActivity(conversation.id);
 		// 归档只是 panel 的整理动作；飞书侧有新消息说明这条线又活了
 		if (sessions.isArchived(conversation.id)) await sessions.setArchived(conversation.id, false);
 		await sessions.anchor(msg.messageId, conversation.id);
 
-		if (degraded) {
+		if (isolated) {
+			await replyNotice(target, "本群按成员使用独立任务线，已转到你自己的任务线；回复你自己的 bot 消息可继续。", conversation);
+		} else if (degraded) {
 			await replyNotice(target, "未找到引用的任务线，已在你当前线上继续。", conversation);
 		}
 
@@ -486,6 +504,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage, authorityVia?: RunVia) {
 	const via = msg.platform ?? "feishu";
 	const authority = authorityVia ?? (sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : via);
+	if (!conversationActorAllowed(msg.senderId, conversation.id, authority)) throw new Error("输入提交前使用权限已撤销，未启动模型。");
 	return conversation.submit(
 		{
 			type: "input",
@@ -493,7 +512,7 @@ function submitInput(conversation: Conversation, content: string, msg: Normalize
 			// transcript 记录 sender（审计/分账基础；model 仍只看 content）
 			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }) } },
 			requestId: msg.requestId ?? msg.messageId,
-			whenBusy: "steer",
+			whenBusy: conversationInputMode(conversation.id),
 		},
 		BACKGROUND_CONTEXT,
 	);
@@ -910,6 +929,27 @@ function telegramChatAllowed(destination: TelegramDestination): boolean {
 		&& telegramChats?.allows(destination) === true;
 }
 
+function actorAllowed(sender: string, destination: ConversationDestination, via: RunVia = destination.kind): boolean {
+	if (users.isBlocked(sender)) return false;
+	if (destination.kind === "telegram" && !telegramChatAllowed(destination)) return false;
+	if (via === "panel" && sender === panelUser) return true;
+	if (users.isAllowed(sender)) return true;
+	return via === "telegram" && destination.kind === "telegram" && /^tg:\d+$/.test(sender)
+		&& telegramChats?.accessMode(destination) === "members";
+}
+
+function conversationActorAllowed(sender: string, conversationId: number, via?: RunVia): boolean {
+	if (sessions === undefined) return false;
+	const scope = scopeOf(conversationId);
+	if (!actorAllowed(sender, sessions.destinationOf(scope), creatorVia(sender, via))) return false;
+	return users.isAllowed(sender) || (via === "panel" && sender === panelUser) || (sessions.isActorScoped(scope) && sessions.ownerOf(scope as ConversationId) === sender);
+}
+
+function conversationInputMode(conversationId: number): "steer" | "followUp" {
+	// pi-durable 可能将 steer 与 followUp 合并为同一轮；隔离线统一输入模式，避免混入其他操作者。
+	return sessions.isActorScoped(scopeOf(conversationId)) ? "followUp" : "steer";
+}
+
 async function telegramControlReply(destination: TelegramDestination, text: string, replyTo?: string): Promise<void> {
 	if (telegram === undefined || destination.botId !== telegram.identity.id) return;
 	try { await telegram.sendControl(destination, text, { replyTo }); }
@@ -919,7 +959,7 @@ async function telegramControlReply(destination: TelegramDestination, text: stri
 async function handleTelegramChatCommand(msg: NormalizedMessage, destination: TelegramDestination): Promise<boolean> {
 	const parts = msg.content.trim().split(/\s+/);
 	const command = parts[0]!;
-	if (!["/allowchat", "/disallowchat", "/chats"].includes(command)) return false;
+	if (!["/allowgroup", "/disallowgroup", "/allowchat", "/disallowchat", "/chats"].includes(command)) return false;
 	if (telegram === undefined || telegramChats === undefined || destination.botId !== telegram.identity.id) return true;
 	if (!users.isAdmin(msg.senderId)) {
 		await telegramControlReply(destination, "群白名单管理仅 dwell 管理员可用。", msg.messageId);
@@ -929,18 +969,26 @@ async function handleTelegramChatCommand(msg: NormalizedMessage, destination: Te
 		if (parts.length !== 1) await telegramControlReply(destination, "用法：/chats，查看当前 bot 已启用的群。", msg.messageId);
 		else {
 			const chats = telegramChats.list();
-			await telegramControlReply(destination, chats.length ? `当前 bot 已启用的群：\n${chats.join("\n")}` : "当前 bot 尚未启用任何群。", msg.messageId);
+			const labels = chats.map((chatId) => `${chatId} · ${telegramChats!.accessMode({ ...destination, chatId, threadId: undefined }) === "members" ? "群成员可用" : "仅授权用户"}`);
+			await telegramControlReply(destination, chats.length ? `当前 bot 已启用的群：\n${labels.join("\n")}` : "当前 bot 尚未启用任何群。", msg.messageId);
 		}
 		return true;
 	}
-	const chatId = parts[1] ?? (msg.chatType === "group" ? destination.chatId : "");
+	const groupCommand = command === "/allowgroup" || command === "/disallowgroup";
+	if (groupCommand && (msg.chatType !== "group" || parts.length !== 1)) {
+		await telegramControlReply(destination, `请在目标群发送 ${command}@${telegram.identity.username}，我会自动识别群，无需填写 ID。`, msg.messageId);
+		return true;
+	}
+	const chatId = groupCommand ? destination.chatId : parts[1] ?? (msg.chatType === "group" ? destination.chatId : "");
 	if (parts.length > 2 || !isTelegramGroupId(chatId)) {
 		await telegramControlReply(destination, `用法：${command} 负数群ID。群内可省略群ID，私聊必须明确指定。`, msg.messageId);
 		return true;
 	}
-	const result = await telegramChats.change(chatId, command === "/allowchat", msg.requestId ?? msg.messageId);
+	const allowed = command === "/allowchat" || command === "/allowgroup";
+	const result = await telegramChats.change(chatId, allowed, msg.requestId ?? msg.messageId, command === "/allowgroup" ? "members" : "allowlist");
 	const text = result === "replayed" ? "这条群白名单命令已处理，未重复更改群状态。"
-		: command === "/allowchat" ? `已启用群 ${chatId}，已授权成员现在可以提交任务。`
+		: command === "/allowgroup" ? `已开放本群成员使用（群 ${chatId}）。\n无需逐个授权；请用 /ask@${telegram.identity.username} 内容，或回复我的消息。\n群授权仅在本群有效，危险操作需 dwell 管理员审批。`
+		: command === "/allowchat" ? `已启用群 ${chatId}，仅已授权用户可以提交任务。`
 		: `已停用群 ${chatId}，停止接收新输入与后续投递。既有会话、任务、定时和进程保留。`;
 	await telegramControlReply(destination, text, msg.messageId);
 	return true;
@@ -971,7 +1019,7 @@ async function withTelegramAdmission<T>(id: number, action: () => Promise<T>): P
 async function processTelegramInput(id: string, row: TelegramInputReceipt, signal: AbortSignal): Promise<void> {
 	const conversation = await sessions.byConversation(row.conversationId as ConversationId);
 	if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
-	if (conversation === undefined || !users.isAllowed(row.sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); return; }
+	if (conversation === undefined || !actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); return; }
 	const msg = JSON.parse(row.raw!) as NormalizedMessage;
 	let content = row.content;
 	if (!row.prepared) {
@@ -993,9 +1041,10 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	}
 	await withTelegramAdmission(row.conversationId, async () => {
 		if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
-		if (!users.isAllowed(row.sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); return; }
+		if (!actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); return; }
 		const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : "telegram");
 		await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
+		if (!actorAllowed(row.sender, row.destination, authorityVia) || !conversationActorAllowed(row.sender, row.conversationId, authorityVia)) { await telegramInbox.output(id, "failed"); return; }
 		const submission = await submitInput(conversation, content, msg, authorityVia);
 		await telegramInbox.admitted(id, submission.id as number);
 		void replyTelegram(id, conversation, submission);
@@ -1105,14 +1154,15 @@ async function reattachTelegramReplies(): Promise<void> {
 		const conversation = await sessions.byConversation(row.conversationId as ConversationId);
 		let submission = row.submissionId === undefined ? undefined : await harness.submission(row.submissionId as SubmissionId, BACKGROUND_CONTEXT);
 		const sender = submission === undefined ? row.sender : await telegramInbox.reconcileSender(id);
-		if (conversation === undefined || sender === undefined || !users.isAllowed(sender) || !telegramChatAllowed(row.destination)) { await telegramInbox.output(id, "failed"); continue; }
+		if (conversation === undefined || sender === undefined || !actorAllowed(sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); continue; }
 		if (submission === undefined) {
 			const requestId = row.requestId ?? (id.startsWith("tg-update:") ? id : undefined);
 			if (requestId === undefined) { await telegramInbox.output(id, "failed"); continue; }
 			const via = id.startsWith("tg-panel:") ? "panel" : "telegram";
 			const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : via);
 			await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
-			submission = await conversation.submit({ type: "input", content: row.content, requestId, whenBusy: "steer", entry: { kind: "chat.message", data: { sender: row.sender, via, ...(authorityVia === via ? {} : { authorityVia }) } } }, BACKGROUND_CONTEXT);
+			if (!actorAllowed(row.sender, row.destination, authorityVia) || !conversationActorAllowed(row.sender, row.conversationId, authorityVia)) { await telegramInbox.output(id, "failed"); continue; }
+			submission = await conversation.submit({ type: "input", content: row.content, requestId, whenBusy: conversationInputMode(conversation.id), entry: { kind: "chat.message", data: { sender: row.sender, via, ...(authorityVia === via ? {} : { authorityVia }) } } }, BACKGROUND_CONTEXT);
 			await telegramInbox.admitted(id, submission.id as number);
 		}
 		void replyTelegram(id, conversation, submission);
@@ -1139,18 +1189,21 @@ async function sendTelegramApproval(destination: TelegramDestination, scope: num
 
 async function handleTelegramCallback(callback: TelegramCallback): Promise<void> {
 	if (telegram === undefined) return;
-	if (callback.data === "dwell:allowchat") {
+	if (callback.data === "dwell:allowchat" || callback.data === "dwell:allowgroup") {
 		let text = "启用群仅 dwell 管理员可用。";
 		if (telegramChats !== undefined && callback.destination.botId === telegram.identity.id
 			&& isTelegramGroupId(callback.destination.chatId) && users.isAdmin(callback.senderId)) {
-			const result = await telegramChats.change(callback.destination.chatId, true, `tg-chat-callback:${callback.id}`);
-			text = result === "replayed" ? "该启用请求已处理，未重复更改群状态。" : "已启用本群，已授权成员现在可以提交任务。";
+			const members = callback.data === "dwell:allowgroup";
+			const result = await telegramChats.change(callback.destination.chatId, true, `tg-chat-callback:${callback.id}`, members ? "members" : "allowlist");
+			text = result === "replayed" ? "该启用请求已处理，未重复更改群状态。" : members ? "已开放本群成员使用，危险操作需 dwell 管理员审批。" : "已启用本群，仅已授权用户可以提交任务。";
 		}
 		await telegram.acknowledge(callback.id, text).catch((error: unknown) => console.error("[dwell] Telegram 群管理回调提示失败:", error));
 		return;
 	}
 	const matched = telegramApprovalMatch(callback, pendingApprovals, {
-		allowed: (id) => users.isAllowed(id), admin: (id) => users.isAdmin(id), owner: (id) => sessions.ownerOf(id as ConversationId), chatAllowed: telegramChatAllowed,
+		allowed: actorAllowed,
+		canApprove: (id, destination, trigger) => actorAllowed(id, destination) && (users.isAllowed(trigger) ? users.isAllowed(id) : users.isAdmin(id)),
+		admin: (id) => users.isAdmin(id), owner: (id) => sessions.ownerOf(id as ConversationId), chatAllowed: telegramChatAllowed,
 	});
 	if (matched === undefined) {
 		await telegram.acknowledge(callback.id, "请求已失效或你没有审批权限").catch((error: unknown) => console.error("[dwell] Telegram 过期回调提示失败:", error));
@@ -1199,11 +1252,11 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
 					"/newgoal：开启新目标，保留聊天历史与旧任务记录（线主/管理员）",
 					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
-					"/approve [分钟]：开启危险命令批准窗口，默认 10 分钟",
+					users.isAllowed(msg.senderId) ? "/approve [分钟]：开启危险命令批准窗口，默认 10 分钟" : "危险操作：需 dwell 管理员点击审批卡批准，群成员不能自行 /approve",
 					"/deny：关闭批准窗口并取消待审请求",
 					"/whoami：查看你的 ID 和当前聊天 ID",
 					"/help：查看完整使用说明",
-					...(cmd === "/help" && admin ? ["管理员命令：", "/status：查看运行中任务", "/allow tg:用户ID [admin]、/disallow tg:用户ID：管理成员", "/allowchat [负数群ID]、/disallowchat [负数群ID]：启用或停用群（群内可省略 ID）", "/chats：查看当前 bot 已启用的群"] : []),
+					...(cmd === "/help" && admin ? ["管理员命令：", "/status：查看运行中任务", "/allow tg:用户ID [admin]、/disallow tg:用户ID：授权或封禁用户", "/allowgroup、/disallowgroup：在目标群开放全体成员或停用本群，无需填写 ID", "/allowchat [负数群ID]、/disallowchat [负数群ID]：仅允许已授权用户或停用群（群内可省略 ID）", "/chats：查看各群的开放模式"] : []),
 				];
 				await replyTo(target, guide.join("\n"), conversation);
 				break;
@@ -1234,7 +1287,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "这是他人的任务线，仅线主或管理员可重置。");
 				return;
 			}
-			const next = msg.platform === "telegram" ? await sessions.forTelegram(msg, msg.requestId!) : await sessions.forFeishu(msg, msg.requestId ?? msg.messageId);
+			const next = msg.platform === "telegram" ? await sessions.forTelegram(msg, msg.requestId!, sessions.isActorScoped(convId)) : await sessions.forFeishu(msg, msg.requestId ?? msg.messageId);
 			await sessions.anchor(msg.messageId, next.id);
 			await replyTo(target, "已开启新任务线，原任务线与历史消息保留。", next);
 			break;
@@ -1307,6 +1360,10 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			await replyTo(target, "已中止当前任务。");
 			break;
 		case "/approve": {
+			if (!users.isAllowed(msg.senderId)) {
+				await replyTo(target, "群成员任务的危险操作需 dwell 管理员点击审批卡批准；你可以用 /deny 拒绝自己的请求。");
+				return;
+			}
 			const minutes = clampMinutes(Number(parts[1]) || 10);
 			const key = windowKey(convId, msg.senderId);
 			if (receipt?.approvalRequestId && pendingApprovals.get(key)?.requestId !== receipt.approvalRequestId) {
@@ -1367,12 +1424,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				return;
 			}
 			const who = resolveArg(parts, msg);
-			if (who === null) {
-				await replyTo(target, "用法：/disallow @某人");
-				return;
-			}
-			if (!users.isAllowed(who.id)) {
-				await replyTo(target, `${who.name} 不在白名单内，无需移除。`);
+			if (who === null || !(who.id.startsWith("ou_") || /^tg:\d+$/.test(who.id))) {
+				await replyTo(target, "用法：/disallow @某人，或 /disallow tg:用户ID");
 				return;
 			}
 			if (users.isAdmin(who.id) && users.adminCount() <= 1) {
@@ -1384,7 +1437,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				if (error instanceof Error && error.message.includes("最后一名管理员")) { await replyTo(target, error.message); break; }
 				throw error;
 			}
-			await replyTo(target, `已移除 ${who.name}。`);
+			await replyTo(target, `已封禁 ${who.name}，群成员开放也不会绕过封禁；/allow 可解除。`);
 			break;
 		}
 		default:
@@ -1562,12 +1615,13 @@ const feishuBridge: FeishuBridge = {
 		if (receiptId !== undefined && destination.kind === "telegram") {
 			await telegramInbox.prepare(receiptId, { conversationId: id, sender: panelUser, authorityVia: "panel", destination, replyTo: sent.messageId, requestId }, async () => content);
 		}
+		if (!conversationActorAllowed(panelUser, id, "panel")) throw new Error("输入提交前使用权限已撤销，未启动模型。");
 		const submission = await conversation.submit({
 			type: "input",
 			content,
 			entry: { kind: "chat.message", data: { sender: panelUser, senderName: OPERATOR_LABEL, via: "panel" } },
 			requestId,
-			whenBusy: "steer",
+			whenBusy: conversationInputMode(conversation.id),
 		}, BACKGROUND_CONTEXT);
 		if (receiptId !== undefined) {
 			await telegramInbox.admitted(receiptId, submission.id as number);
@@ -1616,6 +1670,7 @@ const feishuBridge: FeishuBridge = {
 };
 
 async function deliverApprovalDecision(decision: ApprovalDecision, target: ApprovalTarget): Promise<"accepted" | "unavailable"> {
+	if (!conversationActorAllowed(decision.trigger, decision.scope, decision.via)) return "unavailable";
 	const content = decisionInput(decision.action, decision.minutes, decision.expiresAt);
 	const deliveryId = `approval:${decision.id}:${target.conversationId}`;
 	if (target.conversationId !== decision.scope) {
@@ -1628,6 +1683,7 @@ async function deliverApprovalDecision(decision: ApprovalDecision, target: Appro
 	const conversation = await harness.conversation(decision.scope as ConversationId, BACKGROUND_CONTEXT);
 	if (conversation === undefined) return "unavailable";
 	await setRunAttributionIfIdle(decision.scope, decision.trigger, decision.via);
+	if (!conversationActorAllowed(decision.trigger, decision.scope, decision.via)) return "unavailable";
 	const submission = await conversation.submit({
 		type: "input", content, whenBusy: "followUp", requestId: deliveryId,
 		entry: { kind: target.budgetId === undefined ? "dwell.approval.legacy" : "dwell.approval", data: { sender: decision.trigger, via: decision.via, ...(target.budgetId === undefined ? {} : { budgetId: target.budgetId }) } },
