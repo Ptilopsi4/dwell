@@ -5,11 +5,29 @@ import { stateFile, writeStateJson } from "./state.ts";
 export type Role = "member" | "admin";
 
 const COMMAND_HISTORY_LIMIT = 10_000;
-type SavedUsers = { members?: string[]; admins?: string[]; appliedCommands?: string[] };
+type SavedUsers = { members: string[]; admins: string[]; appliedCommands?: string[]; blocked?: string[] };
+
+function parseSavedUsers(value: unknown): SavedUsers {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("users.json 必须是用户权限对象。");
+	const saved = value as Record<string, unknown>;
+	for (const field of ["members", "admins", "appliedCommands", "blocked"] as const) {
+		if (saved[field] === undefined && (field === "appliedCommands" || field === "blocked")) continue;
+		if (!Array.isArray(saved[field]) || !saved[field].every((id) => typeof id === "string")) {
+			throw new Error(`users.json 的 ${field} 必须是字符串数组。`);
+		}
+	}
+	const users = saved as SavedUsers;
+	const blocked = new Set(users.blocked ?? []);
+	if (users.members.some((id) => blocked.has(id)) || users.admins.some((id) => blocked.has(id))) {
+		throw new Error("users.json 的用户不能同时拥有角色并被封禁。");
+	}
+	return users;
+}
 
 export class Users {
 	private members = new Set<string>();
 	private admins = new Set<string>();
+	private blocked = new Set<string>();
 	private appliedCommands = new Set<string>();
 	private file = stateFile("users.json");
 	private changeChain: Promise<void> = Promise.resolve();
@@ -25,39 +43,43 @@ export class Users {
 
 	async load(): Promise<void> {
 		try {
-			const saved = JSON.parse(await readFile(this.file, "utf8")) as SavedUsers;
-			const members = new Set(saved.members ?? []);
-			const admins = new Set(saved.admins ?? []);
+			const saved = parseSavedUsers(JSON.parse(await readFile(this.file, "utf8")));
+			const members = new Set(saved.members);
+			const admins = new Set(saved.admins);
+			const blocked = new Set(saved.blocked ?? []);
 			const appliedCommands = new Set((saved.appliedCommands ?? []).slice(-COMMAND_HISTORY_LIMIT));
 			// users.json 是运行时真相：存在即整体覆盖 env 播种
 			this.members = members;
 			this.admins = admins;
+			this.blocked = blocked;
 			this.appliedCommands = appliedCommands;
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] users.json 损坏，角色回退为 env 播种:", err);
-			await this.save(); // 首次运行或损坏：把 env 播种落盘
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			await this.save();
 		}
 	}
 
-	private async save(members = this.members, admins = this.admins, appliedCommands = this.appliedCommands): Promise<void> {
-		await writeStateJson(this.file, { members: [...members], admins: [...admins], appliedCommands: [...appliedCommands] });
+	private async save(members = this.members, admins = this.admins, blocked = this.blocked, appliedCommands = this.appliedCommands): Promise<void> {
+		await writeStateJson(this.file, { members: [...members], admins: [...admins], blocked: [...blocked], appliedCommands: [...appliedCommands] });
 	}
 
-	private change(change: (members: Set<string>, admins: Set<string>) => void, requestId?: string): Promise<void> {
+	private change(change: (members: Set<string>, admins: Set<string>, blocked: Set<string>) => void, requestId?: string): Promise<void> {
 		const run = async (): Promise<void> => {
 			if (requestId !== undefined && this.appliedCommands.has(requestId)) return;
 			// Snapshot after preceding writes commit; publish roles and replay receipts together.
 			const members = new Set(this.members);
 			const admins = new Set(this.admins);
+			const blocked = new Set(this.blocked);
 			const appliedCommands = new Set(this.appliedCommands);
-			change(members, admins);
+			change(members, admins, blocked);
 			if (requestId !== undefined) {
 				appliedCommands.add(requestId);
 				if (appliedCommands.size > COMMAND_HISTORY_LIMIT) appliedCommands.delete(appliedCommands.values().next().value!);
 			}
-			await this.save(members, admins, appliedCommands);
+			await this.save(members, admins, blocked, appliedCommands);
 			this.members = members;
 			this.admins = admins;
+			this.blocked = blocked;
 			this.appliedCommands = appliedCommands;
 		};
 		const result = this.changeChain.then(run, run);
@@ -77,6 +99,10 @@ export class Users {
 		return this.admins.has(openId);
 	}
 
+	isBlocked(openId: string): boolean {
+		return this.blocked.has(openId);
+	}
+
 	adminCount(): number {
 		return this.admins.size;
 	}
@@ -87,17 +113,19 @@ export class Users {
 	}
 
 	async add(openId: string, role: Role, requestId?: string): Promise<void> {
-		await this.change((members, admins) => {
+		await this.change((members, admins, blocked) => {
+			blocked.delete(openId);
 			members.add(openId);
 			if (role === "admin") admins.add(openId);
 		}, requestId);
 	}
 
 	async remove(openId: string, requestId?: string, protectLastAdmin = false): Promise<void> {
-		await this.change((members, admins) => {
+		await this.change((members, admins, blocked) => {
 			if (protectLastAdmin && admins.has(openId) && admins.size <= 1) throw new Error("无法移除最后一名管理员（会自锁）。");
 			members.delete(openId);
 			admins.delete(openId);
+			blocked.add(openId);
 		}, requestId);
 	}
 }
