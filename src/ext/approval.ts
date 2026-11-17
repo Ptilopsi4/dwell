@@ -472,7 +472,7 @@ export function makePathGuardExtension(cwdOf: CwdOf) {
 
 /** bash 危险命令判定与拦截（同步；beforeTool 调用，单测直接覆盖）：
  *  scope = 子会话归并后的父线——窗口/归属/卡片按父线，待审记录被拦截命令所在的真实会话（后台子会话），审批后由此唤醒。 */
-export function bashApprovalBlock(command: string, conversationId: number): { block: string; saved?: Promise<void> } | undefined {
+export function bashApprovalBlock(command: string, conversationId: number, selfApproval = true): { block: string; saved?: Promise<void> } | undefined {
 	if (stateFileBlocked(command)) {
 		return { block: "Access to service state files or the process environment is not allowed." };
 	}
@@ -505,6 +505,7 @@ export function bashApprovalBlock(command: string, conversationId: number): { bl
 	const viaPanel = via === "panel";
 	return { saved, block: viaPanel
 		? `The approval policy blocked this command (${match}). An admin has been notified to approve it in the panel; tell the user to wait. Continue the original task after approval, and do not try to work around the block.`
+		: !selfApproval ? `The approval policy blocked this command (${match}). This group-only user cannot approve dangerous commands. A dwell administrator must approve the original approval card; tell the user to wait. Continue the original task after approval, and do not try to work around the block.`
 		: `The approval policy blocked this command (${match}). Tell the user to tap the button on the approval card or reply /approve (10-minute window by default). Continue the original task after approval, and do not try to work around the block.` };
 }
 
@@ -535,7 +536,9 @@ export async function abortBeforeRequest(harness: Harness, taskId: TaskId, conte
 }
 
 /** Restore the first input's actor; steering messages never transfer the active run's authority. */
-export function makeApprovalExtension(getHarness?: () => Harness | undefined) {
+export type CanSelfApprove = (conversationId: number, sender: string, via: RunVia) => boolean;
+
+export function makeApprovalExtension(getHarness?: () => Harness | undefined, canSelfApprove?: CanSelfApprove) {
 	const restore = async (harness: Harness, conversationId: ConversationId, context: Context, expectedTask?: TaskId) => {
 		const live = await harness.snapshot(LiveDoc, conversationId, context);
 		const input = live?.run?.inputs[0];
@@ -570,12 +573,14 @@ export function makeApprovalExtension(getHarness?: () => Harness | undefined) {
 					if (call.name === "dwell.proc") {
 						const args = call.arguments as { action?: unknown; command?: unknown };
 						if (args.action !== "start") return undefined;
-						const blocked = bashApprovalBlock(typeof args.command === "string" ? args.command : "", api.conversationId as number);
+						const id = api.conversationId as number;
+						const blocked = bashApprovalBlock(typeof args.command === "string" ? args.command : "", id, canSelfApprove?.(id, runSender.get(id) ?? "", runVia.get(id) ?? "panel"));
 						await blocked?.saved;
 						return blocked === undefined ? undefined : { block: blocked.block };
 					}
 					if (call.name !== "bash") return undefined;
-					const blocked = bashApprovalBlock((call.arguments as { command?: string }).command ?? "", api.conversationId as number);
+					const id = api.conversationId as number;
+					const blocked = bashApprovalBlock((call.arguments as { command?: string }).command ?? "", id, canSelfApprove?.(id, runSender.get(id) ?? "", runVia.get(id) ?? "panel"));
 					await blocked?.saved;
 					return blocked === undefined ? undefined : { block: blocked.block };
 				},

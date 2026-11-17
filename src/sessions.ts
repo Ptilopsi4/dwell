@@ -11,9 +11,9 @@ import { DATA_DIR, stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
 
-type SavedRoute = { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string; destination?: ConversationDestination };
+type SavedRoute = { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string; destination?: ConversationDestination; actorScoped?: boolean };
 type BotDestination = Exclude<ConversationDestination, { kind: "panel" }>;
-type BotRoute = { id: number; owner: string; destination: BotDestination };
+type BotRoute = { id: number; owner: string; destination: BotDestination; actorScoped?: boolean };
 type BotRouteState = { routes: Record<string, BotRoute>; resets: Record<string, { key: string; id: number }> };
 
 // Route changes and /new receipts share the conversation's SQLite commit. JSON is a projection.
@@ -52,6 +52,7 @@ export class Sessions {
 	private lastTs = new Map<ConversationId, number>(); // conversation → 最后活动时间戳（panel 排序）
 	private messageMap = new Map<string, ConversationId>(); // messageId → conversation（任务线锚点）
 	private destinations = new Map<ConversationId, ConversationDestination>();
+	private actorScoped = new Set<ConversationId>();
 	private telegramChain: Promise<unknown> = Promise.resolve();
 	private file = stateFile("sessions.json");
 	private mapFile = stateFile("message-map.json");
@@ -75,6 +76,7 @@ export class Sessions {
 				if (v.lastTs !== undefined) this.lastTs.set(v.id as ConversationId, v.lastTs);
 				if (v.notify === true) this.notify.add(v.id as ConversationId);
 				if (v.destination !== undefined) this.destinations.set(v.id as ConversationId, v.destination);
+				if (v.actorScoped === true) this.actorScoped.add(v.id as ConversationId);
 			}
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("[dwell] sessions.json 损坏，任务线映射将重建:", err);
@@ -109,7 +111,8 @@ export class Sessions {
 			const notify = this.notify.has(id);
 			const emoji = this.emojis.get(id);
 			const destination = this.destinations.get(id);
-			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}), ...(notify ? { notify } : {}), ...(emoji !== undefined ? { emoji } : {}), ...(destination !== undefined ? { destination } : {}) };
+			const actorScoped = this.actorScoped.has(id);
+			out[key] = { id: id as number, owner: this.owners.get(id) ?? "", ...(name !== undefined ? { name } : {}), ...(archived ? { archived } : {}), ...(ts !== undefined ? { lastTs: ts } : {}), ...(notify ? { notify } : {}), ...(emoji !== undefined ? { emoji } : {}), ...(destination !== undefined ? { destination } : {}), ...(actorScoped ? { actorScoped } : {}) };
 		}
 		await writeStateJson(this.file, out);
 	}
@@ -149,6 +152,10 @@ export class Sessions {
 
 	ownerOf(conversationId: ConversationId): string | undefined {
 		return this.owners.get(conversationId);
+	}
+
+	isActorScoped(conversationId: number): boolean {
+		return this.actorScoped.has(conversationId as ConversationId);
 	}
 
 	/** 反查：conversationId → chat_id（审批提醒发回原 chat 用）。 */
@@ -317,24 +324,30 @@ export class Sessions {
 			this.convKeys.set(key, id);
 			this.owners.set(id, route.owner);
 			this.destinations.set(id, { ...route.destination });
+			if (route.actorScoped === true) this.actorScoped.add(id);
+			else this.actorScoped.delete(id);
 		}
 	}
 
 	/** Telegram defaults are private-chat, group-sender or forum-topic scoped. */
-	forTelegram(msg: NormalizedMessage, resetRequestId?: string): Promise<Conversation> {
-		const run = this.telegramChain.then(() => this.routeTelegram(msg, resetRequestId));
+	forTelegram(msg: NormalizedMessage, resetRequestId?: string, actorScoped = false): Promise<Conversation> {
+		const run = this.telegramChain.then(() => this.routeTelegram(msg, resetRequestId, actorScoped));
 		this.telegramChain = run.catch(() => {});
 		return run;
 	}
 
-	private async routeTelegram(msg: NormalizedMessage, resetRequestId?: string): Promise<Conversation> {
+	private async routeTelegram(msg: NormalizedMessage, resetRequestId: string | undefined, actorScoped: boolean): Promise<Conversation> {
 		const destination = messageDestination(msg);
 		if (destination.kind !== "telegram") throw new Error("Telegram routing requires a Telegram destination");
+		if (actorScoped && msg.chatType !== "group") throw new Error("Actor-scoped Telegram routing requires a group");
 		const chatKey = `tg:${destination.botId}:${destination.chatId}`;
 		if (msg.chatId !== chatKey || msg.threadId !== destination.threadId) throw new Error("Telegram routing destination does not match its input");
-		const key = msg.chatType === "p2p" ? chatKey : destination.threadId !== undefined ? `${chatKey}#t:${destination.threadId}` : `${chatKey}#${msg.senderId}`;
-		const cwd = resolve(DATA_DIR, "work", `telegram-${createHash("sha256").update(chatKey).digest("hex")}`);
-		return this.routeBot(key, msg.senderId, destination, cwd, resetRequestId);
+		const key = actorScoped
+			? `${chatKey}${destination.threadId === undefined ? "" : `#t:${destination.threadId}`}#a:${msg.senderId}`
+			: msg.chatType === "p2p" ? chatKey : destination.threadId !== undefined ? `${chatKey}#t:${destination.threadId}` : `${chatKey}#${msg.senderId}`;
+		// 成员隔离线不能与其他成员或旧共享线共用可写目录。
+		const cwd = resolve(DATA_DIR, "work", `telegram-${createHash("sha256").update(actorScoped ? key : chatKey).digest("hex")}`);
+		return this.routeBot(key, msg.senderId, destination, cwd, resetRequestId, actorScoped);
 	}
 
 	/** Feishu keeps its legacy lookup path; /new atomically adopts and replaces one default. */
@@ -350,7 +363,7 @@ export class Sessions {
 		return pending;
 	}
 
-	private async routeBot(key: string, sender: string, destination: BotDestination, cwd: string, resetRequestId?: string): Promise<Conversation> {
+	private async routeBot(key: string, sender: string, destination: BotDestination, cwd: string, resetRequestId?: string, actorScoped = false): Promise<Conversation> {
 		await this.prepareWorkspace(cwd);
 		const result = await this.harness.commit(async (tx) => {
 			const doc = await tx.doc(TelegramSessionDoc);
@@ -359,7 +372,7 @@ export class Sessions {
 				const savedDestination = this.destinationOf(id);
 				if (savedDestination.kind === "panel" || doc.routes[savedKey] !== undefined) continue;
 				if (savedDestination.kind !== "telegram" && (destination.kind !== "feishu" || savedKey !== key)) continue;
-				if (await tx.conversation(id) !== undefined) doc.routes[savedKey] = { id: id as number, owner: this.owners.get(id) ?? "", destination: { ...savedDestination } };
+				if (await tx.conversation(id) !== undefined) doc.routes[savedKey] = { id: id as number, owner: this.owners.get(id) ?? "", destination: { ...savedDestination }, ...(this.actorScoped.has(id) ? { actorScoped: true } : {}) };
 			}
 			const requestKey = resetRequestId === undefined ? undefined : `${destination.kind}:${resetRequestId}`;
 			const receipt = requestKey === undefined ? undefined : doc.resets[requestKey] ?? (destination.kind === "telegram" ? doc.resets[resetRequestId!] : undefined);
@@ -380,7 +393,7 @@ export class Sessions {
 					await configure(tx, conversation.id, { model: MODEL, cwd });
 					if (existing !== undefined) doc.routes[`${key}#old:${existing.id}`] = { ...existing, destination: { ...existing.destination } };
 					target = conversation.id as number;
-					doc.routes[key] = { id: target, owner: sender, destination: { ...destination } };
+					doc.routes[key] = { id: target, owner: sender, destination: { ...destination }, ...(actorScoped ? { actorScoped } : {}) };
 					if (requestKey !== undefined) doc.resets[requestKey] = { key, id: target };
 				}
 			}

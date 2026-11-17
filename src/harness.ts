@@ -10,7 +10,7 @@ import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentDoc, createRegistry, defineExtension, Harness, section, type ConversationId, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard } from "./ext/approval.ts";
+import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard, type CanSelfApprove } from "./ext/approval.ts";
 import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
 import { makeWorkController } from "./ext/work.ts";
 import { makeWebExtension } from "./ext/web.ts";
@@ -250,7 +250,7 @@ export async function checkResumableModels(harness: Pick<Harness, "commit">, mod
 	}
 }
 
-export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void): Promise<Harness> {
+export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void, canSelfApprove?: CanSelfApprove, restrictFiles?: (conversationId: number) => boolean): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
 	await mkdir(DEFAULT_CWD, { recursive: true });
@@ -260,7 +260,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 	const limits = runBudgetLimits();
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
 	let harness: Harness | undefined;
-	let env: (options: { cwd?: string; readScope?: string }) => ReturnType<typeof GuardedExecutionEnv.create>;
+	let env: (options: { conversationId?: number; cwd?: string; readScope?: string }) => ReturnType<typeof GuardedExecutionEnv.create>;
 	const budgets = makeBudgetController({
 		limits,
 		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
@@ -284,7 +284,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		registry.install(DwellExtension);
 		registry.install(budgets.extension);
 		registry.install(makeWorkspaceExtension(() => harness));
-		registry.install(makeApprovalExtension(() => harness));
+		registry.install(makeApprovalExtension(() => harness, canSelfApprove));
 		registry.install(work.extension);
 		for (const extension of extraExtensions) registry.install(extension);
 		// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
@@ -293,15 +293,17 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 
 		// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
 		// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
-		env = async ({ cwd, readScope }) => {
+		env = async ({ conversationId, cwd, readScope }) => {
 			if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
+			const workspace = resolve(cwd ?? DEFAULT_CWD);
+			const scope = readScope ?? (conversationId !== undefined && restrictFiles?.(conversationId) === true ? workspace : undefined);
 			return GuardedExecutionEnv.create({
-				cwd: resolve(cwd ?? DEFAULT_CWD),
+				cwd: workspace,
 				shellEnv: { ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
 				// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
 				...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
-			}, { cwd: resolve(cwd ?? DEFAULT_CWD), tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
-				data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(readScope === undefined ? {} : { readScope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
+			}, { cwd: workspace, tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
+				data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(scope === undefined ? {} : { readScope: scope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 		};
 		await telemetry.start();
 		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } } }, context);
