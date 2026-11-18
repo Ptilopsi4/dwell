@@ -2,8 +2,7 @@
 // 消息管线判定表：groupAdmits / emptyReply / fallbackRoute / messageAction（无副作用判定，行为与 index.ts 抽取前一致）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupAdmits, emptyReply, fallbackRoute, messageAction } from "../src/pipeline.ts";
-import type { NormalizedMessage } from "../src/feishu/channel.ts";
+import { groupAdmits, emptyReply, fallbackRoute, messageAction, messageDestination, sameDestination, type NormalizedMessage } from "../src/pipeline.ts";
 
 const msg = (partial: Partial<NormalizedMessage>): NormalizedMessage =>
 	({
@@ -47,6 +46,32 @@ test("groupAdmits：群未 @ 平消息拒绝", () => {
 	assert.equal(groupAdmits(msg({ chatType: "group" }), anchored([])), false);
 });
 
+test("Telegram groups require a transport-verified command or reply to the bot", () => {
+	const telegram = { platform: "telegram" as const, chatType: "group" as const };
+	assert.equal(groupAdmits(msg({ ...telegram, mentionedBot: true }), anchored([])), true);
+	assert.equal(groupAdmits(msg({ ...telegram, threadId: "123" }), anchored([])), false);
+	assert.equal(groupAdmits(msg({ ...telegram, replyToMessageId: "tg:1:-2:3" }), anchored(["tg:1:-2:3"])), false);
+	assert.equal(groupAdmits(msg({ ...telegram, threadId: "123", replyToMessageId: "tg:1:-2:3" }), anchored(["tg:1:-2:3"])), false);
+	assert.equal(groupAdmits(msg({ chatType: "group", destination: { kind: "telegram", botId: "1", chatId: "-2" }, threadId: "123" }), anchored([])), false);
+});
+
+test("destinations retain platform, bot, chat and topic boundaries", () => {
+	const target = { kind: "telegram" as const, botId: "1", chatId: "-2", threadId: "3" };
+	assert.equal(sameDestination(target, { ...target }), true);
+	assert.equal(sameDestination(target, { ...target, botId: "2" }), false);
+	assert.equal(sameDestination(target, { ...target, chatId: "-3" }), false);
+	assert.equal(sameDestination(target, { ...target, threadId: "4" }), false);
+	assert.equal(sameDestination(target, { kind: "telegram", botId: "1", chatId: "-2" }), false);
+	assert.equal(sameDestination(target, { kind: "feishu", chatId: "-2" }), false);
+	assert.equal(sameDestination({ kind: "panel" }, { kind: "feishu", chatId: "oc_1" }), false);
+	assert.equal(sameDestination({ kind: "panel" }, { kind: "panel" }), true);
+	assert.equal(sameDestination({ kind: "feishu", chatId: "oc_1" }, { kind: "feishu", chatId: "oc_1" }), true);
+	assert.equal(sameDestination({ kind: "feishu", chatId: "oc_1" }, { kind: "feishu", chatId: "oc_2" }), false);
+	assert.deepEqual(messageDestination(msg({})), { kind: "feishu", chatId: "oc_1" });
+	assert.deepEqual(messageDestination(msg({ destination: target })), target);
+	assert.throws(() => messageDestination(msg({ platform: "telegram" })), /explicit destination/);
+});
+
 test("emptyReply：有资源继续处理", () => {
 	assert.equal(emptyReply(msg({ resources: [{ type: "image", fileKey: "img_v2_1" }] })), null);
 });
@@ -82,6 +107,16 @@ test("fallbackRoute：群平消息路由 group，replyTo 未命中才 degraded",
 test("messageAction：已知命令（含带参数）→ command", () => {
 	assert.equal(messageAction("/help", false), "command");
 	assert.equal(messageAction("/approve 30", false), "command");
+});
+
+test("Telegram host guidance commands leave Feishu input behavior unchanged", () => {
+	for (const content of ["/start", "/start welcome", "/ask"]) {
+		assert.equal(messageAction(content, false, "telegram"), "command");
+		assert.equal(messageAction(content, false, "feishu"), "input");
+		assert.equal(messageAction(content, false), "input");
+	}
+	assert.equal(messageAction("", true, "telegram"), "media");
+	assert.equal(messageAction("Ordinary ask body", false, "telegram"), "input");
 });
 
 test("messageAction：未知斜杠文本（路径）当普通输入", () => {

@@ -1,25 +1,38 @@
 // Panel HTTP 服务：无内置鉴权（部署侧自行保证网络边界，可用 DWELL_PANEL_HOST 绑定内网接口），SSE 推流（transcript + live 状态），静态页面。
 // SSE 帧：mode=append 只带新 entries；活动 entries 前缀变化（reset/compaction/重连首帧）时 mode=replace 带全量。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createReadStream } from "node:fs";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness } from "@earendil-works/pi-durable";
-import { LiveDoc as PiLiveDoc } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationId, EntryRecord, Harness } from "@earendil-works/pi-durable";
+import { LiveDoc as PiLiveDoc, ToolResultEntry } from "@earendil-works/pi-durable";
 import { MODEL, type ImageDescriber } from "../harness.ts";
 import { ingestBuffer, sniffImageMime } from "../media.ts";
-import { clampMinutes, conversationScope, persistApprovals, pendingApprovals, runSender, runVia, sendPathViolation } from "../ext/approval.ts";
+import { UploadError, type SaveUpload } from "../uploads.ts";
+import { FileError } from "@earendil-works/pi-durable/env";
+import { readWorkspaceFile } from "../guarded-env.ts";
+import { fileGuardBases } from "../ext/approval.ts";
+import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
+import { acceptWork, getWork, workReadyAnswer } from "../ext/work.ts";
+import { workReadyNotice } from "../answer.ts";
+import { beginNewGoal } from "../new-goal.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
 import type { Users } from "../users.ts";
 import type { Directory } from "../feishu/directory.ts";
+import type { RuntimeTelemetrySnapshot } from "../telemetry.ts";
+import { modelFailure } from "../model-failure.ts";
+
+export interface PanelRuntime {
+	telemetry?: RuntimeTelemetrySnapshot;
+	telegram: { transport: string; workers?: { activeRoutes: number; concurrency: number; stopped: boolean }; inbox: { pending: number; sending: number; tracking: number } };
+}
 
 interface PanelOptions {
 	harness: Harness;
@@ -27,27 +40,31 @@ interface PanelOptions {
 	users: Users;
 	directory: Directory;
 	feishu: FeishuBridge;
+	telegram?: () => string;
+	runtime?: () => Promise<PanelRuntime>;
+	ready?: () => boolean;
 	port: number;
-	/** 视觉描述器（启动装配；无 ZAI key 时为 null，上传图片降级为落盘+提示） */
+	/** Vision is disabled when its selected connection or credential is unavailable. */
 	describer: () => ImageDescriber | null;
 	/** bash 沙箱是否启用（main 里探测完成后才起 panel；getter 延迟读取探测结果） */
 	sandbox: () => boolean;
+	saveUpload: SaveUpload;
 }
 
-/** panel 操作飞书会话所需的飞书侧动作，由主程序提供（未连飞书时 relay 报错、其余空操作）。 */
+/** Channel actions supplied by the entrypoint; the legacy name remains compatible with existing callers. */
 export interface FeishuBridge {
-	/** panel 操作者 open_id */
+	/** The configured panel operator's platform-qualified user ID. */
 	operator(): string;
-	/** 飞书长连接状态（"off" = panel-only 未连接；其余为 SDK WSConnectionState，"failed" 时 /healthz 返回 503） */
+	/** Feishu connection state; Telegram health is supplied separately. */
 	status(): string;
-	/** 以操作者身份把消息发到会话所在 chat，并像飞书消息一样由 bot 流式回复；附件先以图片/文件消息可见转发到原 chat */
+	/** Forward text and attachments visibly to the original chat before submitting model input. */
 	relay(conversation: Conversation, text: string, attachments?: { path: string; part: string }[]): Promise<void>;
-	/** 向会话所在 chat 发一条通知；没有 chat 的会话忽略 */
+	/** Notify the conversation's original chat, if it has one. */
 	notice(conversationId: number, text: string): Promise<void>;
-	/** panel 任务结束/审批时私发操作者通知（带任务锚点，回复即续接）；未连飞书时空操作 */
+	/** Privately notify the configured operator, anchoring replies to the panel task. */
 	notifyPanel(conversationId: number, status: string, text: string): Promise<void>;
-	/** panel 审批决定：窗口记账 + 同步飞书卡 + 唤醒全部被拦会话（本线直接续跑，后台子会话经 Reporter） */
-	decide(key: string, action: "approve" | "deny", minutes: number): Promise<{ ok: boolean; error?: string }>;
+	/** Record the decision, update its channel message, and resume blocked conversations. */
+	decide(key: string, action: "approve" | "deny", minutes: number, requestId?: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 class HttpError extends Error {
@@ -98,10 +115,10 @@ export function checkPanelRequest(
 	if (!isIpv4(name) && !isIpv6(name) && !allowedHosts.has(name)) throw new HttpError(403, "bad host");
 }
 
-/** /healthz 判定：feishu 连接 "failed" 时 503 ok=false（探活可据此告警），其余（含 off/reconnecting）进程仍算存活。sandbox 只透出状态，不影响 ok。 */
-export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean } } {
-	const ok = feishu !== "failed";
-	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox } };
+/** A failed channel fails health; disabled or reconnecting channels and sandbox state do not. */
+export function healthOf(feishu: string, uptimeSec: number, sandbox: boolean, telegram?: string): { code: number; body: { ok: boolean; uptimeSec: number; feishu: string; sandbox: boolean; telegram?: string } } {
+	const ok = feishu !== "failed" && telegram !== "failed";
+	return { code: ok ? 200 : 503, body: { ok, uptimeSec, feishu, sandbox, ...(telegram === undefined ? {} : { telegram }) } };
 }
 
 /** 地址归一：IPv4-mapped IPv6（双栈 socket 上的 IPv4 连接）去 `::ffff:`，链路本地地址去 `%scope`。 */
@@ -126,17 +143,17 @@ export function isLocalSource(remote: string | undefined, localAddrs: ReadonlySe
 }
 
 /** GET /api/file 判定：限本会话 cwd 内的普通文件。cwd 缺失（root 会话不设 cwd）绝不能退回 process.cwd()——那是应用根。 */
-export async function resolveDownload(cwd: string | undefined, path: string): Promise<{ status: 200; real: string; size: number; name: string } | { status: 400 | 403 | 404; error: string }> {
+export async function resolveDownload(cwd: string | undefined, path: string): Promise<{ status: 200; real: string; size: number; name: string; buffer: Buffer } | { status: 400 | 403 | 404 | 413; error: string }> {
 	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
 	if (path === "") return { status: 400, error: "path required" };
 	if ((await sendPathViolation(path, cwd)) !== undefined) return { status: 403, error: "只能下载本会话工作目录内的文件" };
 	try {
-		// 判定过的真实路径再 stat，缩小「判定后换软链」的窗口（与 dwell.lark.send 同一纪律）
-		const real = await realpath(resolve(cwd, path));
-		const st = await stat(real);
-		if (!st.isFile()) return { status: 404, error: "不是普通文件" };
-		return { status: 200, real, size: st.size, name: basename(real) };
-	} catch {
+		const result = await readWorkspaceFile(path, fileGuardBases(cwd), 30 * 1024 * 1024, BACKGROUND_CONTEXT);
+		return { status: 200, ...result, size: result.buffer.length };
+	} catch (error) {
+		if (error instanceof FileError && error.code === "is_directory") return { status: 404, error: "不是普通文件" };
+		if (error instanceof FileError && error.code === "permission_denied") return { status: 403, error: "只能下载本会话工作目录内的文件" };
+		if (error instanceof FileError && error.code === "invalid") return { status: 413, error: "文件超过 30MB 限制或不是普通文件" };
 		return { status: 404, error: "文件不存在" };
 	}
 }
@@ -159,15 +176,22 @@ export async function ingestUpload(
 	name: unknown,
 	data: unknown,
 	describer: ImageDescriber | null,
-): Promise<{ status: 200; path: string; kind: "image" | "file"; size: number; part: string } | { status: 400 | 404 | 413; error: string }> {
+	save: SaveUpload,
+): Promise<{ status: 200; path: string; kind: "image" | "file"; size: number; part: string } | { status: 400 | 404 | 409 | 413 | 500 | 501; error: string }> {
 	if (cwd === undefined) return { status: 404, error: "该会话没有工作目录" };
 	if (typeof name !== "string" || name === "" || typeof data !== "string") return { status: 400, error: "name 与 data(base64) 必填" };
 	const buffer = Buffer.from(data, "base64");
 	if (buffer.length === 0) return { status: 400, error: "空文件" };
 	if (buffer.length > 10 * 1024 * 1024) return { status: 413, error: "超过 10MB 上限" };
 	const kind = sniffImageMime(buffer) !== null ? "image" : "file";
-	const { saved, part } = await ingestBuffer(buffer, { kind, index: 1, tag: `${randomBytes(4).toString("hex")}-`, name }, cwd, describer);
-	return { status: 200, path: saved, kind, size: buffer.length, part };
+	try {
+		const { saved, part } = await ingestBuffer(buffer, { kind, index: 1, tag: `${randomBytes(16).toString("hex")}-`, name }, cwd, describer, save);
+		return { status: 200, path: saved, kind, size: buffer.length, part };
+	} catch (err) {
+		if (!(err instanceof UploadError)) throw err;
+		const error = err.status === 409 ? "工作目录或上传目标发生变化，附件未保存，请重试。" : err.status === 501 ? "当前平台不支持安全附件上传。" : "附件保存失败，请检查磁盘和目录权限后重试。";
+		return { status: err.status, error };
+	}
 }
 
 async function readBody(req: IncomingMessage, maxBytes = 100_000): Promise<Record<string, unknown> | undefined> {
@@ -196,11 +220,39 @@ type LiveDoc = {
 type UsageDoc = { models?: Record<string, { totalTokens?: number; cost?: { total?: number } }> };
 type AgentDoc = { model?: { provider: string; modelId: string } };
 
+/** Provider diagnostics can contain request data; only classified messages reach the panel. */
+export function presentPanelEntry(entry: EntryRecord): EntryRecord {
+	if (entry.kind !== "pi.assistant" || entry.model === undefined) return entry;
+	return { ...entry, model: entry.model.map((message) => message.role === "assistant" && message.stopReason === "error"
+		? { ...message, errorMessage: modelFailure(message.errorMessage ?? "").message }
+		: message) };
+}
+
+/** The browser receives a ready notice only after its receipt's task and answer match. */
+export async function presentPanelAnswerEntry(harness: Pick<Harness, "commit">, conversationId: number, entry: EntryRecord): Promise<EntryRecord & { workReady?: { answerEntryId: number; workId: string; verified: boolean; summary?: string; text: string } }> {
+	const { workReady: _storedNotice, ...stored } = entry as EntryRecord & { workReady?: unknown };
+	const presented = presentPanelEntry(stored);
+	const result = entry.model?.[0];
+	const diagnostics = ToolResultEntry.is(entry) ? entry.data?.diagnostics : undefined;
+	if (entry.kind !== "pi.tool-result" || entry.conversationId !== conversationId || entry.byTaskId === undefined || result?.role !== "toolResult" || result.toolName !== "dwell.work" || result.isError || diagnostics?.some((diagnostic) => diagnostic.severity === "error")) return presented;
+	const details = result.details;
+	if (typeof details !== "object" || details === null || !("workReady" in details) || details.workReady !== true) return presented;
+	const answerEntryId = await harness.commit(async (tx) => {
+		const task = await tx.task(entry.byTaskId!);
+		const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
+		return task?.kind === "pi.tool" && task.conversationId === conversationId && input?.kind === "model" && input.callId === result.toolCallId ? input.assistant : undefined;
+	}, BACKGROUND_CONTEXT);
+	if (answerEntryId === undefined) return presented;
+	const ready = await workReadyAnswer(harness, conversationId, answerEntryId);
+	if (ready === undefined || !("workId" in details) || ready.workId !== details.workId || !("verified" in details) || ready.verified !== details.verified) return presented;
+	return { ...presented, workReady: { ...ready, answerEntryId, text: workReadyNotice(ready.verified, ready.summary) } };
+}
+
 /** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 
-export function startPanel({ harness, sessions, users, directory, feishu, port, describer, sandbox }: PanelOptions): void {
+export function startPanel({ harness, sessions, users, directory, feishu, telegram, runtime, ready, port, describer, sandbox, saveUpload }: PanelOptions): ReturnType<typeof createServer> {
 	const panelFile = join(dirname(fileURLToPath(import.meta.url)), "panel.html");
 	const vendorDir = join(dirname(fileURLToPath(import.meta.url)), "vendor");
 	const MIME: Record<string, string> = {
@@ -208,9 +260,16 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		js: "text/javascript; charset=utf-8",
 	};
 
-	/** 会话显示名：手动重命名优先；飞书会话按 key 结构组合群名/用户名；查不到返回 null，由前端回退。 */
-	async function titleOf(c: { key: string; owner: string; name: string; type: string }): Promise<string | null> {
+	type ConvRow = ReturnType<Sessions["listConversations"]>[number] & { parent?: number; busy?: boolean };
+	/** Telegram has no Feishu directory identity; retain explicit ID fallbacks until renamed. */
+	async function titleOf(c: ConvRow): Promise<string | null> {
 		if (c.name !== c.key || c.type === "panel") return c.name;
+		if (c.platform === "telegram") {
+			const destination = sessions.destinationOf(c.id);
+			if (destination.kind !== "telegram") return c.name;
+			if (c.type === "direct") return `Telegram · 用户 ${c.owner.replace(/^tg:/, "") || destination.chatId}`;
+			return `Telegram 群 ${destination.chatId} · ${c.type === "thread" ? `话题 ${destination.threadId ?? ""}` : `用户 ${c.owner.replace(/^tg:/, "")}`}`;
+		}
 		const [chatId = "", rest] = c.key.split("#");
 		if (c.type === "direct") return (await directory.userName(c.owner)) ?? null;
 		const [chat, user] = await Promise.all([directory.chatName(chatId), c.type === "group" ? directory.userName(c.owner) : Promise.resolve(undefined)]);
@@ -218,7 +277,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, port, 
 		const tail = c.type === "thread" ? `话题 ${String(rest ?? "").slice(2, 10)}` : (user ?? c.owner.slice(0, 10));
 		return `${chat ?? "群聊"} · ${tail}`;
 	}
-const json = (res: ServerResponse, code: number, body: unknown): void => {
+	const json = (res: ServerResponse, code: number, body: unknown): void => {
 		res.writeHead(code, { "content-type": "application/json" });
 		res.end(JSON.stringify(body));
 	};
@@ -254,12 +313,24 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 		checkPanelRequest({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, allowedHosts);
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/healthz") {
-			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()), sandbox());
+			const { code, body } = healthOf(feishu.status(), Math.round(process.uptime()), sandbox(), telegram?.());
 			json(res, code, body);
 			return;
 		}
 		// /healthz 之后：本机探活可用，其余接口（含静态页与 SSE）不对本机进程开放
 		if (denyLocal && isLocalSource(req.socket.remoteAddress, localAddresses())) throw new HttpError(403, "local source denied");
+		if (req.method === "GET" && url.pathname === "/api/ready") {
+			const ok = (ready?.() ?? true) && healthOf(feishu.status(), 0, sandbox(), telegram?.()).code === 200;
+			res.setHeader("cache-control", "no-store");
+			json(res, ok ? 200 : 503, { ready: ok });
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/api/runtime") {
+			if (runtime === undefined) throw new HttpError(503, "runtime unavailable");
+			res.setHeader("cache-control", "no-store");
+			json(res, 200, await runtime());
+			return;
+		}
 		if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
 			const rel = url.pathname.slice("/vendor/".length);
 			if (!/^[\w.-]+\.(css|js)$/.test(rel)) { json(res, 400, { error: "bad asset" }); return; }
@@ -284,26 +355,26 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			return;
 		}
 		if (req.method === "GET" && url.pathname === "/api/conversations") {
-			type ConvRow = ReturnType<Sessions["listConversations"]>[number] & { parent?: number; busy?: boolean };
 			let list: ConvRow[] = [...sessions.listConversations()];
 			if (list.length === 0) {
 				// 本地/空库兜底：root 会话总可用（带默认模型）
 				const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: MODEL } });
-				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", lastTs: 0, chatId: null, notify: false, emoji: null }];
+				list = [{ id: root.id as number, key: "root", owner: "", name: "root", archived: false, type: "panel", platform: "panel", lastTs: 0, chatId: null, notify: false, emoji: null }];
 			}
 			// 后台任务子会话：挂在父会话下（type "task"；名字取父会话名册，停止后名册删除即从侧栏消失）
 			for (const [child, parent] of [...conversationScope.entries()]) {
-				if (!list.some((c) => c.id === parent)) continue;
+				const parentRow = list.find((c) => c.id === parent);
+				if (parentRow === undefined) continue;
 				const doc = await harness.snapshot(BackgroundDoc, parent as ConversationId, BACKGROUND_CONTEXT);
 				const name = Object.entries(doc?.agents ?? {}).find(([, v]) => v.conversationId === child)?.[0];
 				if (name === undefined) continue;
 				const busy = (await harness.snapshot(PiLiveDoc, child as ConversationId, BACKGROUND_CONTEXT))?.run !== undefined;
-				list.push({ id: child, key: `bg:${name}`, owner: "", name: `🧵 ${name}`, archived: false, type: "task", lastTs: 0, chatId: null, notify: false, emoji: null, parent, busy });
+				list.push({ id: child, key: `bg:${name}`, owner: "", name: `🧵 ${name}`, archived: false, type: "task", platform: parentRow.platform, lastTs: 0, chatId: null, notify: false, emoji: null, parent, busy });
 			}
 			const titled = await within(
 				Promise.all(list.map(async (c) => {
 					const title = await titleOf(c);
-					const chatName = c.chatId !== null ? await directory.chatName(c.chatId) : undefined;
+					const chatName = c.chatId === null ? undefined : c.platform === "telegram" ? `Telegram ${c.type === "direct" ? "私聊" : "群"} ${c.chatId.split(":").pop()}` : await directory.chatName(c.chatId);
 					// 群/话题线的组内短名（侧栏按群分组后不再需要群名前缀）
 					const short = title?.split(" · ").pop();
 					return { ...c, title, chatName: chatName ?? null, shortTitle: c.type === "group" || c.type === "thread" ? (short ?? title ?? c.name) : (title ?? c.name) };
@@ -323,9 +394,47 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			json(res, 200, recentReports());
 			return;
 		}
+		if (req.method === "GET" && url.pathname === "/api/work") {
+			const id = Number(url.searchParams.get("id"));
+			if (!Number.isSafeInteger(id) || id <= 0) throw new HttpError(400, "有效的会话 ID 为必填项");
+			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+			json(res, 200, await getWork(harness, id));
+			return;
+		}
+			if (req.method === "POST" && url.pathname === "/api/work/newgoal") {
+				const body = await readBody(req);
+				const id = Number(body?.id);
+				const workId = body?.workId;
+				const requestId = body?.requestId;
+				if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
+				if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+				try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
+				catch (error) { throw new HttpError(409, (error as Error).message); }
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/api/work/accept") {
+			const body = await readBody(req);
+			const id = Number(body?.id);
+			const workId = typeof body?.workId === "string" ? body.workId : "";
+			if (!Number.isSafeInteger(id) || id <= 0 || workId === "") throw new HttpError(400, "会话 ID 和工作记录 ID 为必填项");
+			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
+			try { json(res, 200, await acceptWork(harness, id, workId, feishu.operator())); }
+			catch (error) {
+				const messages: Record<string, string> = {
+					"Work record not found": "工作记录不存在，请刷新记录。",
+					"Work must be ready for review before acceptance": "工作状态已变化，请刷新记录。只有待验收的工作才能确认验收。",
+					"Run verify successfully before requesting review or accepting this work": "缺少有效的验证回执，请让 Agent 完成验证后重新提交验收。",
+					"Verified artifacts changed; run verify again before review or acceptance": "验证后的产物已发生变化，请让 Agent 重新验证后再提交验收。",
+					"Work verification changed during acceptance": "验收期间验证记录已更新，请刷新记录后重新核对。",
+				};
+				console.error("[dwell] 工作验收未通过:", error);
+				throw new HttpError(409, messages[error instanceof Error ? error.message : ""] ?? "无法确认验收，请检查工作区和产物后重试。");
+			}
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/api/users") {
 			const list = users.list();
-			const names = (await within(directory.userNames(list.map((u) => u.id)), 2500)) ?? {};
+			const names = (await within(directory.userNames(list.map((u) => u.id).filter((id) => !id.startsWith("tg:"))), 2500)) ?? {};
 			json(res, 200, list.map((u) => ({ ...u, name: names[u.id] ?? null })));
 			return;
 		}
@@ -379,17 +488,21 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const key = String(body?.key ?? "");
 			const action = body?.action === "deny" ? "deny" : "approve";
 			const minutes = clampMinutes(Number(body?.minutes ?? 10));
-			json(res, 200, await feishu.decide(key, action, minutes));
+			json(res, 200, await feishu.decide(key, action, minutes, typeof body?.requestId === "string" ? body.requestId : undefined));
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/users") {
 			const body = await readBody(req);
 			const id = String(body?.id ?? "");
-			if (!id.startsWith("ou_")) { json(res, 400, { error: "bad open_id" }); return; }
+			if (!/^ou_\w+$/.test(id) && !/^tg:\d+$/.test(id)) { json(res, 400, { error: "需要飞书 open_id 或 Telegram 用户 ID（tg:数字）" }); return; }
 			const action = String(body?.action ?? "");
 			if (action === "remove") {
 				if (users.isAdmin(id) && users.adminCount() <= 1) throw new HttpError(409, "无法移除最后一名管理员");
-				await users.remove(id);
+				try { await users.remove(id, undefined, true); }
+				catch (error) {
+					if (error instanceof Error && error.message.includes("最后一名管理员")) throw new HttpError(400, error.message);
+					throw error;
+				}
 			} else await users.add(id, body?.role === "admin" ? "admin" : "member");
 			json(res, 200, { ok: true });
 			return;
@@ -410,9 +523,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const result = await resolveDownload(cwd, url.searchParams.get("path") ?? "");
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
 			res.writeHead(200, downloadHeaders(result.name, result.size));
-			createReadStream(result.real)
-				.on("error", (err) => res.destroy(err))
-				.pipe(res);
+			res.end(result.buffer);
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/upload") {
@@ -422,7 +533,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			const conversation = Number.isFinite(conv) ? await harness.conversation(conv as ConversationId, BACKGROUND_CONTEXT) : undefined;
 			if (conversation === undefined) { json(res, 404, { error: "conversation not found" }); return; }
 			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
-			const result = await ingestUpload(cwd, body?.name, body?.data, describer());
+			const result = await ingestUpload(cwd, body?.name, body?.data, describer(), saveUpload);
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
 			json(res, 200, { path: result.path, kind: result.kind, size: result.size, part: result.part });
 			return;
@@ -525,17 +636,18 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			return;
 		}
 		let sent: string[] = [];
-		const frame = (): void => {
+		const frame = async (): Promise<void> => {
 			if (closed) return;
-			const v = view.value as unknown as { entries: { id: unknown }[]; docs?: Record<string, unknown> };
+			const v = view.value as unknown as { entries: EntryRecord[]; docs?: Record<string, unknown> };
 			const ids = v.entries.map((e) => String(e.id));
 			const append = sent.length > 0 && sent.length <= ids.length && ids[0] === sent[0] && ids[sent.length - 1] === sent[sent.length - 1];
-			const entries = append ? v.entries.slice(sent.length) : v.entries;
+			const entries = await Promise.all((append ? v.entries.slice(sent.length) : v.entries).map((entry) => presentPanelAnswerEntry(harness, convId, entry)));
+			if (closed) return;
 			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
 			const slim = live?.run === undefined ? null : {
 				tools: (live.tools ?? []).map((t) => ({ callId: t.callId, name: t.name, status: t.status })),
 				text: (live.generation?.message?.content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join(""),
-				retry: live.generation?.retry?.error,
+				retry: live.generation?.retry?.error === undefined ? undefined : modelFailure(live.generation.retry.error).message,
 			};
 			sent = ids;
 			const usage = Object.values((v.docs?.["pi.usage"] as UsageDoc | undefined)?.models ?? {});
@@ -548,7 +660,13 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`);
 		};
 		// subscribe 契约先投当前值再投变更（chord Readable），首帧由它发；手动再发会重复一帧全量 replace
-		cleanups.push(view.subscribe(frame));
+		let frameWork = Promise.resolve();
+		cleanups.push(view.subscribe(() => {
+			frameWork = frameWork.then(frame).catch((error) => {
+				console.error("[dwell] panel 回答呈现失败:", error);
+				res.end();
+			});
+		}));
 		// 心跳保活（穿透链路）
 		const beat = setInterval(() => res.write(": ping\n\n"), 25_000);
 		cleanups.push(() => clearInterval(beat));
@@ -588,25 +706,24 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 				if ((await sendPathViolation(a.path, cwd)) !== undefined) { json(res, 403, { error: "只能使用本会话工作目录内的附件" }); return; }
 			}
 		}
-		// 模型输入与飞书 relay 同规则：文本 + 各附件 part 合并
+		// Keep direct panel input consistent with channel relay input.
 		const input = [content.trim(), ...attachments.map((a) => a.part)].filter((s) => s !== "").join("\n\n");
 		sessions.touchActivity(conversation.id);
 		const id = conversation.id as number;
-		// 飞书会话：一律以操作者名义转发到原 chat 并由 bot 流式回复；不提供仅进上下文的隐藏通道
-		if (sessions.chatOf(id) !== undefined) {
+		// Channel conversations always pass through the visible relay before model submission.
+		const destination = sessions.destinationOf(id);
+		if (destination.kind !== "panel") {
 			await feishu.relay(conversation, content, attachments);
-			json(res, 200, { ok: true, via: "feishu" });
+			json(res, 200, { ok: true, via: destination.kind });
 			return;
 		}
-		runSender.set(id, feishu.operator());
-		runVia.set(id, "panel");
-		void persistApprovals();
+		if ((await harness.snapshot(PiLiveDoc, conversation.id, BACKGROUND_CONTEXT))?.run === undefined) await setRunAttribution(id, feishu.operator(), "panel");
 		const submission = await conversation.submit(
 			{ type: "input", content: input, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
-		// 飞书通知开关开启时：run 结束后私发操作者结果摘要（回复通知即续接任务）
+		// Operator notifications retain an anchor for continuing the panel task.
 		if (sessions.notifyEnabled(id)) void notifyPanelResult(conversation, submission, feishu);
 		json(res, 200, { ok: true, via: "panel" });
 	}
@@ -646,6 +763,7 @@ const json = (res: ServerResponse, code: number, body: unknown): void => {
 	server.listen(port, host, () => {
 		console.log(`[dwell] panel: http://${host ?? "0.0.0.0"}:${port}/`);
 	});
+	return server;
 }
 
 export type { Conversation };

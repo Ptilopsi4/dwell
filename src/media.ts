@@ -1,10 +1,24 @@
 // 多模态入站预处理：图片→视觉模型描述（subagent），文件→落盘 cwd/uploads。主模型无视觉，上下文里只有描述/路径文本。
-import { mkdir, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
-import type { NormalizedMessage } from "./feishu/channel.ts";
+import { randomUUID } from "node:crypto";
+import { basename, extname } from "node:path";
+import type { NormalizedMessage } from "./pipeline.ts";
 import type { ImageDescriber } from "./harness.ts";
+import type { SaveUpload } from "./uploads.ts";
 
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+
+function uploadName(name: string): string {
+	const safe = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_");
+	const extension = extname(safe);
+	const suffix = Buffer.byteLength(extension) <= 16 ? extension : "";
+	const stem = suffix === "" ? safe : safe.slice(0, -suffix.length);
+	let kept = "";
+	for (const character of stem) {
+		if (Buffer.byteLength(kept + character + suffix) > 160) break;
+		kept += character;
+	}
+	return kept + suffix;
+}
 
 /** 图片魔数嗅探：飞书 fileKey 无扩展名。 */
 export function sniffImageMime(buffer: Buffer): string | null {
@@ -24,13 +38,15 @@ export async function ingestBuffer(
 	opts: { kind: "image" | "file"; index: number; tag: string; name?: string },
 	cwd: string,
 	describer: ImageDescriber | null,
+	save: SaveUpload,
+	signal?: AbortSignal,
 ): Promise<{ saved: string; part: string }> {
-	const uploads = join(cwd, "uploads");
+	signal?.throwIfAborted();
 	if (opts.kind === "file") {
 		// file：落盘，read 工具可直接读（无需视觉）
-		const safeName = `${opts.tag}${basename(opts.name ?? `file-${opts.index}`).replace(/[\\/:*?"<>|]/g, "_")}`;
-		await mkdir(uploads, { recursive: true });
-		await writeFile(join(uploads, safeName), buffer);
+		const safeName = `${opts.tag}${uploadName(basename(opts.name ?? `file-${opts.index}`))}`;
+		await save(cwd, safeName, buffer);
+		signal?.throwIfAborted();
 		return {
 			saved: `uploads/${safeName}`,
 			part: `[文件${opts.index}] ${safeName}（${(buffer.length / 1024).toFixed(1)}KB）已保存到 uploads/${safeName}，可用 read 工具读取。`,
@@ -38,9 +54,9 @@ export async function ingestBuffer(
 	}
 	const mime = sniffImageMime(buffer);
 	const ext = mime?.split("/")[1] ?? "bin";
-	const saved = `${opts.tag}${opts.name !== undefined ? opts.name.replace(/[\\/:*?"<>|]/g, "_") : `image-${opts.index}.${ext}`}`;
-	await mkdir(uploads, { recursive: true });
-	await writeFile(join(uploads, saved), buffer);
+	const saved = `${opts.tag}${uploadName(opts.name ?? `image-${opts.index}.${ext}`)}`;
+	await save(cwd, saved, buffer);
+	signal?.throwIfAborted();
 	const path = `uploads/${saved}`;
 	if (mime === null || buffer.length > IMAGE_MAX_BYTES) {
 		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（无法识别或超过 10MB，未做视觉分析）。` };
@@ -49,9 +65,11 @@ export async function ingestBuffer(
 		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（当前未配置视觉模型，仅留档）。` };
 	}
 	try {
-		const description = await describer(buffer.toString("base64"), mime);
+		const description = await describer(buffer.toString("base64"), mime, signal);
+		signal?.throwIfAborted();
 		return { saved: path, part: `[图片${opts.index} ${path}]\n${description}` };
 	} catch (err) {
+		signal?.throwIfAborted();
 		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（视觉分析失败：${err instanceof Error ? err.message : String(err)}）。` };
 	}
 }
@@ -60,11 +78,14 @@ export async function ingestBuffer(
 export async function describeResources(
 	msg: NormalizedMessage,
 	cwd: string,
-	deps: { download: (fileKey: string, type: "image" | "file") => Promise<Buffer>; describer: ImageDescriber | null },
+	deps: { download: (fileKey: string, type: "image" | "file", signal?: AbortSignal) => Promise<Buffer>; describer: ImageDescriber | null; save: SaveUpload },
+	signal?: AbortSignal,
 ): Promise<string> {
+	signal?.throwIfAborted();
 	const parts: string[] = [];
 	let index = 0;
 	for (const resource of msg.resources ?? []) {
+		signal?.throwIfAborted();
 		index++;
 		const label = resource.fileName ?? resource.type;
 		if (resource.type === "audio" || resource.type === "video") {
@@ -78,18 +99,25 @@ export async function describeResources(
 		}
 		let buffer: Buffer;
 		try {
-			buffer = await deps.download(resource.fileKey, resource.type === "image" ? "image" : "file");
+			buffer = await deps.download(resource.fileKey, resource.type === "image" ? "image" : "file", signal);
+			signal?.throwIfAborted();
 		} catch (err) {
+			signal?.throwIfAborted();
 			console.error(`[dwell] 资源下载失败（${resource.type} ${resource.fileKey}）:`, err instanceof Error ? err.message : err);
 			parts.push(`[资源${index}] ${label}：下载失败。`);
 			continue;
 		}
-		// 同 chat 所有任务线共享 cwd：固定序号名会互相覆盖（旧上下文里的路径指向别人的图）。用消息 id 末 8 位做前缀；
-		// 同一消息重推（requestId 幂等）覆写同名文件，内容相同无副作用。飞书图片无可用文件名，保持序号名
-		const tag = `${msg.messageId.replace(/^om_/, "").slice(-8)}-`;
+		// Message labels remain readable; exclusive random filenames also protect earlier inputs on redelivery.
+		const tag = `${msg.messageId.replace(/^om_/, "").slice(-8)}-${randomUUID()}-`;
 		const kind = resource.type === "image" ? "image" : "file";
-		const { part } = await ingestBuffer(buffer, { kind, index, tag, name: kind === "file" ? resource.fileName : undefined }, cwd, deps.describer);
-		parts.push(part);
+		try {
+			const { part } = await ingestBuffer(buffer, { kind, index, tag, name: kind === "file" ? resource.fileName : undefined }, cwd, deps.describer, deps.save, signal);
+			parts.push(part);
+		} catch (err) {
+			signal?.throwIfAborted();
+			console.error(`[dwell] 附件保存失败（${resource.type}）:`, err instanceof Error ? err.message : err);
+			parts.push(`[Attachment ${index}] Could not save ${label}. Ask the user to retry this attachment; no file path is available.`);
+		}
 	}
 	return parts.join("\n\n");
 }

@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, Harness, type Conversation, type Extension, type Harness as HarnessType, type SubmissionId } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, type Conversation, type Extension, type Harness as HarnessType, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, MAX_SCHEDULES, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleInput } from "../src/ext/schedule.ts";
+import { formatLocalTime, makeScheduleExtension, makeScheduleRunTask, MAX_SCHEDULES, nextRecurrenceRunAt, parseAtTime, SCHEDULE_TASK_KIND, scanLiveTasks, validateRepeat, type ScheduleDeps, type ScheduleInput } from "../src/ext/schedule.ts";
 import { resolveTimeZone } from "../src/state.ts";
 
 const UTC = "UTC";
@@ -129,6 +129,55 @@ const lastUserText = async (harness: HarnessType, conversationId: number): Promi
 	return JSON.stringify(users[0]?.model ?? []);
 };
 
+test("schedule access uses the persisted destination and creator on each fire and after attribution", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-access-"));
+	const clock = new FakeClock();
+	let allowed = true;
+	let revokeOnAttribute = false;
+	let fired = 0;
+	let revoked = 0;
+	const checks: unknown[][] = [];
+	const deps: ScheduleDeps = {
+		attribute: async () => { if (revokeOnAttribute) allowed = false; },
+		onFired: () => { fired++; }, getHarness: () => undefined,
+		senderOf: () => "current-admin", viaOf: () => "panel",
+		isAllowed: (creator, id, via) => { checks.push([creator, id, via]); return allowed && creator === "tg:42" && via === "telegram"; },
+		onCreatorRevoked: () => { revoked++; },
+	};
+	const registry = createRegistry(); registry.install(makeScheduleExtension(deps));
+	const faux = fauxProvider(); faux.setResponses([fauxAssistantMessage(fauxText("ack"))]);
+	const models = createModels(); models.setProvider(faux.provider);
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry, ...clock.options }, context);
+	try {
+		const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		const create = (id: string, repeat?: ScheduleInput["repeat"]) => conversation.commit((tx) => tx.createTask(makeScheduleRunTask(deps), {
+			id, conversationId: conversation.id, creator: "tg:42", creatorVia: "telegram", instruction: id, firstAt: clock.now + MIN, tz: UTC, ...(repeat === undefined ? {} : { repeat }),
+		}, { ownership: { kind: "conversation" }, background: true }), context);
+		const loop = await create("repeat", { unit: "minute", interval: 10 });
+		harness.resume();
+		await until(async () => (await harness.getTask(loop, context))?.state.status === "sleeping");
+		await clock.advance(2 * MIN);
+		await until(() => fired === 1);
+		await until(async () => (await harness.getTask(loop, context))?.state.status === "sleeping");
+		allowed = false;
+		await clock.advance(10 * MIN);
+		await until(async () => (await harness.getTask(loop, context))?.state.status === "terminal");
+		assert.equal(fired, 1);
+		assert.equal(revoked, 1);
+		allowed = true; revokeOnAttribute = true;
+		const beforeSubmit = await create("before-submit");
+		await until(async () => (await harness.getTask(beforeSubmit, context))?.state.status === "sleeping");
+		await clock.advance(2 * MIN);
+		await until(async () => (await harness.getTask(beforeSubmit, context))?.state.status === "terminal");
+		assert.equal(fired, 1);
+		assert.equal(revoked, 2);
+		const inputs = (await conversation.entries({}, 100, undefined, context)).items.filter((entry) => entry.model?.[0]?.role === "user");
+		assert.equal(inputs.length, 1);
+		assert.ok(checks.every(([creator, id, via]) => creator === "tg:42" && id === conversation.id && via === "telegram"));
+	} finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("集成：单次触发提交输入并结束；周期任务续睡；取消不再触发；重开后 sleeping 仍触发", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-"));
 	const fired: { conversationId: number; header: string; submissionId: SubmissionId }[] = [];
@@ -136,6 +185,8 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 	// 归属登记要先完成再 submit：登记延迟 resolve，期间会话里不应出现触发输入
 	let attributed = 0;
 	let submittedBeforeAttributed = false;
+	let announce!: () => void;
+	const firstAnnouncement = new Promise<void>((resolve) => { announce = resolve; });
 	let conversationRef: Pick<Conversation, "entries"> | undefined;
 	const deps = {
 		attribute: async () => {
@@ -145,7 +196,10 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 			if (after !== before) submittedBeforeAttributed = true;
 			attributed++;
 		},
-		onFired: (conversationId: number, submissionId: SubmissionId, header: string) => fired.push({ conversationId, header, submissionId }),
+		onFired: async (conversationId: number, submissionId: SubmissionId, header: string) => {
+			fired.push({ conversationId, header, submissionId });
+			if (fired.length === 1) await firstAnnouncement;
+		},
 		getHarness: () => undefined,
 		senderOf: () => "ou_test",
 		// 白名单检查：ou_banned 已被移出 → 其 schedule 触发时终止
@@ -179,6 +233,9 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		const once = await create({ id: "schedule:once", instruction: "say hi", firstAt: clock.now + 5 * MIN });
 		await clock.advance(6 * MIN);
 		await until(() => fired.length === 1);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal((await harness.getTask(once, context))?.state.status, "running", "The schedule must retain its announce checkpoint until presentation is durable");
+		announce();
 		const sub = await harness.submission(fired[0].submissionId, context);
 		assert.ok(sub !== undefined);
 		const settled = await sub.wait(context);
@@ -231,9 +288,64 @@ test("集成：单次触发提交输入并结束；周期任务续睡；取消�
 		await clock.advance(20 * MIN);
 		await until(() => fired.some((f) => f.header.includes("reborn")));
 	} finally {
+		announce();
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("schedule creation rechecks access after an awaited capacity scan without persisting an intent or task", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-sched-create-access-"));
+	let allowed = true;
+	let releaseScan!: () => void;
+	let enteredScan!: () => void;
+	const heldScan = new Promise<void>((resolve) => { releaseScan = resolve; });
+	const scanEntered = new Promise<void>((resolve) => { enteredScan = resolve; });
+	const deps: ScheduleDeps = {
+		attribute: async () => {}, onFired: () => {}, getHarness: () => undefined,
+		senderOf: () => "tg:42", viaOf: () => "telegram",
+		isAllowed: (creator, _conversationId, via) => allowed && creator === "tg:42" && via === "telegram",
+	};
+	const extension = makeScheduleExtension(deps);
+	const registry = createRegistry(); registry.install(extension);
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models: createModels(), registry }, context);
+	try {
+		const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+		const taskId = await conversation.commit((tx) => tx.createTask(makeScheduleRunTask(deps), {
+			id: "seed", conversationId: conversation.id, instruction: "seed", creator: "tg:42", creatorVia: "telegram", firstAt: Date.now() + 300 * 24 * 3_600_000, tz: UTC,
+		}, { ownership: { kind: "conversation" }, background: true }), context);
+		let holdNextScan = true;
+		const api = {
+			conversationId: conversation.id, taskId, now: () => Date.now(),
+			commit: <T,>(fn: (tx: Tx) => T | Promise<T>) => conversation.commit((tx) => fn(new Proxy(tx, {
+				get(target, property) {
+					if (property === "scanTasks") return async (...args: Parameters<Tx["scanTasks"]>) => {
+						const page = await target.scanTasks(...args);
+						if (holdNextScan) { holdNextScan = false; enteredScan(); await heldScan; }
+						return page;
+					};
+					const value = Reflect.get(target, property);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			})), context),
+		} as never;
+		const tool = extension.tools![0]!;
+		const args = { action: "create", instruction: "new schedule", delayMinutes: 60 } as never;
+		const text = (result: unknown) => String((result as { output: { text: string }[] }).output[0]!.text);
+		const pending = tool.execute(args, api, context as never);
+		await scanEntered;
+		allowed = false;
+		releaseScan();
+		assert.match(text(await pending), /no longer has access/);
+		assert.equal((await conversation.commit((tx) => scanLiveTasks(tx, { kind: SCHEDULE_TASK_KIND }), context)).length, 1, "Only the seed task may remain after revocation");
+		allowed = true;
+		const created = text(await tool.execute(args, api, context as never));
+		assert.match(created, /^Scheduled/);
+		assert.equal((await conversation.commit((tx) => scanLiveTasks(tx, { kind: SCHEDULE_TASK_KIND }), context)).length, 2, "A retry must create the task rather than replay an uncreated intent");
+		allowed = false;
+		assert.equal(text(await tool.execute(args, api, context as never)), created, "An existing intent is acknowledged before checking access for new work");
+	} finally { releaseScan(); await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
 
 test("工具层：create 重放先认 intent 再查上限（第 20 个的重放不被上限挡回）", async () => {

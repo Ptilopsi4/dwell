@@ -7,16 +7,19 @@
     "node": ">=26"
   },
   "scripts": {
-    "smoke": "node src/smoke.ts",
+    "smoke": "node --env-file-if-exists=.env src/smoke.ts",
+    "eval": "node --env-file-if-exists=.env eval/run.ts",
+    "backup": "node src/backup.ts",
     "check": "tsc --noEmit",
-    "test": "node --test \"test/*.test.ts\"",
-    "start": "node src/index.ts"
+    "test": "node --test --test-concurrency=2 \"test/*.test.ts\"",
+    "start": "node --env-file-if-exists=.env src/index.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
-    "@larksuiteoapi/node-sdk": "^1.76.0"
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "marked": "18.2.0"
   },
   "devDependencies": {
     "@types/node": "^26",
