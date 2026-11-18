@@ -36,16 +36,16 @@ export async function scrubSecretEnv(): Promise<void> {
 	}
 	if (process.platform !== "linux" || values.length === 0) return;
 	try {
-		await wipeEnvironValues(values, names);
+		await wipeEnvironValues(names);
 	} catch (err) {
 		throw new Error(`密钥擦除失败，拒绝继续启动：${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 
-/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检密钥值不复存在（fail closed）。
+/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检名单内条目值已清零（fail closed）。
  *  /proc/self/mem 按虚拟地址寻址，environ 文件内的偏移不能直接当地址用——环境块的基地址是
  *  /proc/self/stat 的 env_start（第 50 字段），偏移须加上它（实测：不加会写进未映射低地址报 EIO，启动必败）。 */
-async function wipeEnvironValues(values: string[], names: readonly string[]): Promise<void> {
+async function wipeEnvironValues(names: readonly string[]): Promise<void> {
 	const environ = await readFile("/proc/self/environ");
 	const spans: { start: number; end: number }[] = [];
 	for (let i = 0; i < environ.length; ) {
@@ -77,9 +77,19 @@ async function wipeEnvironValues(values: string[], names: readonly string[]): Pr
 	} finally {
 		await handle.close();
 	}
-	const after = (await readFile("/proc/self/environ")).toString("latin1");
-	for (const value of values) {
-		if (after.includes(value)) throw new Error("自检失败：密钥值仍可从 /proc/self/environ 读出");
+	// 自检按条目级判定：名单内的名字不得再持有非空值。裸子串匹配会把「同值的其他变量」
+	// （如 DWELL_PANEL_USER 默认取第一个 admin，与 DWELL_ADMINS 同值）误判为残留，fail-closed 变成启动拒绝。
+	const after = await readFile("/proc/self/environ");
+	for (let i = 0; i < after.length; ) {
+		const zero = after.indexOf(0, i);
+		const entryEnd = zero === -1 ? after.length : zero;
+		const entry = after.subarray(i, entryEnd);
+		const eq = entry.indexOf(61); // '='
+		if (eq > 0 && entry.length > eq + 1 && names.includes(entry.subarray(0, eq).toString("latin1"))) {
+			throw new Error(`自检失败：${entry.subarray(0, eq).toString("latin1")} 的值仍可从 /proc/self/environ 读出`);
+		}
+		if (zero === -1) break;
+		i = zero + 1;
 	}
 }
 
