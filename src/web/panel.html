@@ -776,6 +776,7 @@ function markActive() {
 }
 $("q").addEventListener("input", () => loadConvs(true).catch(() => {}));
 
+let convEpoch = 0;
 function switchConv(id) {
 	const leaving = convs.find((c) => String(c.id) === String(convId));
 	convId = id;
@@ -793,8 +794,10 @@ function switchConv(id) {
 	apprSig = "";
 	loadApprovals();
 	es = new EventSource(`/api/events?conv=${encodeURIComponent(id)}`);
-	es.addEventListener("sync", (e) => { setStatus(true); render(JSON.parse(e.data)); });
-	es.onerror = () => setStatus(false);
+	// 代际校验：切换会话时旧 ES 在 close 前已入队的 sync 事件不得渲染进新会话（串台）
+	const epoch = ++convEpoch;
+	es.addEventListener("sync", (e) => { setStatus(true); if (epoch !== convEpoch) return; render(JSON.parse(e.data)); });
+	es.onerror = () => { if (epoch === convEpoch) setStatus(false); };
 	if (matchMedia("(hover: hover)").matches) $("input").focus();
 }
 /* ── 运行状态：panel SSE 与聊天入口（/healthz）合成一个状态点 ── */
@@ -1476,7 +1479,8 @@ async function openWork(id, selectedWorkId) {
 		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" type="button" id="refreshWork">刷新记录</button><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
 	const list = $("workList");
 	const refresh = $("refreshWork");
-	const load = async (focusWorkId = selectedWorkId) => {
+	// 刷新时沿用用户当前展开的记录（无展开则回退到进入时选中/当前目标），不强制重置回进入时的焦点
+	const load = async (focusWorkId = [...list.querySelectorAll("details.work-record")].find((d) => d.open)?.dataset.workId ?? selectedWorkId) => {
 		refresh.disabled = true;
 		list.textContent = "正在读取工作记录…";
 		try {
@@ -1488,6 +1492,7 @@ async function openWork(id, selectedWorkId) {
 			for (const record of records) {
 				const row = document.createElement("details");
 				row.className = "work-record";
+				row.dataset.workId = record.id;
 				row.open = record.id === (focusWorkId ?? work.current);
 				const heading = document.createElement("summary");
 				heading.textContent = record.goal;
