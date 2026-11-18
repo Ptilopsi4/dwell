@@ -1,17 +1,15 @@
-// 飞书会话工具（dwell.lark.read/image/send）：SDK Client 直调或复用 index 的发送链路，显式优于隐式。
+// 飞书会话工具（dwell.lark.read/image）：SDK Client 直调，显式优于隐式。
 // 依赖运行时对象（channel/directory/sessions 在 main 中后于 harness 装配），用 getter 延迟绑定。
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Directory } from "../feishu/directory.ts";
-import type { SendInput } from "../feishu/channel.ts";
 import type { ImageDescriber } from "../harness.ts";
 import { sniffImageMime } from "../media.ts";
 import type { ConversationDestination } from "../pipeline.ts";
-import { makeFileSendTool } from "./send.ts";
 
 /** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。
- *  chatOf/senderOf/sendToChat 的实现（index 装配）内部先经 scopeOf 归并到父线——
- *  否则后台子会话的 lark 工具会把自己当成 panel 任务（无 chat）：send 谎报已交付、read 拒读、跨会话门槛误拒。 */
+ *  chatOf/senderOf 的实现（index 装配）内部先经 scopeOf 归并到父线——
+ *  否则后台子会话的 lark 工具会把自己当成 panel 任务（无 chat）：read 拒读、跨会话门槛误拒。 */
 export type LarkDeps = {
 	getClient: () => { im: { v1: { message: unknown; messageResource?: unknown } } } | undefined;
 	getDirectory: () => Directory | undefined;
@@ -24,8 +22,6 @@ export type LarkDeps = {
 	senderOf?: (conversationId: number) => string | undefined;
 	/** 自家 app 的 app_id：app 发的消息 sender.id 即 app_id，用来区分自家回复卡与其他 bot 的卡 */
 	getSelfAppId?: () => string | undefined;
-	/** 发消息到会话所在 chat（复用 index 的锚点/话题规则）；返回 undefined = 当前会话没有飞书 chat（panel 任务） */
-	sendToChat?: (conversationId: number, input: SendInput) => Promise<{ messageId: string } | undefined>;
 	destinationOf?: (conversationId: number) => ConversationDestination;
 };
 
@@ -304,31 +300,15 @@ function makeImageTool(deps: LarkDeps) {
 	});
 }
 
-/** Preserve the old tool identity for persisted Feishu conversations. */
-function makeSendTool(deps: LarkDeps) {
-	return makeFileSendTool({
-		destinationOf: (id) => {
-			if (deps.destinationOf !== undefined) return deps.destinationOf(id);
-			const chatId = deps.chatOf(id);
-			return chatId === undefined ? { kind: "panel" } : { kind: "feishu", chatId };
-		},
-		...(deps.sendToChat === undefined ? {} : {
-			send: (id, input) => deps.sendToChat!(id, input.image
-				? { image: { source: input.buffer } }
-				: { file: { source: input.buffer, fileName: input.fileName } }),
-		}),
-	}, "dwell.lark.send", true);
-}
-
 /** 装配：deps 为运行时访问器（channel/directory/sessions 后于 harness 初始化）。 */
 export function makeLarkExtension(deps: LarkDeps) {
 	return defineExtension({
 		name: "dwell-lark",
-		tools: [makeReadTool(deps), makeImageTool(deps), makeSendTool(deps)],
+		tools: [makeReadTool(deps), makeImageTool(deps)],
 		sections: [
 			section(
 				"lark",
-				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. Deliver files with dwell.send; dwell.lark.send remains available for existing Feishu conversations.",
+				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. Deliver files with dwell.send.",
 				{ tag: false },
 			),
 		],

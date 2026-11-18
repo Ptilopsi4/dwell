@@ -13,8 +13,7 @@ function toolActivity(name: string): string {
 		case "dwell.web.fetch": return "读取网页";
 		case "dwell.lark.read": return "读取消息";
 		case "dwell.lark.image": return "识别图片";
-		case "dwell.send":
-		case "dwell.lark.send": return "发送文件";
+		case "dwell.send": return "发送文件";
 		case "dwell.task": return "处理后台任务";
 		case "dwell.task.wait": return "等待后台任务";
 		case "dwell.proc": return "处理后台进程";
@@ -28,7 +27,7 @@ function toolActivity(name: string): string {
 type StreamView = { docs?: Record<string, LiveState | undefined>; entries?: readonly EntryRecord[] };
 type ToolTrace = { key: string; callId: string; name: string; detail: string; status: ToolSlot["status"]; callerId?: number; entry?: number; failed?: boolean; durationMs?: number };
 const TRACE_LIMIT = 6;
-const KNOWN_TOOLS = new Set(["read", "write", "edit", "bash", "dwell.web.search", "dwell.web.fetch", "dwell.lark.read", "dwell.lark.image", "dwell.send", "dwell.lark.send", "dwell.task", "dwell.task.wait", "dwell.proc", "dwell.proc.logs", "dwell.schedule", "dwell.work"]);
+const KNOWN_TOOLS = new Set(["read", "write", "edit", "bash", "dwell.web.search", "dwell.web.fetch", "dwell.lark.read", "dwell.lark.image", "dwell.send", "dwell.task", "dwell.task.wait", "dwell.proc", "dwell.proc.logs", "dwell.schedule", "dwell.work"]);
 
 function literal(text: string): string {
 	return text.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\\/g, "\\\\").replace(/([`*_\[\]<>])/g, "\\$1");
@@ -37,7 +36,7 @@ function literal(text: string): string {
 /** Only presentation fields with known meanings are exposed; commands and output stay private. */
 function toolDetail(name: string, args: Record<string, unknown> | undefined): string {
 	if (args === undefined) return "";
-	if (["read", "write", "edit", "dwell.send", "dwell.lark.send"].includes(name)) {
+	if (["read", "write", "edit", "dwell.send"].includes(name)) {
 		const path = args.path ?? args.filePath ?? args.file_path;
 		if (typeof path !== "string") return "";
 		return literal(prefix(path.split(/[\\/]/).filter(Boolean).at(-1) ?? "", 64));

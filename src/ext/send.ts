@@ -16,13 +16,13 @@ export type SendDeps = {
 const SEND_IMAGE_MAX = 10 * 1024 * 1024;
 const SEND_FILE_MAX = 30 * 1024 * 1024;
 
-/** The legacy Feishu name shares validation so replayed conversations keep their tool. */
-export function makeFileSendTool(deps: SendDeps, name = "dwell.send", feishuOnly = false) {
+/** Durable file delivery: validation lives here so every destination shares it. */
+export function makeFileSendTool(deps: SendDeps) {
 	const text = (t: string, isError = false) => ({ output: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
 	return defineTool({
-		name,
+		name: "dwell.send",
 		description:
-			`Send a file from your working directory to the current ${feishuOnly ? "Feishu chat" : "conversation"}. Use it to deliver a report, chart, data export, or other file you produced instead of replying with a server path. Only files inside this session's working directory can be sent; path checks block .. and symlink escapes. Delivery is limited to the current conversation. Images (png/jpeg/gif/webp) up to 10MB are sent as images; larger images and other files are sent as documents up to 30MB. Empty files are rejected. In panel tasks the file is offered as a download in the panel.${feishuOnly ? " For Telegram conversations use dwell.send." : ""}`,
+			`Send a file from your working directory to the current conversation. Use it to deliver a report, chart, data export, or other file you produced instead of replying with a server path. Only files inside this session's working directory can be sent; path checks block .. and symlink escapes. Delivery is limited to the current conversation. Images (png/jpeg/gif/webp) up to 10MB are sent as images; larger images and other files are sent as documents up to 30MB. Empty files are rejected. In panel tasks the file is offered as a download in the panel.`,
 		parameters: Type.Object({
 			path: Type.String({ description: "Path of the file to send (relative to the working directory, or absolute)" }),
 		}),
@@ -30,7 +30,6 @@ export function makeFileSendTool(deps: SendDeps, name = "dwell.send", feishuOnly
 		async execute(args, api, context) {
 			const conversationId = api.conversationId as number;
 			const destination = deps.destinationOf(conversationId);
-			if (feishuOnly && destination.kind === "telegram") return text("This is a Telegram conversation. Use dwell.send to deliver files to it.", true);
 			const cwd = api.env?.cwd;
 			if (cwd === undefined) return text("This conversation has no working directory, so the file cannot be located.", true);
 			if (destination.kind !== "panel" && deps.send === undefined) return text("The send path is not wired up, so the file cannot be sent.", true);

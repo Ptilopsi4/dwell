@@ -26,7 +26,7 @@ dwell 使用官方 SDK 的长连接（WebSocket），服务器需要能访问公
    | `im:message.p2p_msg:readonly` | 接收私聊消息 |
    | `im:message.group_at_msg:readonly` | 接收群里 @机器人 的消息 |
    | `im:message.group_msg` | 接收群内全部消息（不 @ 的回复、话题群）以及 `dwell.lark.read` 读历史；需要管理员审批 |
-   | `im:resource` | 下载消息里的图片和文件，`dwell.lark.send` 上传文件 |
+   | `im:resource` | 下载消息里的图片和文件，`dwell.send` 上传文件 |
    | `cardkit:card:write` | 流式回复卡片 |
    | `contact:user.base:readonly` | 显示用户名 |
    | `im:chat:readonly` | 显示群名 |

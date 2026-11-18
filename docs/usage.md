@@ -109,7 +109,7 @@ Long previews stay within one message. Final replies are split after formatting,
 - In Feishu groups, images sent without @bot do not enter context automatically. The model can look them up with `dwell.lark.image` when asked. Telegram images must come from an admitted private message, a directed group command/caption, or a reply to this bot.
 - Stickers are not recognized; audio and video are unsupported.
 
-Telegram photo/document downloads are limited to 20 MiB. `dwell.send` sends files from the current conversation's working directory: supported images (`png`, `jpeg`, `gif`, `webp`) up to 10 MiB go as photos; larger images and other files up to 30 MiB go as documents. Empty files are refused. Panel tasks offer a download in the panel. The legacy `dwell.lark.send` name remains Feishu-only. Feishu history and image tools also remain Feishu-only; Telegram has no arbitrary chat-history lookup.
+Telegram photo/document downloads are limited to 20 MiB. `dwell.send` sends files from the current conversation's working directory: supported images (`png`, `jpeg`, `gif`, `webp`) up to 10 MiB go as photos; larger images and other files up to 30 MiB go as documents. Empty files are refused. Panel tasks offer a download in the panel. Feishu history and image tools also remain Feishu-only; Telegram has no arbitrary chat-history lookup.
 
 Built-in model-facing prompts and tool descriptions use English. The model replies in the user's language.
 
@@ -119,7 +119,7 @@ Open `http://<host>:<DWELL_PANEL_PORT>/` from a trusted workstation. The panel h
 
 - The sidebar groups My tasks, Direct messages, Groups, and Archived conversations. The transcript updates live, with streaming text, tool calls, and collapsible thinking.
 - Attach images and files with the paperclip, paste, or drag and drop. Images receive a vision description. For Feishu/Telegram conversations, attachments are forwarded to the original chat first.
-- Download files produced by `dwell.send`, `dwell.lark.send`, or `write` from tool rows. Downloads must be within the conversation's working directory and at most 30 MiB; they are forced attachments, never executed inline. File sending and panel attachment forwarding use the same guarded workspace reader.
+- Download files produced by `dwell.send` or `write` from tool rows. Downloads must be within the conversation's working directory and at most 30 MiB; they are forced attachments, never executed inline. File sending and panel attachment forwarding use the same guarded workspace reader.
 - Status dots reflect the panel stream and bot connections: green for healthy, yellow for connecting/reconnecting, red for disconnected. The bell shows recent runtime alerts and an unread count. The clock lists active schedules across all conversations and lets you cancel them.
 - Background child conversations appear under their parents. Open their transcript or abort the current run through the conversation menu.
 - Create panel tasks, rename, archive, clear context, abort, approve commands, and manage users. The conversation menu also offers New goal with the same behavior as `/newgoal`.

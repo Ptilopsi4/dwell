@@ -39,8 +39,8 @@ src/
   ext/background.ts dwell.task 工具 + 锚/Reporter 任务 + 名册 doc（后台子代理，模式同官方 example 23；子会话去掉 schedule/task/proc 三扩展防递归派生）；makeBackgroundDeliverer 审批续跑投递器（输入经 Reporter 投回子会话，结果 followUp 回父线）
   ext/proc.ts       dwell.proc 工具 + dwell.proc-run durable 任务（托管后台进程：宿主直接 spawn 同一沙箱 wrapper，watch 等退出，report followUp 回会话；重启后按 lost 回报）
   ext/web.ts        dwell.web.search / dwell.web.fetch（智谱 Coding Plan Remote MCP，自研薄 client）
-  ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）/ dwell.lark.send（cwd 内文件发回当前会话）
-  ext/send.ts       dwell.send 文件校验与平台投递；旧 dwell.lark.send 共用校验，仍只投递飞书
+  ext/lark.ts       dwell.lark.read / dwell.lark.image（聊天记录与按需识图，SDK rawClient 直调）
+  ext/send.ts       dwell.send 文件校验与平台投递（按会话目的地发飞书/Telegram，panel 提供下载）
   feishu/channel.ts Channel 连接 + 用户消息资源下载
   feishu/directory.ts 用户名/群名查询与缓存
   web/server.ts     panel HTTP + SSE（/api/*），无内置鉴权
