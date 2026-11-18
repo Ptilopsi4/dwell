@@ -16,7 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -31,3 +31,8 @@ jobs:
         env:
           DWELL_DATA: ${{ runner.temp }}/data
           DWELL_STATE: ${{ runner.temp }}/state
+      # Faux eval run guards the evaluator itself; real-model mode stays opt-in and isolated
+      - run: npm run eval
+        env:
+          DWELL_DATA: ${{ runner.temp }}/eval-data
+          DWELL_STATE: ${{ runner.temp }}/eval-state
