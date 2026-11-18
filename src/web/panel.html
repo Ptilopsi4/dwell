@@ -1300,7 +1300,7 @@ document.addEventListener("click", closeMenu);
 $("menu").addEventListener("click", (e) => e.stopPropagation());
 $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
-	try { await api("reset", { conv: Number(convId) }); } catch (err) { toast(err.message, true); }
+	try { const res = await api("reset", { conv: Number(convId) }); if (typeof res?.notice === "string" && res.notice !== "") toast(res.notice, true); } catch (err) { toast(err.message, true); }
 }, "确认清空上下文?");
 $("newGoalBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
