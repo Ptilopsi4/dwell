@@ -126,6 +126,8 @@ export class TelegramInbox {
 		return this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(TelegramInboxDoc);
 			const row = doc.inputs[id];
+			// 已被 /cancel 或失败处置的行不复活：settle 后到来的答案直接丢弃，不把 failed/uncertain 覆写回 done
+			if (row.output === "failed" || row.output === "uncertain" || row.duplicateOf !== undefined) return false;
 			const duplicate = Object.entries(doc.inputs).find(([key, other]) => key !== id && other.duplicateOf === undefined
 				&& other.conversationId === row.conversationId && other.answerId === answerId && sameDestination(other.destination, row.destination));
 			row.answerId = answerId;
