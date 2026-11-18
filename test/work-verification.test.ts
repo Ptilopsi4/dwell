@@ -315,7 +315,8 @@ test("a failed inline check can be corrected without replacing the work, scope, 
 		const settled = await submit(s, resumed, [call(result.nextCall.name, result.nextCall.arguments)]);
 		assert.ok(settled.type === "input" && settled.status === "done");
 		assert.equal(s.faux.state.callCount, calls + 1);
-		const summary = `目标（工作声明）：${original.goal}\n\n交付范围（声明的相对路径）：\n• job\n• job/result.txt\n\n声明检查的执行结果：\n• native inline check：退出码 0\n\n评审说明（代理声明）：${result.nextCall.arguments.review}`;
+		// 修订过一次（失败后修正）：交付卡带出当前命令与修订次数，防"换成空检查再验"在卡片侧被当成有效验证
+		const summary = `目标（工作声明）：${original.goal}\n\n交付范围（声明的相对路径）：\n• job\n• job/result.txt\n\n声明检查已修订 1 次，当前命令（与初次声明可能不同）：\n• native inline check：${corrected.length <= 100 ? corrected : `${corrected.slice(0, 99)}…`}\n\n声明检查的执行结果：\n• native inline check：退出码 0\n\n评审说明（代理声明）：${result.nextCall.arguments.review}`;
 		assert.deepEqual(await workReadyAnswer(s.harness, conversation.id, settled.answer), { workId: original.id, verified: true, summary });
 		assert.equal((await current(s, conversation.id)).status, "ready_for_review");
 		await submit(s, resumed, [operation("revise", { checks: [{ name: "native inline check", command: corrected }], reason: "Retain the previous successful receipt in the revision audit" })]);

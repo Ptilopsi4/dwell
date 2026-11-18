@@ -232,6 +232,10 @@ function readySummary(record: WorkRecord): string {
 	const parts = [`目标（工作声明）：${clip(record.goal, 240)}`];
 	if (verification !== undefined) {
 		parts.push(`交付范围（声明的相对路径）：\n${list(verification.contract.artifacts, 120)}`);
+		// 检查命令可被 revise 替换：修订过的交付必须带出当前命令与修订次数，防止"换成空检查再 verify"在卡片侧被当成有效验证；
+		// 未修订的交付不复制命令（保持 bounded，完整契约在面板）
+		const revisions = (verification.revisionHistory ?? []).length;
+		if (revisions > 0) parts.push(`声明检查已修订 ${revisions} 次，当前命令（与初次声明可能不同）：\n${list(verification.contract.checks.map((check) => `${clip(check.name, 60)}：${clip(check.command, 100)}`), 140)}`);
 		parts.push(`声明检查的执行结果：\n${list(verification.receipt!.checks.map((check) => `${clip(check.name, 80)}：退出码 ${check.exitCode}`), 100)}`);
 	} else parts.push(`验证：未声明验证契约；已记录 ${record.evidence.length} 条成功工具结果。`);
 	parts.push(`评审说明（代理声明）：${clip(record.review, 720)}`);
