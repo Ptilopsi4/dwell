@@ -135,6 +135,26 @@ test("ready handoffs retain their receipt-time goal, checks and review after rev
 	} finally { await s.close(); }
 });
 
+test("ready after a revision surfaces the revised command and count in the handoff", { timeout: 15_000 }, async () => {
+	const s = await setup({ compaction: false });
+	try {
+		const conversation = await s.conversation();
+		// 首次验证失败（退出码 1）→ revise 换检查 → 再验通过 → ready：交付卡必须带出修订次数与当前命令，旧命令不出现
+		const { settled } = await submit(s, conversation, [
+			start({ checks: [{ name: "Original check", command: 'node -e "process.exit(1)"' }], artifacts: ["result.txt"] }),
+			call("dwell.work", { action: "verify" }),
+			call("dwell.work", { action: "revise", checks: [{ name: "Replacement check", command: 'node -e "process.exit(0)"' }], reason: "The original check no longer matches the deliverable" }),
+			call("dwell.work", { action: "verify" }),
+			ready(),
+		]);
+		const text = (await presentAnswer(s.harness, conversation.id, settled.answer)).text;
+		assert.match(text, /已修订 1 次/);
+		assert.match(text, /Replacement check：node -e "process\.exit\(0\)"/);
+		assert.doesNotMatch(text, /Original check/);
+		assert.equal(s.faux.state.callCount, 5);
+	} finally { await s.close(); }
+});
+
 test("ready handoffs bound long declarations and lists without copying commands or workspace paths", { timeout: 15_000 }, async () => {
 	const s = await setup({ compaction: false });
 	try {
