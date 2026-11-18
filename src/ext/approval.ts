@@ -142,6 +142,16 @@ export function failApprovalNotification(key: string, requestId: string, uncerta
 	});
 }
 
+/** 重试入口：确定性发送失败（failed）且尚无卡片的通知，重启时清回未发送态重发一次；uncertain 不重试 */
+export function resetApprovalNotification(key: string, requestId: string): Promise<boolean> {
+	return changeState((state) => {
+		const pending = state.pending.find(([k]) => k === key)?.[1];
+		if (pending?.requestId !== requestId || pending.notificationState !== "failed") return false;
+		pending.notificationState = undefined;
+		return true;
+	});
+}
+
 export function grantApprovalWindow(key: string, minutes: number, expiresAt = Date.now() + clampMinutes(minutes) * 60_000, expected?: { previousExpiresAt?: number; noPending: boolean }): Promise<boolean> {
 	return changeState((state) => {
 		if (expected !== undefined && (state.windows.find(([k]) => k === key)?.[1] !== expected.previousExpiresAt || (expected.noPending && state.pending.some(([k]) => k === key)))) return false;
@@ -274,7 +284,7 @@ export function rmRecursiveMatch(command: string): string | null {
 }
 
 /** 状态文件与凭证面兜底：路径已移出 agent 可写域，此检查防 cwd 相对猜测与 /proc 回读（减速带非硬墙）。 */
-const STATE_FILES = /users\.json|sessions\.json|message-map\.json|approvals\.json|telegram-chats\.json|telegram[\\/]\d+\.json|(?:^|[\s"'=/\\])\.env\b|(?<![\w-])state[\\/]|\/proc\/[^\s/]*\/environ/;
+const STATE_FILES = /users\.json|sessions\.json|message-map\.json|approvals\.json|telegram-chats\.json|runtime-telemetry\.json|telegram[\\/]\d+\.json|(?:^|[\s"'=/\\])\.env\b|(?<![\w-])state[\\/]|\$\{?DWELL_STATE\b|\/proc\/[^\s/]*\/environ/;
 let modelConfigPaths: string[] = [];
 
 /** Protect only the selected connection file; project files may also be named models.json. */
