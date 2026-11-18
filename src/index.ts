@@ -25,7 +25,7 @@ import { Directory } from "./feishu/directory.ts";
 import { mirrorRestoredSubmission } from "./feishu/recovery.ts";
 import { FeishuDeliveries, type FeishuDelivery } from "./feishu-delivery.ts";
 import { startPanel, type FeishuBridge } from "./web/server.ts";
-import { approvalDecisions, approvals, captureApprovalRevocation, claimApprovalNotification, clampMinutes, conversationScope, decisionInput, drainApprovalDecisions, failApprovalNotification, fileGuardBases, grantApprovalWindow, loadApprovalState, makePathGuardExtension, pendingApprovals, revokeApprovalSnapshot, revokeApprovalWindows, runSender, runVia, scopeOf, setApprovalCallback, setPendingApprovalCard, setRunAttribution, takeDecision, windowKey, type ApprovalDecision, type ApprovalTarget, type RunVia } from "./ext/approval.ts";
+import { approvalDecisions, approvals, captureApprovalRevocation, claimApprovalNotification, clampMinutes, conversationScope, decisionInput, drainApprovalDecisions, failApprovalNotification, fileGuardBases, grantApprovalWindow, loadApprovalState, makePathGuardExtension, pendingApprovals, resetApprovalNotification, revokeApprovalSnapshot, revokeApprovalWindows, runSender, runVia, scopeOf, setApprovalCallback, setPendingApprovalCard, setRunAttribution, takeDecision, windowKey, type ApprovalDecision, type ApprovalTarget, type RunVia } from "./ext/approval.ts";
 import { makeLarkExtension } from "./ext/lark.ts";
 import { makeSendExtension, type FileSendInput } from "./ext/send.ts";
 import { makeScheduleExtension } from "./ext/schedule.ts";
@@ -185,7 +185,7 @@ async function main(): Promise<void> {
 	await sessions.load();
 	telegramInbox = new TelegramInbox(harness);
 	feishuDeliveries = new FeishuDeliveries(harness, { deliver: presentFeishuAutonomous, report: (receipt, alert) => {
-		const reason = { capacity: "待发回报已达上限，生产任务保留投递阶段等待空位", delayed: "回报排队超过 30 分钟，仍保留等待投递", uncertain: "回报发送结果不确定，未自动重发，请核对飞书与任务记录", missing: "回报关联的任务输入已不可用，未发送", storage: "回报状态处理失败，将保留记录重试" }[alert];
+		const reason = { capacity: "待发回报已达上限，生产任务保留投递阶段等待空位", delayed: "回报排队超过 30 分钟，仍保留等待投递", uncertain: "回报发送结果不确定，未自动重发，请核对飞书与任务记录", missing: "回报关联的任务输入已不可用，未发送", storage: "回报状态处理失败，将保留记录重试", failed: "飞书入口未启用，回报已标记失败不再投递" }[alert];
 		onReport(new Error(`飞书自治回报 #${receipt.submissionId}：${reason}`), { type: "extension_error", extension: "dwell-feishu-delivery", conversationId: receipt.conversationId as ConversationId });
 	} });
 	telegramWorkers = new TelegramInputWorkers(telegramInbox, processTelegramInput, async (id, row, error, terminal) => {
@@ -304,7 +304,11 @@ async function main(): Promise<void> {
 	for (const [key, pending] of pendingApprovals) {
 		const scope = Number(key.split(":")[0]);
 		const destination = pending.via === "panel" ? panelDestination() : sessions.destinationOf(scope);
-		if (destination.kind === "telegram" && pending.notificationState === undefined && pending.cardMessageId === undefined) await sendTelegramApproval(destination, scope, pending.trigger, pending.command, pending.match);
+		if (destination.kind === "telegram" && (pending.notificationState === undefined || pending.notificationState === "failed") && pending.cardMessageId === undefined) {
+			// 上次确定性发送失败的通知重发一次：否则该审批永远无人看到，只能靠管理员主动 /approve
+			if (pending.notificationState === "failed") await resetApprovalNotification(key, pending.requestId ?? "");
+			await sendTelegramApproval(destination, scope, pending.trigger, pending.command, pending.match);
+		}
 		else if (destination.kind === "telegram" && pending.notificationState === "sending") {
 			await failApprovalNotification(key, pending.requestId ?? "", true);
 			console.error(`[dwell] Telegram 审批提示投递结果未知，可用命令处理（#${scope}）`);
@@ -315,6 +319,11 @@ async function main(): Promise<void> {
 	await replayApprovalDecisions();
 	// resume 放在擦除密钥与飞书重挂之后：续跑任务（含其 bash）从这里才开跑
 	if (connected()) await feishuDeliveries.start();
+	else {
+		// 无飞书入口（仅 Telegram / panel-only）：pending 回报无人投递，落 failed 防止占满容量阻塞生产
+		const dropped = await feishuDeliveries.failPending("feishu-unavailable");
+		if (dropped > 0) console.error(`[dwell] 飞书入口未启用，${dropped} 条待发回报已标记失败。`);
+	}
 	harness.resume();
 	telegramWorkers.start();
 	telegram?.start();
@@ -951,7 +960,8 @@ async function telegramControlReply(destination: TelegramDestination, text: stri
 
 async function handleTelegramChatCommand(msg: NormalizedMessage, destination: TelegramDestination): Promise<boolean> {
 	const parts = msg.content.trim().split(/\s+/);
-	const command = parts[0]!;
+	// 大小写归一：传输层 groupControl 已按小写放行 /AllowGroup 类变体，此处同口径匹配，避免大写命令被当成普通输入
+	const command = parts[0]!.toLowerCase();
 	if (!["/allowgroup", "/disallowgroup", "/allowchat", "/disallowchat", "/chats"].includes(command)) return false;
 	if (telegram === undefined || telegramChats === undefined || destination.botId !== telegram.identity.id) return true;
 	if (!users.isAdmin(msg.senderId)) {
@@ -1102,7 +1112,9 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 		let answer = "";
 		if (settled.status === "done" && settled.type === "input") {
 			if (!await telegramInbox.claimAnswer(id, settled.answer as number)) {
-				await telegram.edit(row.destination, messageId, "该输入已并入同一轮回复。");
+				// false 有两种四因：并入同一轮（duplicateOf）或已被 /cancel/失败处置——只有前者改写占位提示，取消行保持静默
+				const current = await telegramInbox.input(id);
+				if (current?.output !== "failed" && current?.output !== "uncertain") await telegram.edit(row.destination, messageId, "该输入已并入同一轮回复。");
 				return;
 			}
 			answer = (await presentAnswer(harness, conversation.id, settled.answer)).text || "（本次运行没有产出文本）";
@@ -1130,12 +1142,20 @@ async function presentTelegramSubmission(conversation: Conversation, submission:
 	const id = `tg-reply:${target.destination.botId}:${submission.id}`;
 	const sender = await telegramInbox.submissionSender(conversation.id as number, submission.id as number);
 	if (sender === undefined) throw new Error("Telegram 回复缺少持久发送者，未创建投递凭据");
-	await telegramInbox.prepare(id, { conversationId: conversation.id as number, sender, destination: target.destination, replyTo: target.messageId, submissionId: submission.id as number }, async () => "");
+	// panel 会话经 TG 私聊续接（panelReply）时 authority 是 panel：补记凭据，重启恢复的权限复查才与在线路径同口径
+	const authorityVia = sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : "telegram";
+	await telegramInbox.prepare(id, { conversationId: conversation.id as number, sender, authorityVia, destination: target.destination, replyTo: target.messageId, submissionId: submission.id as number }, async () => "");
 	void replyTelegram(id, conversation, submission);
 }
 
 async function reattachTelegramReplies(): Promise<void> {
-	if (telegram === undefined) return;
+	if (telegram === undefined) {
+		// 无 Telegram 入口（仅飞书 / panel-only）：残留凭据无人投递，落 failed 防止永久滞留非终态污染 panel 计数
+		let dropped = 0;
+		for (const [id] of await telegramInbox.recoverable()) { await telegramInbox.output(id, "failed"); dropped++; }
+		if (dropped > 0) console.error(`[dwell] Telegram 入口未启用，${dropped} 条待投递凭据已标记失败。`);
+		return;
+	}
 	for (const [id, row] of await telegramInbox.recoverable()) {
 		if (row.destination.botId !== telegram.identity.id) continue;
 		if (row.raw !== undefined && row.submissionId === undefined) continue;
@@ -1349,6 +1369,8 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				telegramWorkers.cancel(receipt.cancelInputIds ?? []);
 				for (const id of receipt.cancelInputIds ?? []) { telegramPreparationActivities.get(id)?.(); telegramPreparationActivities.delete(id); }
 				if (receipt.cancelTaskId !== undefined) await harness.abortTask(receipt.cancelTaskId as TaskId, context);
+				// begin 与重放之间新启动的 run 不在收据快照里：无条件再 abort 一次兜底（无活跃任务时是幂等空操作）
+				await conversation.abort(context);
 			} else await conversation.abort(context);
 			await replyTo(target, "已中止当前任务。");
 			break;
@@ -1609,13 +1631,20 @@ const feishuBridge: FeishuBridge = {
 			await telegramInbox.prepare(receiptId, { conversationId: id, sender: panelUser, authorityVia: "panel", destination, replyTo: sent.messageId, requestId }, async () => content);
 		}
 		if (!conversationActorAllowed(panelUser, id, "panel")) throw new Error("输入提交前使用权限已撤销，未启动模型。");
-		const submission = await conversation.submit({
-			type: "input",
-			content,
-			entry: { kind: "chat.message", data: { sender: panelUser, senderName: OPERATOR_LABEL, via: "panel" } },
-			requestId,
-			whenBusy: conversationInputMode(conversation.id),
-		}, BACKGROUND_CONTEXT);
+		let submission;
+		try {
+			submission = await conversation.submit({
+				type: "input",
+				content,
+				entry: { kind: "chat.message", data: { sender: panelUser, senderName: OPERATOR_LABEL, via: "panel" } },
+				requestId,
+				whenBusy: conversationInputMode(conversation.id),
+			}, BACKGROUND_CONTEXT);
+		} catch (err) {
+			// 回执已落库但提交失败（存储错误等）：tg-panel 凭据行落终态，否则既无人处理也要等重启重挂，panel 计数持续虚高
+			if (receiptId !== undefined) await telegramInbox.output(receiptId, "failed").catch(() => {});
+			throw err;
+		}
 		if (receiptId !== undefined) {
 			await telegramInbox.admitted(receiptId, submission.id as number);
 			void replyTelegram(receiptId, conversation, submission);

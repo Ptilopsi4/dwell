@@ -9,7 +9,7 @@ export type FeishuDelivery = {
 	createdAt: number; updatedAt: number; delayedAt?: number;
 };
 type DeliveryInput = Omit<FeishuDelivery, "status" | "createdAt" | "updatedAt" | "delayedAt">;
-export type FeishuDeliveryAlert = "capacity" | "delayed" | "uncertain" | "missing" | "storage";
+export type FeishuDeliveryAlert = "capacity" | "delayed" | "uncertain" | "missing" | "storage" | "failed";
 export const FEISHU_PENDING_LIMIT = 1000;
 export const FEISHU_DELIVERY_CONCURRENCY = 4;
 const TERMINAL_LIMIT = 2000;
@@ -119,6 +119,23 @@ export class FeishuDeliveries {
 		this.#timer = setInterval(() => this.#kick(), this.#pollMs); this.#timer.unref();
 		this.#kick();
 	}
+
+	/** 平台不可用时的降级：把 pending 回报落为 failed（无人投递也不能永久占用 pending 容量阻塞生产）。返回处理条数。 */
+	async failPending(reason: string): Promise<number> {
+		await this.recover();
+		if (this.#closed) return 0;
+		const rows = await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(FeishuDeliveryDoc);
+			const changed: FeishuDelivery[] = [];
+			for (const receipt of Object.values(doc.receipts)) if (receipt.status === "pending") {
+				receipt.status = "failed"; receipt.updatedAt = this.#now(); changed.push({ ...receipt }); void reason;
+			}
+			trimTerminal(doc.receipts);
+			return changed;
+		}, context);
+		for (const receipt of rows) this.#report(receipt, "failed");
+		return rows.length;
+	}
 	#kick(): void {
 		if (!this.#started || this.#closed || this.#scan !== undefined) return;
 		this.#scan = (async () => {
@@ -168,7 +185,10 @@ export class FeishuDeliveries {
 			if (current?.status !== "pending") return false;
 			current.status = "sending"; current.updatedAt = this.#now(); return true;
 		}, context);
-		if (!claimed || this.#closed) return;
+		// 关机竞态：尚未真正进入 #deliver 的 sending 行回滚 pending（未发出的发送可安全重试），
+		// 不能等重启统一标 uncertain——那会把从未开始的回报永久吞掉
+		if (!claimed) return;
+		if (this.#closed) { await this.#finish(receipt, "pending"); return; }
 		try {
 			await this.#deliver(receipt, this.#controller.signal);
 			if (!this.#closed) await this.#finish(receipt, "done");
