@@ -49,7 +49,7 @@
 
 省略 `vision` 时，只有主连接解析后的 `input` 包含 `image` 才复用主模型。`vision: null` 关闭识图。显式视觉连接必须声明图片能力，可以使用独立的端点、模型与凭证变量。缺少视觉密钥时保留图片、不做识别。
 
-OpenCode Go 模板复用标准 Chat Completions 适配器。SDK 为持久会话添加稳定的会话头，每次独立图片描述也有自己的单次会话 ID；模板设置 dwell 的 User-Agent。Go 仍受套餐额度与编码代理使用范围约束，价格未知不代表 API 无限或免费。参见[官方 Go 指南](https://opencode.ai/docs/console/go/)。
+OpenCode Go 模板复用标准 Chat Completions 适配器。注意：选用该模板即把全部对话内容（含工具读到的文件数据）经稳定的会话级标识发往 opencode.ai；敏感工作区不应使用。SDK 为持久会话添加稳定的会话头，每次独立图片描述也有自己的单次会话 ID；模板设置 dwell 的 User-Agent。Go 仍受套餐额度与编码代理使用范围约束，价格未知不代表 API 无限或免费。参见[官方 Go 指南](https://opencode.ai/docs/console/go/)。
 
 ### 凭证与连接变更
 

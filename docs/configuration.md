@@ -49,7 +49,7 @@ Other connections default to text input, `reasoning: false`, `contextWindow: 327
 
 Omitting `vision` reuses the main connection only if its resolved `input` includes `image`. Set `vision: null` to disable recognition. An explicit vision connection must declare image support and may use its own endpoint, model, and credential variable. A missing vision key saves images without recognition.
 
-The OpenCode Go template uses the standard Chat Completions adapter. The SDK supplies a stable session header for durable conversations, and each independent image description receives a one-shot session ID. The template sets dwell's User-Agent. Go usage remains subject to the subscription's limits and supported coding-agent use; unknown pricing does not mean unlimited or free API usage. See the [official Go guide](https://opencode.ai/docs/console/go/).
+The OpenCode Go template uses the standard Chat Completions adapter. Note that selecting it routes the full conversation content — including file data read by tools — to opencode.ai under a stable per-conversation session identifier; do not use it for sensitive workspaces. The SDK supplies a stable session header for durable conversations, and each independent image description receives a one-shot session ID. The template sets dwell's User-Agent. Go usage remains subject to the subscription's limits and supported coding-agent use; unknown pricing does not mean unlimited or free API usage. See the [official Go guide](https://opencode.ai/docs/console/go/).
 
 ### Credentials and connection changes
 
