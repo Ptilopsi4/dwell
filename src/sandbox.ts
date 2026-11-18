@@ -5,6 +5,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+
+export const npmCacheEnv = () => {
+	const cache = join(tmpdir(), "dwell-xdg", "npm-cache");
+	// npm scripts export lowercase configuration, which wins over an uppercase override.
+	return { NPM_CONFIG_CACHE: cache, npm_config_cache: cache };
+};
 
 /** 只读挂载的额外目录：node 安装前缀（execPath 的 bin/ 上级，沙箱内 node/npm 可用）与两个 DNS 解析目录；
  *  前缀落在 /usr 下时与固定项重叠，冗余挂载无害。/etc 与 DNS 目录在 exec 行里另有固定项，重复时按目标去重。 */
@@ -47,6 +54,7 @@ exec "$BWRAP" ${mountArgs.join(" ")} \\
 	--dev /dev --proc /proc --unshare-pid --die-with-parent \\
 	--bind /tmp /tmp --bind "$CWD" "$CWD" --chdir "$CWD" \\
 	--clearenv --setenv PATH "$PATH" --setenv HOME "$CWD" \\
+	--setenv NPM_CONFIG_CACHE /tmp/dwell-xdg/npm-cache \\
 	--setenv XDG_CONFIG_HOME /tmp/dwell-xdg/config --setenv XDG_STATE_HOME /tmp/dwell-xdg/state --setenv XDG_CACHE_HOME /tmp/dwell-xdg/cache${passEnv.map((name) => ` --setenv ${name} "$${name}"`).join("")} \\
 	/bin/bash "$@"
 `;
@@ -71,6 +79,18 @@ echo "selftest OK"
 }
 
 export type SandboxState = { enabled: boolean; reason?: string; wrapperPath?: string };
+export type SandboxMode = "required" | "auto" | "off";
+
+export function sandboxMode(env: NodeJS.ProcessEnv = process.env): SandboxMode {
+	const value = env.DWELL_SANDBOX ?? (env.NODE_ENV === "production" ? "required" : "auto");
+	if (value !== "required" && value !== "auto" && value !== "off") throw new Error("DWELL_SANDBOX 必须为 required、auto 或 off");
+	return value;
+}
+
+/** A failed production probe must stop startup before any durable task resumes. */
+export function requireSandbox(mode: SandboxMode, state: SandboxState): void {
+	if (mode === "required" && !state.enabled) throw new Error(`DWELL_SANDBOX=required：沙箱不可用，拒绝启动（${state.reason ?? "探测失败"}）`);
+}
 
 /** dwell.proc 直接 spawn 用的 shell：沙箱启用即 wrapper（与 bash 工具同一进沙箱路径）；否则找系统 bash。
  *  NodeExecutionEnv 的默认解析是私有函数，这里用同一套候选（win32：Git Bash 安装位 → PATH；其余：/bin/bash → which）。

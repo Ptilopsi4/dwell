@@ -4,11 +4,22 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeResources, ingestBuffer, sniffImageMime } from "../src/media.ts";
+import { describeResources as preprocess, ingestBuffer as ingest, sniffImageMime } from "../src/media.ts";
+import { Uploads } from "../src/uploads.ts";
 import type { NormalizedMessage } from "../src/feishu/channel.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+const writer = await Uploads.open(tmpdir(), () => ({ enabled: false }));
+const posix = { skip: process.platform === "win32" ? "Safe uploads are disabled on Windows" : false };
+async function describeResources(msg: NormalizedMessage, cwd: string, deps: Omit<Parameters<typeof preprocess>[2], "save">) {
+	await writer.register(cwd);
+	return preprocess(msg, cwd, { ...deps, save: writer.save });
+}
+async function ingestBuffer(buffer: Buffer, opts: Parameters<typeof ingest>[1], cwd: string, describer: Parameters<typeof ingest>[3]) {
+	await writer.register(cwd);
+	return ingest(buffer, opts, cwd, describer, writer.save);
+}
 
 function msgOf(resources: { type: "image" | "file" | "audio" | "sticker"; fileKey: string; fileName?: string }[], messageId = "om_ABCDEFGH"): NormalizedMessage {
 	return { resources, messageId, content: "", rawContentType: "image" } as unknown as NormalizedMessage;
@@ -23,7 +34,32 @@ test("sniffImageMime 识别四种图片格式与未知数据", () => {
 	assert.equal(sniffImageMime(Buffer.from([1, 2])), null); // 过短
 });
 
-test("图片经 describer 生成描述并落盘留档", async () => {
+for (const stage of ["download", "save", "vision"] as const) test(`cancelled attachment stops at ${stage} without preparing later resources`, async () => {
+	const controller = new AbortController();
+	const calls: string[] = [];
+	const stopped = new Error("Attachment cancelled");
+	await assert.rejects(preprocess(msgOf([{ type: "image", fileKey: "first" }, { type: "image", fileKey: "later" }]), "/unused", {
+		download: async (key, _type, signal) => {
+			assert.equal(signal, controller.signal);
+			calls.push(`download:${key}`);
+			if (stage === "download") controller.abort(stopped);
+			return PNG;
+		},
+		save: async () => {
+			calls.push("save");
+			if (stage === "save") controller.abort(stopped);
+		},
+		describer: async (_base64, _mime, signal) => {
+			assert.equal(signal, controller.signal);
+			calls.push("vision");
+			controller.abort(stopped);
+			throw stopped;
+		},
+	}, controller.signal), (error: unknown) => error === stopped);
+	assert.deepEqual(calls, stage === "download" ? ["download:first"] : stage === "save" ? ["download:first", "save"] : ["download:first", "save", "vision"]);
+});
+
+test("图片经 describer 生成描述并落盘留档", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const seen: { mime: string; data: string }[] = [];
 	const out = await describeResources(msgOf([{ type: "image", fileKey: "k1" }]), dir, {
@@ -34,21 +70,22 @@ test("图片经 describer 生成描述并落盘留档", async () => {
 		},
 	});
 	assert.deepEqual(seen, [{ mime: "image/png", data: PNG.toString("base64") }]);
-	assert.match(out, /^\[图片1 uploads\/ABCDEFGH-image-1\.png\]\n一张红色测试图$/);
-	assert.deepEqual(await readdir(join(dir, "uploads")), ["ABCDEFGH-image-1.png"]);
-	assert.ok(PNG.equals(await readFile(join(dir, "uploads", "ABCDEFGH-image-1.png"), null)));
+	assert.match(out, /^\[图片1 uploads\/ABCDEFGH-[\da-f-]{36}-image-1\.png\]\n一张红色测试图$/);
+	const files = await readdir(join(dir, "uploads"));
+	assert.equal(files.length, 1);
+	assert.ok(PNG.equals(await readFile(join(dir, "uploads", files[0]), null)));
 });
 
-test("无 describer 时图片降级留档提示", async () => {
+test("无 describer 时图片降级留档提示", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const out = await describeResources(msgOf([{ type: "image", fileKey: "k1" }]), dir, {
 		download: async () => JPEG,
 		describer: null,
 	});
-	assert.match(out, /\[图片1\] 已存 uploads\/ABCDEFGH-image-1\.jpeg（当前未配置视觉模型，仅留档）。/);
+	assert.match(out, /\[图片1\] 已存 uploads\/ABCDEFGH-[\da-f-]{36}-image-1\.jpeg（当前未配置视觉模型，仅留档）。/);
 });
 
-test("非图片魔数留档但不做视觉分析", async () => {
+test("非图片魔数留档但不做视觉分析", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	let called = false;
 	const out = await describeResources(msgOf([{ type: "image", fileKey: "k1" }]), dir, {
@@ -76,23 +113,26 @@ test("表情包不打下载请求，直接提示改发图片", async () => {
 	assert.match(out, /\[表情1\] sticker：表情包暂不支持识别，请改发图片消息。/);
 });
 
-test("文件落盘 sanitize 文件名并提示 read 路径", async () => {
+test("文件落盘 sanitize 文件名并提示 read 路径", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const out = await describeResources(msgOf([{ type: "file", fileKey: "k2", fileName: "..\\evil:/name.txt" }]), dir, {
 		download: async () => Buffer.from("hello"),
 		describer: null,
 	});
-	assert.match(out, /\[文件1\] ABCDEFGH-name\.txt（0\.0KB）已保存到 uploads\/ABCDEFGH-name\.txt，可用 read 工具读取。/);
-	assert.deepEqual(await readdir(join(dir, "uploads")), ["ABCDEFGH-name.txt"]);
+	assert.match(out, /\[文件1\] ABCDEFGH-[\da-f-]{36}-name\.txt（0\.0KB）已保存到 uploads\/ABCDEFGH-[\da-f-]{36}-name\.txt，可用 read 工具读取。/);
+	assert.equal((await readdir(join(dir, "uploads"))).length, 1);
 });
 
-test("不同消息的落盘名不互撞（同 chat 共享 cwd）", async () => {
+test("不同消息的落盘名不互撞（同 chat 共享 cwd）", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const run = async (messageId: string) =>
 		await describeResources(msgOf([{ type: "image", fileKey: "k1" }], messageId), dir, { download: async () => PNG, describer: null });
 	await run("om_AAAAAAAA");
 	await run("om_BBBBBBBB");
-	assert.deepEqual((await readdir(join(dir, "uploads"))).sort(), ["AAAAAAAA-image-1.png", "BBBBBBBB-image-1.png"]);
+	const files = (await readdir(join(dir, "uploads"))).sort();
+	assert.equal(files.length, 2);
+	assert.match(files[0], /^AAAAAAAA-[\da-f-]{36}-image-1\.png$/);
+	assert.match(files[1], /^BBBBBBBB-[\da-f-]{36}-image-1\.png$/);
 });
 
 test("音视频与下载失败的降级提示", async () => {
@@ -116,7 +156,7 @@ test("音视频与下载失败的降级提示", async () => {
 
 // ── ingestBuffer（panel 上传共用路径）──
 
-test("ingestBuffer：图片带 name 用安全化原名落盘并出描述", async () => {
+test("ingestBuffer：图片带 name 用安全化原名落盘并出描述", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const { saved, part } = await ingestBuffer(PNG, { kind: "image", index: 1, tag: "abcd1234-", name: "屏幕/截图:1.png" }, dir, async () => "一张红色测试图");
 	assert.equal(saved, "uploads/abcd1234-屏幕_截图_1.png");
@@ -124,14 +164,14 @@ test("ingestBuffer：图片带 name 用安全化原名落盘并出描述", async
 	assert.ok(PNG.equals(await readFile(join(dir, "uploads", "abcd1234-屏幕_截图_1.png"), null)));
 });
 
-test("ingestBuffer：无 name 图片保持序号名，无 describer 降级留档", async () => {
+test("ingestBuffer：无 name 图片保持序号名，无 describer 降级留档", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const { saved, part } = await ingestBuffer(JPEG, { kind: "image", index: 2, tag: "x-" }, dir, null);
 	assert.equal(saved, "uploads/x-image-2.jpeg");
 	assert.equal(part, "[图片2] 已存 uploads/x-image-2.jpeg（当前未配置视觉模型，仅留档）。");
 });
 
-test("ingestBuffer：文件落盘 sanitize 并提示 read 路径", async () => {
+test("ingestBuffer：文件落盘 sanitize 并提示 read 路径", posix, async () => {
 	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
 	const { saved, part } = await ingestBuffer(Buffer.from("hello"), { kind: "file", index: 3, tag: "x-", name: "data/report.txt" }, dir, null);
 	assert.equal(saved, "uploads/x-report.txt");

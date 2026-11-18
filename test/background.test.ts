@@ -8,10 +8,11 @@ import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, Harness, LiveDoc, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, InboxDoc, LiveDoc, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { BackgroundAnchor, BACKGROUND_ANCHOR_KIND, BackgroundDoc, backgroundCapViolation, backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, makeBackgroundReporter, type BackgroundDeps } from "../src/ext/background.ts";
-import { makeScheduleExtension } from "../src/ext/schedule.ts";
+import { BackgroundAnchor, BACKGROUND_ANCHOR_KIND, BACKGROUND_REPORTER_KIND, BackgroundDoc, backgroundCapViolation, backgroundChildren, makeBackgroundDeliverer, makeBackgroundExtension, makeBackgroundReporter, type BackgroundDeps } from "../src/ext/background.ts";
+import { makeScheduleExtension, scanLiveTasks } from "../src/ext/schedule.ts";
+import { WorkspaceDoc } from "../src/workspace.ts";
 
 const until = async (check: () => Promise<boolean> | boolean, ms = 10_000): Promise<void> => {
 	for (const end = Date.now() + ms; ;) {
@@ -20,6 +21,254 @@ const until = async (check: () => Promise<boolean> | boolean, ms = 10_000): Prom
 		await new Promise((r) => setTimeout(r, 10));
 	}
 };
+
+async function admissionFixture(overrides: Partial<BackgroundDeps> = {}) {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-admission-"));
+	const started: { child: number; parent: number }[] = [];
+	const deps: BackgroundDeps = {
+		attribute: async () => {}, onFired: () => {}, senderOf: () => "creator", forbidden: () => [],
+		onStarted: (child, parent) => { started.push({ child, parent }); },
+		...overrides,
+	};
+	const models = createModels(); models.setProvider(fauxProvider().provider);
+	const registry = createRegistry();
+	const extension = makeBackgroundExtension(deps); registry.install(extension);
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry }, context);
+	const tool = extension.tools?.[0];
+	if (tool === undefined) throw new Error("dwell.task was not registered");
+	// Leave the scheduler paused so admitted Reporters remain live without timing or model calls.
+	const parent = async () => {
+		const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		const api = {
+			conversationId: conversation.id,
+			registry: registry.snapshot(),
+			commit: <T,>(fn: (tx: never) => T | Promise<T>) => conversation.commit(fn as never, context),
+			snapshot: (doc: never, id: number) => harness.snapshot(doc, id as ConversationId, context),
+			conversation: (id: number) => harness.conversation(id as ConversationId, context),
+		} as never;
+		return {
+			id: conversation.id,
+			execute: (args: { action: "start" | "send"; name: string; message: string }) => tool.execute(args, api, context as never),
+		};
+	};
+	return {
+		harness, context, started, parent,
+		live: () => harness.commit((tx) => scanLiveTasks(tx, { kind: BACKGROUND_REPORTER_KIND }), context),
+		close: async () => { await harness.close(context); await rm(dir, { recursive: true, force: true }); },
+	};
+}
+
+const toolOutput = (result: unknown): string => String((result as { output?: { text?: string }[] }).output?.[0]?.text ?? "");
+
+test("actor-scoped background input queues behind the child's current actor without steering its run", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-actor-input-"));
+	let release!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	let firstStarted = false;
+	const scopes: number[] = [];
+	const deps: BackgroundDeps = {
+		attribute: async () => {}, onFired: () => {}, onStarted: () => {}, forbidden: () => [],
+		senderOf: () => "current-parent-actor",
+		inputMode: (parent) => { scopes.push(parent); return "followUp"; },
+	};
+	const faux = fauxProvider();
+	faux.setResponses([
+		async () => { firstStarted = true; await held; return fauxAssistantMessage(fauxText("first actor finished")); },
+		...Array.from({ length: 10 }, () => fauxAssistantMessage(fauxText("later answer"))),
+	]);
+	const models = createModels(); models.setProvider(faux.provider);
+	const registry = createRegistry(); registry.install(makeBackgroundExtension(deps));
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry }, context);
+	try {
+		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		const childId = await parent.commit(async (tx) => {
+			const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
+			return (await tx.createConversation({ ownership: { kind: "task", taskId: anchor } })).id;
+		}, context);
+		const child = (await harness.conversation(childId, context))!;
+		const first = await child.submit({ type: "input", content: "first actor's task", entry: { kind: "chat.message", data: { sender: "tg:11", via: "telegram" } } }, context);
+		harness.resume();
+		await until(() => firstStarted);
+		const reporter = await parent.commit((tx) => tx.createTask(makeBackgroundReporter(deps), {
+			name: "worker", parent: parent.id, child: child.id, message: "second actor's task", creator: "tg:22", creatorVia: "telegram", followUp: false,
+		}, { ownership: { kind: "conversation" }, background: true }), context);
+		await until(async () => (await harness.snapshot(InboxDoc, child.id, context))?.items.length === 1);
+		const live = await harness.snapshot(LiveDoc, child.id, context);
+		const queued = (await harness.snapshot(InboxDoc, child.id, context))!.items[0]!;
+		assert.equal(queued.mode, "followUp");
+		assert.equal((queued.entry?.data as { sender: string }).sender, "tg:22");
+		assert.deepEqual(live?.run?.inputs, [first.id], "The new actor must not join the original run");
+		assert.deepEqual(scopes, [parent.id]);
+		release();
+		const firstResult = await first.wait(context);
+		const queuedResult = await (await harness.submission(queued.id, context))!.wait(context);
+		assert.equal(firstResult.status, "done");
+		assert.equal(queuedResult.status, "done");
+		if (firstResult.status === "done" && firstResult.type === "input" && queuedResult.status === "done" && queuedResult.type === "input") assert.notEqual(firstResult.answer, queuedResult.answer);
+		await until(async () => (await harness.getTask(reporter, context))?.state.status === "terminal");
+		const entries = (await child.entries({}, 100, undefined, context)).items.filter((entry) => entry.kind === "chat.message");
+		assert.deepEqual(entries.map((entry) => (entry.data as { sender: string }).sender).sort(), ["tg:11", "tg:22"]);
+	} finally { release(); await harness.close(context); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("background access uses the invocation actor and revokes queued delivery without keeping its unused lease", async () => {
+	let allowed = true;
+	let sender = "tg:42";
+	const checks: unknown[][] = [];
+	const fixture = await admissionFixture({
+		senderOf: () => sender,
+		viaOf: () => "telegram",
+		isAllowed: (creator, conversationId, via) => { checks.push([creator, conversationId, via]); return allowed && creator === "tg:42" && via === "telegram"; },
+	});
+	try {
+		const parent = await fixture.parent();
+		assert.match(toolOutput(await parent.execute({ action: "start", name: "worker", message: "queued job" })), /^Started worker\./);
+		const reporter = (await fixture.live())[0]!;
+		const child = (reporter.input as { child: number }).child;
+		await fixture.harness.commit(async (tx) => {
+			const workspace = await tx.doc(WorkspaceDoc);
+			workspace.children[String(child)] = { parent: parent.id, mode: "write", workspace: "/queued-work" };
+			workspace.writers["/queued-work"] = { conversationId: child, reporterId: reporter.id, workspace: "/queued-work" };
+		}, fixture.context);
+		allowed = false;
+		assert.match(toolOutput(await parent.execute({ action: "send", name: "worker", message: "refused follow-up" })), /no longer has access/);
+		assert.match(toolOutput(await parent.execute({ action: "start", name: "second", message: "refused start" })), /no longer has access/);
+		sender = "admin-now";
+		fixture.harness.resume();
+		await until(async () => (await fixture.harness.getTask(reporter.id, fixture.context))?.state.status === "terminal");
+		const conversation = await fixture.harness.conversation(child as ConversationId, fixture.context);
+		assert.equal((await conversation!.entries({}, 20, undefined, fixture.context)).items.length, 0);
+		assert.equal((await fixture.harness.snapshot(WorkspaceDoc, fixture.context))?.writers["/queued-work"], undefined);
+		assert.equal((await fixture.harness.snapshot(BackgroundDoc, parent.id, fixture.context))?.agents.worker?.conversationId, child);
+		assert.ok(checks.every(([creator, id, via]) => creator === "tg:42" && id === parent.id && via === "telegram"));
+		assert.equal((await fixture.live()).length, 0);
+	} finally { await fixture.close(); }
+});
+
+test("background approval delivery never borrows the parent's current actor or transport", async () => {
+	const checks: unknown[][] = [];
+	let allowed = true;
+	const fixture = await admissionFixture({
+		viaOf: () => "panel",
+		isAllowed: (creator, id, via) => { checks.push([creator, id, via]); return allowed && creator === "creator"; },
+	});
+	try {
+		const parent = await fixture.parent();
+		await parent.execute({ action: "start", name: "worker", message: "job" });
+		const child = ((await fixture.live())[0]!.input as { child: number }).child;
+		const deliverer = makeBackgroundDeliverer({
+			attribute: async () => {}, onFired: () => {}, onStarted: () => {}, forbidden: () => [],
+			senderOf: () => "current-admin", viaOf: () => "panel",
+			isAllowed: (creator, id, via) => { checks.push([creator, id, via]); return allowed && creator === "creator"; },
+		}, () => fixture.harness);
+		assert.equal(await deliverer.deliver(parent.id, child, "approval", { deliveryId: "denied", sender: "revoked", via: "telegram" }), false);
+		assert.deepEqual(checks.at(-1), ["revoked", parent.id, "telegram"]);
+		assert.equal(await deliverer.deliver(parent.id, child, "approval", { deliveryId: "legacy", sender: "creator" }), true);
+		assert.deepEqual(checks.at(-1), ["creator", parent.id, undefined]);
+		allowed = false;
+		assert.equal(await deliverer.deliver(parent.id, child, "approval", { deliveryId: "later", sender: "creator", via: "telegram" }), false);
+		assert.equal((await fixture.live()).length, 2);
+		assert.equal(await deliverer.deliver(parent.id, child, "approval", { deliveryId: "legacy", sender: "creator" }), true, "An existing receipt acknowledges delivery without creating new work");
+		allowed = true;
+		assert.equal(await deliverer.deliver(parent.id, child, "approval", { deliveryId: "third", sender: "creator" }), true);
+		await assert.rejects(deliverer.deliver(parent.id, child, "approval", { deliveryId: "capacity", sender: "creator" }), /max 3/, "Capacity remains retryable rather than becoming an unavailable delivery");
+	} finally { await fixture.close(); }
+});
+
+test("background revocation before the parent submission keeps the completed child history", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-revoke-report-"));
+	let parentId = 0;
+	let allowed = true;
+	let fired = 0;
+	const checks: unknown[][] = [];
+	const deps: BackgroundDeps = {
+		attribute: async (id) => { if (id === parentId) allowed = false; },
+		onFired: () => { fired++; }, onStarted: () => {}, forbidden: () => [], senderOf: () => "new-admin",
+		isAllowed: (creator, id, via) => { checks.push([creator, id, via]); return allowed && creator === "tg:42" && id === parentId && via === "telegram"; },
+	};
+	const faux = fauxProvider(); faux.setResponses([fauxAssistantMessage(fauxText("child completed"))]);
+	const models = createModels(); models.setProvider(faux.provider);
+	const registry = createRegistry(); registry.install(makeBackgroundExtension(deps));
+	const context = BACKGROUND_CONTEXT;
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "s.sqlite")), { models, registry }, context);
+	try {
+		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		parentId = parent.id;
+		const { child, reporter } = await parent.commit(async (tx) => {
+			const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
+			const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+			const reporter = await tx.createTask(makeBackgroundReporter(deps), { name: "worker", parent: parent.id, child: child.id, creator: "tg:42", creatorVia: "telegram", message: "job", followUp: false }, { ownership: { kind: "conversation" }, background: true });
+			return { child: child.id, reporter };
+		}, context);
+		harness.resume();
+		await until(async () => (await harness.getTask(reporter, context))?.state.status === "terminal");
+		assert.equal(fired, 0);
+		assert.equal((await parent.entries({}, 50, undefined, context)).items.length, 0);
+		assert.match(JSON.stringify((await (await harness.conversation(child, context))!.entries({}, 50, undefined, context)).items), /child completed/);
+		assert.ok(checks.every(([creator, id, via]) => creator === "tg:42" && id === parent.id && via === "telegram"));
+	} finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("background admission: concurrent starts with one name create one child and no orphan", async () => {
+	const fixture = await admissionFixture();
+	try {
+		const parent = await fixture.parent();
+		const results = await Promise.all([
+			parent.execute({ action: "start", name: "same", message: "first" }),
+			parent.execute({ action: "start", name: "same", message: "second" }),
+		]);
+		assert.equal(results.filter((result) => toolOutput(result).startsWith("Started same.")).length, 1);
+		assert.equal(results.filter((result) => toolOutput(result).includes("already exists")).length, 1);
+		const roster = await fixture.harness.snapshot(BackgroundDoc, parent.id, fixture.context);
+		const child = roster?.agents.same?.conversationId;
+		assert.ok(child !== undefined);
+		assert.deepEqual(await backgroundChildren(fixture.harness), [{ child, parent: parent.id }]);
+		assert.equal((await fixture.live()).length, 1);
+		const anchors = await fixture.harness.commit((tx) => tx.scanTasks({ kind: BACKGROUND_ANCHOR_KIND }, 100), fixture.context);
+		assert.equal(anchors.items.length, 1);
+		assert.deepEqual(fixture.started, [{ child, parent: parent.id }]);
+		const workspaces = await fixture.harness.snapshot(WorkspaceDoc, fixture.context);
+		assert.deepEqual(Object.keys(workspaces?.children ?? {}), [String(child)]);
+	} finally { await fixture.close(); }
+});
+
+test("background admission: concurrent sends share the per-conversation limit", async () => {
+	const fixture = await admissionFixture();
+	try {
+		const parent = await fixture.parent();
+		assert.match(toolOutput(await parent.execute({ action: "start", name: "worker", message: "start" })), /^Started worker\./);
+		assert.match(toolOutput(await parent.execute({ action: "send", name: "worker", message: "baseline" })), /^Sent to worker\./);
+		const results = await Promise.all([
+			parent.execute({ action: "send", name: "worker", message: "first" }),
+			parent.execute({ action: "send", name: "worker", message: "second" }),
+		]);
+		assert.equal(results.filter((result) => toolOutput(result).startsWith("Sent to worker.")).length, 1);
+		assert.equal(results.filter((result) => toolOutput(result).includes("max 3")).length, 1);
+		assert.equal((await fixture.live()).length, 3);
+	} finally { await fixture.close(); }
+});
+
+test("background admission: concurrent send and start across conversations share the global limit", async () => {
+	const fixture = await admissionFixture();
+	try {
+		const first = await fixture.parent(); const second = await fixture.parent(); const third = await fixture.parent();
+		await first.execute({ action: "start", name: "worker", message: "start" });
+		await first.execute({ action: "send", name: "worker", message: "second" });
+		await first.execute({ action: "send", name: "worker", message: "third" });
+		await second.execute({ action: "start", name: "worker", message: "start" });
+		await second.execute({ action: "send", name: "worker", message: "second" });
+		assert.equal((await fixture.live()).length, 5);
+		const results = await Promise.all([
+			second.execute({ action: "send", name: "worker", message: "last slot" }),
+			third.execute({ action: "start", name: "worker", message: "last slot" }),
+		]);
+		assert.equal(results.filter((result) => /^(Sent to|Started) worker\./.test(toolOutput(result))).length, 1);
+		assert.equal(results.filter((result) => toolOutput(result).includes("max 6")).length, 1);
+		assert.equal((await fixture.live()).length, 6);
+	} finally { await fixture.close(); }
+});
 
 test("backgroundCapViolation 上限判定", () => {
 	assert.equal(backgroundCapViolation(2, 5), undefined);
@@ -33,7 +282,7 @@ test("集成：报告送达父会话；锚任务 background；父线 abort 不�
 	const started: { child: number; parent: number }[] = [];
 	const deps: BackgroundDeps = {
 		attribute: async () => {},
-		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
+		onFired: (conversationId, _submissionId, header) => { fired.push({ conversationId, header }); },
 		onStarted: (child, parent) => started.push({ child, parent }),
 		senderOf: () => "ou_test",
 		forbidden: () => [],
@@ -110,7 +359,7 @@ test("集成：deliverer 审批续跑——输入经 Reporter 投回子会话，
 	const fired: { conversationId: number; header: string }[] = [];
 	const deps: BackgroundDeps = {
 		attribute: async () => {},
-		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
+		onFired: (conversationId, _submissionId, header) => { fired.push({ conversationId, header }); },
 		onStarted: () => {},
 		senderOf: () => "ou_test",
 		forbidden: () => [],
@@ -169,7 +418,7 @@ test("工具层：start 建子会话并去掉后台/定时扩展；send 过成�
 	const fired: { conversationId: number; header: string }[] = [];
 	const deps: BackgroundDeps = {
 		attribute: async () => {},
-		onFired: (conversationId, _submissionId, header) => fired.push({ conversationId, header }),
+		onFired: (conversationId, _submissionId, header) => { fired.push({ conversationId, header }); },
 		onStarted: () => {},
 		senderOf: () => "ou_test",
 		forbidden: () => [],
@@ -178,7 +427,7 @@ test("工具层：start 建子会话并去掉后台/定时扩展；send 过成�
 	const scheduleExt = makeScheduleExtension(scheduleDeps);
 	const bgExt = makeBackgroundExtension(deps);
 	// forbidden 闭包在调用时解引用（此时 bgExt 已初始化）
-	const toolDeps: BackgroundDeps = { ...deps, forbidden: () => [scheduleExt, bgExt] };
+	const toolDeps: BackgroundDeps = { ...deps, getHarness: () => harness, forbidden: () => [scheduleExt, bgExt] };
 	const bgToolExt = makeBackgroundExtension(toolDeps);
 	// 慢速 faux：子会话答案耗时长，reporter 停留在 live（成本闸计数依赖）
 	const faux = fauxProvider({ tokensPerSecond: 5 });
@@ -200,6 +449,7 @@ test("工具层：start 建子会话并去掉后台/定时扩展；send 过成�
 		// 假 api：把工具用到的四个入口接到真 harness（与 ToolExecutionApi 同形）
 		const api = {
 			conversationId: parentId,
+			registry: registry.snapshot(),
 			commit: <T,>(fn: (tx: never) => T | Promise<T>) => parent.commit(fn as never, context),
 			snapshot: (doc: never, id: number) => harness.snapshot(doc, id as ConversationId, context),
 			conversation: (id: number) => harness.conversation(id as ConversationId, context),
@@ -244,7 +494,7 @@ test("集成：回报前 await 归属登记；重开后 backgroundChildren 重�
 			await new Promise((r) => setTimeout(r, 30));
 			order.push("attribute:done");
 		},
-		onFired: () => order.push("fired"),
+		onFired: () => { order.push("fired"); },
 		onStarted: () => {},
 		senderOf: () => "ou_test",
 		forbidden: () => [],
@@ -275,7 +525,7 @@ test("集成：回报前 await 归属登记；重开后 backgroundChildren 重�
 			return { child: c.id as number, reporter: r };
 		}, context);
 		await until(async () => (await harness.getTask(reporter, context))?.state.status === "terminal");
-		assert.deepEqual(order, ["attribute:start", "attribute:done", "fired"], "登记完成后才 submit 回报并开卡");
+		assert.deepEqual(order, ["attribute:start", "attribute:done", "attribute:start", "attribute:done", "fired"], "子线投递与父线回报均等待归属登记完成");
 
 		await harness.close(context);
 		harness = await open();
@@ -284,4 +534,40 @@ test("集成：回报前 await 归属登记；重开后 backgroundChildren 重�
 		await harness.close(context).catch(() => {});
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("a Reporter waits for the host presentation receipt and retries it after reopening without duplicating input", { timeout: 15_000 }, async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-bg-presentation-"));
+	let attempts = 0; let receiptSaved = false;
+	let release!: () => void;
+	const pending = new Promise<void>((resolve) => { release = resolve; });
+	const deps: BackgroundDeps = {
+		attribute: async () => {}, onStarted: () => {}, senderOf: () => "creator", forbidden: () => [],
+		onFired: async () => { if (++attempts === 1) await pending; receiptSaved = true; },
+	};
+	const models = createModels(); const faux = fauxProvider({ tokensPerSecond: 100_000 });
+	faux.setResponses(Array.from({ length: 20 }, () => fauxAssistantMessage(fauxText("done")))); models.setProvider(faux.provider);
+	const registry = createRegistry(); registry.install(makeBackgroundExtension(deps));
+	const context = BACKGROUND_CONTEXT;
+	const open = () => openNodeSqliteStorage(join(dir, "s.sqlite")).then((storage) => Harness.open(storage, { models, registry }, context));
+	let harness = await open(); harness.resume();
+	try {
+		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		const reporter = await parent.commit(async (tx) => {
+			const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
+			const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+			return tx.createTask(makeBackgroundReporter(deps), { parent: parent.id, child: child.id, name: "worker", message: "work", creator: "creator", followUp: false }, { ownership: { kind: "conversation" }, background: true });
+		}, context);
+		await until(() => attempts === 1);
+		const task = await harness.getTask(reporter, context);
+		assert.notEqual(task?.state.status, "terminal", "host presentation must be durable before the Reporter becomes terminal");
+		assert.equal(receiptSaved, false);
+		await harness.close(context);
+		harness = await open(); harness.resume();
+		await until(async () => (await harness.getTask(reporter, context))?.state.status === "terminal");
+		assert.equal(attempts, 2); assert.equal(receiptSaved, true);
+		const reopened = (await harness.conversation(parent.id, context))!;
+		const entries = (await reopened.entries({}, 100, undefined, context)).items;
+		assert.equal(entries.filter((entry) => JSON.stringify(entry.model ?? []).includes("Background task worker finished")).length, 1);
+	} finally { release(); await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });

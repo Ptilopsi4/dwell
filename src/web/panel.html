@@ -15,22 +15,22 @@
 	--secondary: #f0f1f4; --secondary-foreground: #3b3d45;
 	--muted: #f3f4f6; --muted-foreground: #6c707a;
 	--accent: #eceef2; --accent-foreground: #1c1d21;
-	--destructive: #d93f4c; --border: #e5e6ea; --input: #e1e3e8; --ring: #5e5ce6;
+	--destructive: #c33341; --destructive-foreground: #ffffff; --border: #e5e6ea; --input: #e1e3e8; --ring: #5e5ce6;
 	--side: #f5f6f8; --raised: #ffffff; --hover: rgb(0 0 0 / .045); --sel: rgb(0 0 0 / .07);
-	--ok: #1f9d63; --warn: #c27c0e; --faint: #9a9ea8;
+	--ok: #1f9d63; --warn: #c27c0e; --faint: #666b75;
 	--shadow: 0 1px 2px rgb(0 0 0 / .05), 0 4px 16px rgb(0 0 0 / .06);
 	--radius: .5rem;
 }
 :root.dark {
 	--background: #101114; --foreground: #e3e4e8; --card: #16171b; --card-foreground: #e3e4e8;
 	--popover: #1b1c21; --popover-foreground: #e3e4e8;
-	--primary: #7b79f2; --primary-foreground: #ffffff;
+	--primary: #7b79f2; --primary-foreground: #101114;
 	--secondary: #23242a; --secondary-foreground: #c9cad1;
 	--muted: #1c1d22; --muted-foreground: #8b8e98;
 	--accent: #222329; --accent-foreground: #e3e4e8;
-	--destructive: #f06b74; --border: #24252b; --input: #2c2d34; --ring: #7b79f2;
+	--destructive: #f06b74; --destructive-foreground: #101114; --border: #24252b; --input: #2c2d34; --ring: #7b79f2;
 	--side: #0c0d10; --raised: #17181c; --hover: rgb(255 255 255 / .04); --sel: rgb(255 255 255 / .07);
-	--ok: #4cc38a; --warn: #e2a93b; --faint: #5f626b;
+	--ok: #4cc38a; --warn: #e2a93b; --faint: #8b8e98;
 	--shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
 }
 html, body { height: 100%; }
@@ -121,7 +121,7 @@ svg.i.sm { width: 14px; height: 14px; }
 .menu button:hover { background: var(--hover); }
 .menu button.danger { color: var(--destructive); }
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 2px; }
-.confirm-inline { color: var(--destructive) !important; font-weight: 600; }
+.confirm-inline { background: var(--destructive) !important; color: var(--destructive-foreground) !important; font-weight: 600; }
 
 main { flex: 1; overflow-y: auto; }
 #log { padding-top: 1.5rem; padding-bottom: 2.5rem; }
@@ -314,6 +314,18 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 .rnote { margin: 0 0 .5rem; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
 .role { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 5px; background: var(--secondary); color: var(--muted-foreground); }
 .role.admin { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary); }
+.work-record { border-top: 1px solid var(--border); padding: .75rem 0; font-size: 14px; }
+.work-record > summary { cursor: pointer; overflow-wrap: anywhere; line-height: 1.6; }
+.work-record .role { display: inline-block; margin-inline-start: .4rem; }
+.work-section { margin-top: .8rem; }
+.work-section h3 { margin: 0 0 .25rem; font-size: 13px; font-weight: 600; }
+.work-section p, .work-section ul { margin: .25rem 0; }
+.work-section ul { padding-inline-start: 1.2rem; }
+.work-copy { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.work-result { margin-top: .6rem; color: var(--destructive); }
+.work-review-link { display: block; margin-top: .5rem; }
+.work-review-body { min-width: 0; }
+#workList { max-height: 60vh; overflow: auto; }
 </style>
 </head>
 <body>
@@ -354,9 +366,11 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 			<div class="menu" id="menu" hidden>
 				<button id="renameBtn">重命名</button>
 				<button id="archiveBtn">归档</button>
-				<button id="notifyBtn" hidden>飞书通知</button>
+				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
+				<button id="workBtn">工作记录与验收</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
+					<button id="newGoalBtn">开启新目标</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -389,7 +403,7 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 	</div>
 </div>
 
-<dialog class="dialog" id="sheet">
+<dialog class="dialog" id="sheet" aria-labelledby="sheetTitle">
 	<form class="dlg-body" method="dialog">
 		<h6 id="sheetTitle"></h6>
 		<div id="sheetBody"></div>
@@ -598,6 +612,7 @@ const names = new Map();
 let nameQueue = new Set(), nameTimer = 0, nameRetry = 0;
 function senderLabel(id, fallback) {
 	if (!id) return fallback;
+	if (id.startsWith("tg:")) return `Telegram 用户 ${id.slice(3)}`;
 	if (names.has(id)) return names.get(id) ?? fallback;
 	nameQueue.add(id);
 	clearTimeout(nameTimer);
@@ -642,6 +657,11 @@ $("scrim").onclick = () => drawer(false);
 function convTitle(c) {
 	if (c.title) return c.title;
 	if (c.name !== c.key) return c.name;
+	if (c.platform === "telegram") {
+		const chat = c.chatId?.split(":").pop() ?? "";
+		if (c.type === "direct") return `Telegram · 用户 ${c.owner.replace(/^tg:/, "") || chat}`;
+		return `Telegram 群 ${chat} · ${c.type === "thread" ? `话题 ${c.key.split("#t:")[1]?.split("#")[0] ?? ""}` : `用户 ${c.owner.replace(/^tg:/, "")}`}`;
+	}
 	const short = (s) => String(s ?? "").replace(/^o[cu]_/, "").slice(0, 8);
 	if (c.type === "direct") return `私聊 ${short(c.owner)}`;
 	if (c.type === "group") return `群 ${short(c.key)} · ${short(c.owner)}`;
@@ -746,10 +766,10 @@ function markActive() {
 	$("convTitle").textContent = title;
 	document.title = `${title} · dwell`;
 	$("convType").hidden = !c;
-	$("convType").textContent = c ? (TYPE_ZH[c.type] ?? c.type) : "";
+	$("convType").textContent = c ? `${c.platform === "telegram" ? "Telegram · " : ""}${TYPE_ZH[c.type] ?? c.type}` : "";
 	$("archiveBtn").textContent = c?.archived ? "取消归档" : "归档";
 	$("notifyBtn").hidden = c?.type !== "panel";
-	$("notifyBtn").textContent = c?.notify ? "飞书通知：开" : "飞书通知：关";
+	$("notifyBtn").textContent = c?.notify ? "私聊通知：开" : "私聊通知：关";
 	$("stopTaskBtn").hidden = c?.type !== "task";
 	$("archBanner").classList.toggle("on", Boolean(c?.archived));
 	refreshComposer();
@@ -777,18 +797,21 @@ function switchConv(id) {
 	es.onerror = () => setStatus(false);
 	if (matchMedia("(hover: hover)").matches) $("input").focus();
 }
-/* ── 运行状态：panel SSE + 飞书长连接（/healthz）合成一个状态点 ── */
-// sseOn：null = 尚未打开任何会话流（不算断开）；feishu：/healthz 的 WSConnectionState，"off" = panel-only
-let sseOn = null, feishuState = null;
-const FEISHU_LABEL = { connected: "已连接", off: "panel-only", idle: "飞书未启动", connecting: "飞书连接中", reconnecting: "飞书重连中", failed: "飞书断开" };
+/* ── 运行状态：panel SSE 与聊天入口（/healthz）合成一个状态点 ── */
+// A null SSE state means no conversation has been opened yet.
+let sseOn = null, feishuState = null, telegramState = null;
 function setStatus(on) { sseOn = on; paintStatus(); }
 function paintStatus() {
 	const f = feishuState;
-	const level = sseOn === false || f === "failed" || f === "unreachable" ? "off" : f === "idle" || f === "connecting" || f === "reconnecting" ? "warn" : "ok";
-	$("status").textContent = sseOn === false ? "重连中…" : f === "unreachable" ? "服务无响应" : (FEISHU_LABEL[f] ?? (f === null ? "连接中" : f));
+	const channels = [{ name: "飞书", state: f }, { name: "Telegram", state: telegramState }];
+	const failed = channels.find((c) => c.state === "failed");
+	const pending = channels.find((c) => ["idle", "connecting", "reconnecting"].includes(c.state));
+	const level = sseOn === false || failed || f === "unreachable" ? "off" : pending ? "warn" : "ok";
+	const labels = { idle: "未启动", connecting: "连接中", reconnecting: "重连中" };
+	$("status").textContent = sseOn === false ? "重连中…" : f === "unreachable" ? "服务无响应" : failed ? `${failed.name}断开` : pending ? `${pending.name}${labels[pending.state]}` : f === null ? "连接中" : channels.every((c) => c.state === null || c.state === "off") ? "panel-only" : "已连接";
 	$("statusDot").classList.toggle("off", level === "off");
 	$("statusDot").classList.toggle("warn", level === "warn");
-	$("status").parentElement.title = `panel 实时通道：${sseOn === false ? "重连中" : sseOn ? "正常" : "未打开会话"}\n飞书长连接：${f ?? "未知"}`;
+	$("status").parentElement.title = `panel 实时通道：${sseOn === false ? "重连中" : sseOn ? "正常" : "未打开会话"}\n飞书长连接：${f ?? "未知"}${telegramState === null ? "" : `\nTelegram：${telegramState}`}`;
 }
 
 /* ── transcript ── */
@@ -847,6 +870,15 @@ function appendEntry(entry) {
 	const log = $("log");
 	const model = entry.model?.[0];
 	const ts = model?.timestamp;
+	if (entry.kind === "work.new_goal") {
+		const d = document.createElement("div");
+		d.className = "day";
+		d.textContent = "已开启新目标 · 聊天历史保留";
+		log.appendChild(d);
+		T.group = null;
+		T.lastKind = "day";
+		return;
+	}
 	if (entry.kind === "context.reset") {
 		// 展示型分隔回：上下文已清空（panel/飞书 /new 或 panel 重置触发）
 		const d = document.createElement("div");
@@ -879,7 +911,7 @@ function appendEntry(entry) {
 		if (entry.data?.via === "panel") {
 			const tag = document.createElement("span");
 			tag.className = "tag";
-			tag.textContent = entry.kind === "chat.message" ? "经 panel 发到飞书" : "panel";
+			tag.textContent = entry.kind === "chat.message" ? `经 panel 发到${currentConv()?.platform === "telegram" ? " Telegram" : "飞书"}` : "panel";
 			el.querySelector(".hd time").before(tag);
 		} else if (entry.data?.via === "schedule" || entry.data?.via === "background" || entry.data?.via === "proc") {
 			// 自治输入（定时/后台/进程）以创建者身份进 transcript（run 归属），展示层标注来源以免误读为用户亲手发送
@@ -922,13 +954,19 @@ function appendEntry(entry) {
 			log.appendChild(el);
 			T.lastKind = "bot";
 		}
-		for (const call of parts.filter((c) => c.type === "toolCall")) addToolRow(call);
+		const calls = parts.filter((c) => c.type === "toolCall");
+		for (const call of calls) {
+			const row = addToolRow(call);
+			row._waitCandidate = calls.length === 1 && call.name === "dwell.task.wait";
+			row._readyCandidate = calls.length === 1 && call.name === "dwell.work" && call.arguments?.action === "ready";
+			row._answerEntryId = entry.id;
+		}
 		if (model?.stopReason === "error" || model?.stopReason === "aborted") {
 			T.group = null;
 			const el = msgEl("err", "", ts);
 			el.querySelector(".hd").remove();
 			el.querySelector(".bd").innerHTML = `${ic("x", "sm")}<span></span>`;
-			el.querySelector(".bd span").textContent = model.stopReason === "aborted" ? "已中止" : `模型出错：${model.errorMessage ?? "未知错误"}`;
+			el.querySelector(".bd span").textContent = model.stopReason === "aborted" ? "已中止" : (model.errorMessage ?? "模型请求未完成，可在原任务线继续。");
 			log.appendChild(el);
 			T.lastKind = "err";
 		}
@@ -936,7 +974,9 @@ function appendEntry(entry) {
 	}
 	if (entry.kind === "pi.tool-result") {
 		const row = T.calls.get(model?.toolCallId) ?? addToolRow({ id: model?.toolCallId, name: model?.toolName ?? "tool", arguments: {} });
-		const err = model?.isError === true || (entry.data?.diagnostics ?? []).length > 0;
+		const diagnostics = entry.data?.diagnostics ?? [];
+		const err = model?.isError === true || diagnostics.some((diagnostic) => diagnostic.severity === "error");
+		const warnings = diagnostics.filter((diagnostic) => diagnostic.severity === "warn");
 		const out = contentText(model?.content);
 		row._out = out;
 		row.classList.toggle("bad", err);
@@ -944,14 +984,43 @@ function appendEntry(entry) {
 		st.className = "st " + (err ? "bad" : "ok");
 		st.innerHTML = ic(err ? "x" : "check", "sm");
 		const lines = out === "" ? 0 : out.replace(/\n$/, "").split("\n").length;
-		const meta = [lines > 0 ? `${lines} 行` : "无输出", model?.durationMs >= 1000 ? `${(model.durationMs / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
+		const meta = [lines > 0 ? `${lines} 行` : "无输出", warnings.length > 0 ? `${warnings.length} 条警告` : "", model?.durationMs >= 1000 ? `${(model.durationMs / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
 		row.querySelector(".tm").textContent = meta;
 		if (!err) addDownload(row);
 		if (row.open) fillToolBody(row);
+		if (row._waitCandidate && !err && entry.byTaskId !== undefined && model?.toolName === "dwell.task.wait" && model.details?.waitingForBackground === true) {
+			const notice = document.createElement("div");
+			notice.className = "note";
+			notice.textContent = "后台任务处理中，完成后会继续。";
+			log.appendChild(notice);
+			T.group = null;
+			T.lastKind = "note";
+		}
+		const ready = entry.workReady;
+		if (row._readyCandidate && !err && entry.byTaskId !== undefined && model?.toolName === "dwell.work" && model.details?.workReady === true && ready?.answerEntryId === row._answerEntryId && ready.workId === model.details.workId && ready.verified === model.details.verified && typeof ready.text === "string") {
+			const notice = document.createElement("div");
+			notice.className = "note";
+			const body = document.createElement("div");
+			body.className = "work-review-body";
+			body.textContent = ready.text;
+			const review = document.createElement("button");
+			review.type = "button";
+			review.className = "btn work-review-link";
+			review.dataset.variant = "outline";
+			review.dataset.size = "sm";
+			review.textContent = "查看工作与验收";
+			const reviewConversation = Number(convId);
+			review.onclick = () => openWork(reviewConversation, ready.workId);
+			body.appendChild(review);
+			notice.appendChild(body);
+			log.appendChild(notice);
+			T.group = null;
+			T.lastKind = "note";
+		}
 	}
 }
-/** 产物下载：dwell.lark.send / write 成功后工具行加下载链接（服务端限本会话工作目录，强制 attachment）。 */
-const DOWNLOAD_TOOLS = new Set(["dwell.lark.send", "write"]);
+/** Offer artifacts from send/write tools; the server restricts downloads to this workspace. */
+const DOWNLOAD_TOOLS = new Set(["dwell.send", "dwell.lark.send", "write"]);
 function addDownload(row) {
 	const path = row._call?.arguments?.path;
 	if (!DOWNLOAD_TOOLS.has(row._call?.name) || typeof path !== "string" || path === "" || convId === null || row.querySelector("a.dl")) return;
@@ -1209,12 +1278,13 @@ composer.addEventListener("drop", (e) => {
 const currentConv = () => convs.find((c) => String(c.id) === String(convId));
 function refreshComposer() {
 	const c = currentConv();
-	const feishu = Boolean(c?.chatId);
+	const chat = Boolean(c?.chatId);
+	const platform = c?.platform === "telegram" ? "Telegram" : "飞书";
 	const where = c?.type === "direct" ? "对方" : "群成员";
-	$("input").placeholder = !feishu ? "输入消息" : `发到飞书：${where}会看到「From admin: …」，bot 在飞书回复`;
+	$("input").placeholder = !chat ? "输入消息" : `发到${platform}：${where}会看到「From admin: …」，bot 在${platform}回复`;
 	const keys = '<span><kbd class="kbd">Enter</kbd> 发送</span><span><kbd class="kbd">Shift Enter</kbd> 换行</span>';
 	$("hint").classList.toggle("busy", running);
-	$("hint").innerHTML = !running ? keys : feishu ? "<span>运行中：消息会发到飞书并插入当前任务</span>" : "<span>运行中：发送的消息会插入当前任务</span>";
+	$("hint").innerHTML = !running ? keys : chat ? `<span>运行中：消息会发到${platform}并插入当前任务</span>` : "<span>运行中：发送的消息会插入当前任务</span>";
 }
 const autosize = () => { const el = $("input"); el.style.height = ""; el.style.height = Math.min(el.scrollHeight, 220) + "px"; };
 $("send").onclick = send;
@@ -1232,14 +1302,27 @@ $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
 	try { await api("reset", { conv: Number(convId) }); } catch (err) { toast(err.message, true); }
 }, "确认清空上下文?");
+$("newGoalBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
+	closeMenu();
+	const id = Number(convId);
+	try {
+		const work = await api(`work?id=${id}`);
+		const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+		const result = await api("work/newgoal", { id, workId: work.current ?? null, requestId });
+		toast(result.changed ? "已开启新目标，聊天历史保留。请发送新的目标。" : "当前没有工作目标，请直接发送新的目标。");
+	} catch (err) { toast(err.message, true); }
+}, "保留历史并开启新目标?");
+$("workBtn").onclick = () => { closeMenu(); openWork(Number(convId)); };
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
 }, "确认停止?");
 // 后台任务子会话：只中止子会话的当前 run，子代理留在名册里可继续 send（移除走模型的 dwell.task stop）；不影响父线
 $("stopTaskBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
-	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
-	toast("已中止当前运行");
-	loadConvs(true);
+	try {
+		await api("abort", { conv: Number(convId) });
+		toast("已中止当前运行");
+		await loadConvs(true);
+	} catch (error) { toast(error.message, true); }
 }, "中止当前运行?");
 async function setArchived(archived) {
 	try { await api("archive", { id: Number(convId), archived }); await loadConvs(true); } catch (e) { toast(e.message, true); }
@@ -1251,7 +1334,7 @@ $("notifyBtn").onclick = async () => {
 	try {
 		const r = await api("notify", { id: Number(convId), on: !c.notify });
 		c.notify = r.on;
-		toast(r.on ? "任务结束后飞书私发通知你，回复通知即可继续这个任务" : "已关闭飞书通知");
+		toast(r.on ? "任务结束后私聊通知你，回复通知即可继续这个任务" : "已关闭私聊通知");
 	} catch (e) { toast(e.message, true); }
 	markActive();
 };
@@ -1293,12 +1376,12 @@ function sheetPrompt(title, initial, onOk, placeholder = "", allowEmpty = false)
 
 /* ── 审批：当前会话的待审在输入框上方展示完整命令；其他会话列在侧栏并在会话行上打角标 ── */
 const apprConv = (a) => Number(String(a.key).split(":")[0]);
-function bindApprOps(root, key) {
+function bindApprOps(root, key, requestId) {
 	for (const b of root.querySelectorAll("button[data-a]")) {
 		b.onclick = async () => {
 			const action = b.dataset.a === "deny" ? "deny" : "approve";
 			const minutes = b.dataset.a === "approve30" ? 30 : 10;
-			const r = await api("approve", { key, action, minutes }).catch((e) => ({ ok: false, error: e.message }));
+			const r = await api("approve", { key, action, minutes, requestId }).catch((e) => ({ ok: false, error: e.message }));
 			if (!r.ok) toast(r.error ?? "操作失败", true);
 			else toast(action === "approve" ? `已批准 ${minutes} 分钟` : "已拒绝");
 			apprSig = "";
@@ -1312,7 +1395,7 @@ async function loadApprovals() {
 	pendingByConv = new Map();
 	for (const a of list) pendingByConv.set(apprConv(a), (pendingByConv.get(apprConv(a)) ?? 0) + 1);
 	refreshConvMarks();
-	const sig = JSON.stringify([convId, list.map((a) => a.key)]);
+	const sig = JSON.stringify([convId, list.map((a) => [a.key, a.requestId, a.command, a.match])]);
 	if (sig === apprSig) return;
 	apprSig = sig;
 	const mine = list.find((a) => apprConv(a) === Number(convId));
@@ -1320,7 +1403,7 @@ async function loadApprovals() {
 	if (mine !== undefined) {
 		$("inlMatch").textContent = `命中规则：${mine.match}`;
 		$("inlCmd").textContent = mine.command;
-		bindApprOps($("inlappr"), mine.key);
+		bindApprOps($("inlappr"), mine.key, mine.requestId);
 	}
 	const others = list.filter((a) => a !== mine);
 	$("approvals").hidden = others.length === 0;
@@ -1339,7 +1422,7 @@ async function loadApprovals() {
 		el.querySelector("pre").textContent = a.command;
 		el.querySelector("pre").title = a.command;
 		el.querySelector("[data-go]").onclick = () => { drawer(false); switchConv(apprConv(a)); };
-		bindApprOps(el, a.key);
+		bindApprOps(el, a.key, a.requestId);
 		box.appendChild(el);
 	}
 	reflowFloat();
@@ -1352,7 +1435,7 @@ async function openUsers() {
 	$("sheetTitle").textContent = "用户管理";
 	$("sheetBody").innerHTML = `
 		<div style="display:flex;gap:.4rem;margin-bottom:.6rem">
-			<input class="input" type="text" id="uId" placeholder="open_id（ou_ 开头）" style="flex:1">
+			<input class="input" type="text" id="uId" placeholder="飞书 ou_… 或 Telegram tg:数字" style="flex:1">
 			<button class="btn" data-variant="outline" data-size="sm" id="uAdd" type="button">添加成员</button>
 			<button class="btn" data-variant="outline" data-size="sm" id="uAddAdmin" type="button">添加管理员</button>
 		</div>
@@ -1366,7 +1449,7 @@ async function openUsers() {
 		row.innerHTML = `<span class="av"></span><div class="who"><div></div><small></small></div>
 			<span class="role${u.role === "admin" ? " admin" : ""}">${u.role === "admin" ? "管理员" : "成员"}</span>
 			<button class="btn" data-variant="ghost" data-size="icon-xs" title="移除" type="button">${ic("x", "sm")}</button>`;
-		row.querySelector(".who div").textContent = u.name ?? "（未获取到姓名）";
+		row.querySelector(".who div").textContent = u.name ?? (u.id.startsWith("tg:") ? `Telegram 用户 ${u.id.slice(3)}` : "（未获取到姓名）");
 		row.querySelector(".av").textContent = u.name ? initial(u.name) : "?";
 		row.querySelector(".who small").textContent = u.id;
 		row.querySelector("button").onclick = (e) => armConfirm(e.currentTarget, async () => {
@@ -1377,13 +1460,95 @@ async function openUsers() {
 	if (!$("sheet").open) $("sheet").showModal();
 	const add = async (role) => {
 		const id = $("uId").value.trim();
-		if (!/^ou_\w+$/.test(id)) { toast("需要 ou_ 开头的 open_id", true); return; }
+		if (!/^ou_\w+$/.test(id) && !/^tg:\d+$/.test(id)) { toast("需要飞书 open_id 或 Telegram 用户 ID（tg:数字）", true); return; }
 		try { await api("users", { id, role }); openUsers(); } catch (e) { toast(e.message, true); }
 	};
 	$("uAdd").onclick = () => add("member");
 	$("uAddAdmin").onclick = () => add("admin");
 }
 $("usersBtn").onclick = openUsers;
+
+/* Work acceptance reuses the trusted host API; no model request or verification command is run here. */
+async function openWork(id, selectedWorkId) {
+	$("sheetTitle").textContent = "工作记录与验收";
+	$("sheetBody").innerHTML = `<p class="rnote">对照目标、验收标准与检查结果审阅产物，再确认验收。需要修改时，关闭此窗口并在任务线发送要求。</p>
+		<div id="workList" aria-live="polite"></div>
+		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" type="button" id="refreshWork">刷新记录</button><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
+	const list = $("workList");
+	const refresh = $("refreshWork");
+	const load = async (focusWorkId = selectedWorkId) => {
+		refresh.disabled = true;
+		list.textContent = "正在读取工作记录…";
+		try {
+			const work = await api(`work?id=${id}`);
+			if (!list.isConnected) return;
+			list.replaceChildren();
+			const records = Object.values(work.records).sort((a, b) => Number(b.id === work.current) - Number(a.id === work.current) || b.createdAt - a.createdAt);
+			if (records.length === 0) list.textContent = work.inherited ? "这是后台子任务，工作记录保存在父任务线。" : "暂无工作记录。普通聊天不需要创建工作记录。";
+			for (const record of records) {
+				const row = document.createElement("details");
+				row.className = "work-record";
+				row.open = record.id === (focusWorkId ?? work.current);
+				const heading = document.createElement("summary");
+				heading.textContent = record.goal;
+				const status = document.createElement("span");
+				status.className = "role";
+				status.textContent = ({ active: "进行中", ready_for_review: "待验收", accepted: "已验收" })[record.status];
+				heading.appendChild(status);
+				row.appendChild(heading);
+				const section = (title, value) => {
+					const group = document.createElement("section"); group.className = "work-section";
+					const label = document.createElement("h3"); label.textContent = title; group.appendChild(label);
+					if (Array.isArray(value)) {
+						const lines = document.createElement("ul");
+						for (const text of value) { const line = document.createElement("li"); line.className = "work-copy"; line.textContent = text; lines.appendChild(line); }
+						group.appendChild(lines);
+					} else { const text = document.createElement("p"); text.className = "work-copy"; text.textContent = value; group.appendChild(text); }
+					row.appendChild(group);
+				};
+				section("验收标准", record.acceptance);
+				if (record.progress) section("进度说明", record.progress);
+				if (record.blockers.length) section("待解决事项", record.blockers);
+				const verification = record.verification;
+				if (verification) {
+					section("产物范围", verification.contract.artifacts);
+					const receipt = verification.receipt;
+					section("验证记录", receipt ? receipt.checks.map((check) => `${check.name}：退出码 ${check.exitCode}`) : "尚无成功的验证回执。");
+					if (receipt) section("验证时间", `${new Date(receipt.verifiedAt).toLocaleString()} · ${receipt.manifest.files} 个文件 · ${receipt.manifest.bytes} 字节`);
+					if (verification.status !== "verified") section("验证状态", verification.failure || "需要重新运行验证。");
+				} else section("验证状态", "未声明验证契约，请自行核对产物与证据。");
+				if (record.review) section("交付说明（Agent）", record.review);
+				if (record.evidence.length) section("补充证据", record.evidence.map((entry) => `工具回执 #${entry}`));
+				if (record.stopped) section("任务已停止", "工作预算已耗尽，可保留本记录并开启新目标。");
+				if (record.status === "accepted") section("验收记录", `${record.acceptedBy} · ${new Date(record.acceptedAt).toLocaleString()}`);
+				if (record.status === "ready_for_review") {
+					const note = document.createElement("p"); note.className = "rnote work-section";
+					note.textContent = verification ? "确认时会重新核对文件版本；不会再次执行检查命令。通过检查仍需要你判断是否符合要求。" : "这项工作没有验证契约。确认前请自行核对产物与证据。";
+					row.appendChild(note);
+					const accept = document.createElement("button"); accept.type = "button"; accept.className = "btn"; accept.dataset.size = "sm"; accept.textContent = "确认验收";
+					const result = document.createElement("p"); result.className = "work-result work-copy"; result.setAttribute("role", "status");
+					accept.onclick = (event) => armConfirm(event.currentTarget, async () => {
+						accept.disabled = true; refresh.disabled = true; result.textContent = "正在确认验收…";
+						try {
+							await api("work/accept", { id, workId: record.id });
+							toast("已记录验收。");
+							if (list.isConnected) await load(record.id);
+						} catch (error) {
+							const detail = /^\d{3} /.test(error.message) ? error.message.replace(/^\d{3} /, "") : "验收请求未完成，结果尚未确认。";
+							result.textContent = `${detail} 请刷新记录确认状态。`;
+						} finally { accept.disabled = false; refresh.disabled = false; }
+					}, verification ? "确认产物符合要求？" : "确认验收未验证的工作？");
+					row.append(accept, result);
+				}
+				list.appendChild(row);
+			}
+		} catch (error) { if (list.isConnected) list.textContent = `读取失败：${error.message} 请点击“刷新记录”重试。`; }
+		finally { refresh.disabled = false; }
+	};
+	refresh.onclick = () => load();
+	if (!$("sheet").open) $("sheet").showModal();
+	await load();
+}
 
 /* ── 运行告警：服务端保留最近 50 条（重启即清），已读位置只存本浏览器 ── */
 let reports = [];
@@ -1397,9 +1562,10 @@ function paintAlerts() {
 	$("alertsBtn").title = unread > 0 ? `运行告警（${unread} 条未读）` : "运行告警";
 }
 async function loadHealth() {
-	// /healthz 在飞书 failed 时是 503 但仍带 JSON；请求本身失败才算服务无响应
+	// A failed channel returns 503 with JSON; only a failed request means the server is unreachable.
 	const health = await fetch("/healthz").then((r) => r.json()).catch(() => null);
 	feishuState = health?.feishu ?? "unreachable";
+	telegramState = health?.telegram ?? null;
 	paintStatus();
 	const list = await api("reports").catch(() => null);
 	if (list !== null) { reports = list; paintAlerts(); }
