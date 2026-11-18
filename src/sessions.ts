@@ -10,6 +10,9 @@ import { messageDestination, sameDestination, type ConversationDestination, type
 import { DATA_DIR, stateFile, writeStateJson } from "./state.ts";
 
 const MAP_LIMIT = 10_000;
+/** /new 退役路由（#old:）与重置回执的保留上限：超出删最旧；语义与 message-map 的 MAP_LIMIT 同类（防账本无界增长） */
+const RETIRED_ROUTE_LIMIT = 512;
+const RESET_RECEIPT_LIMIT = 1024;
 
 type SavedRoute = { id: number; owner: string; name?: string; archived?: boolean; lastTs?: number; notify?: boolean; emoji?: string; destination?: ConversationDestination; actorScoped?: boolean };
 type BotDestination = Exclude<ConversationDestination, { kind: "panel" }>;
@@ -92,7 +95,9 @@ export class Sessions {
 		for (const id of new Set(this.convKeys.values())) {
 			const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
 			const cwd = conversation === undefined ? undefined : (await conversation.agent(BACKGROUND_CONTEXT)).cwd;
-			if (cwd !== undefined) await this.prepareWorkspace(cwd);
+			// cwd 是创建时的绝对路径：迁移/换 DATA_DIR 后会越出当前受管工作区。降级处理（记日志，消息处理时再按需重试），
+			// 不能让单条历史会话拒穿启动——否则 systemd 反复拉起成死循环
+			if (cwd !== undefined) await this.prepareWorkspace(cwd).catch((err: unknown) => console.error(`[dwell] 会话 #${id} 工作区 ${cwd} 注册失败（消息处理时重试）:`, err instanceof Error ? err.message : err));
 		}
 		if (telegram !== undefined) await this.save();
 	}
@@ -365,6 +370,16 @@ export class Sessions {
 
 	private async routeBot(key: string, sender: string, destination: BotDestination, cwd: string, resetRequestId?: string, actorScoped = false): Promise<Conversation> {
 		await this.prepareWorkspace(cwd);
+		// 快路径：已有同目的地路由且非 /new 重放——直接复用，跳过 doc 事务、全量路由深拷贝与 sessions.json 写回。
+		// 投影由本方法（慢路径）与 load 独占维护，内存有即 doc 有；会话存在性复核防半损数据静默新建线
+		if (resetRequestId === undefined) {
+			const existing = this.convKeys.get(key);
+			const savedDestination = existing === undefined ? undefined : this.destinations.get(existing);
+			if (existing !== undefined && savedDestination !== undefined && sameDestination(savedDestination, destination)) {
+				const cached = await this.harness.conversation(existing, BACKGROUND_CONTEXT);
+			if (cached !== undefined) return cached;
+			}
+		}
 		const result = await this.harness.commit(async (tx) => {
 			const doc = await tx.doc(TelegramSessionDoc);
 			// Preserve projected Telegram routes, but adopt only the Feishu key being reset.
@@ -395,6 +410,11 @@ export class Sessions {
 					target = conversation.id as number;
 					doc.routes[key] = { id: target, owner: sender, destination: { ...destination }, ...(actorScoped ? { actorScoped } : {}) };
 					if (requestKey !== undefined) doc.resets[requestKey] = { key, id: target };
+					// 修剪：/new 的退役路由与回执账本只增不减，长期运行后每条消息的 commit/深拷贝/JSON 写都随历史数增长
+					const retired = Object.keys(doc.routes).filter((savedKey) => savedKey.includes("#old:"));
+					for (const savedKey of retired.slice(0, Math.max(0, retired.length - RETIRED_ROUTE_LIMIT))) delete doc.routes[savedKey];
+					const receipts = Object.keys(doc.resets);
+					for (const savedKey of receipts.slice(0, Math.max(0, receipts.length - RESET_RECEIPT_LIMIT))) delete doc.resets[savedKey];
 				}
 			}
 			return { target, routes: JSON.parse(JSON.stringify(doc.routes)) as Record<string, BotRoute> };
