@@ -292,6 +292,7 @@ export class TelegramBot {
 	async #pollLoop(): Promise<void> {
 		let failures = 0;
 		let handlerFailures = 0;
+		let cursorFailures = 0;
 		while (!this.#controller.signal.aborted) {
 			let phase: "transport" | "handler" | "cursor" = "transport";
 			try {
@@ -307,14 +308,26 @@ export class TelegramBot {
 					phase = "handler";
 					const callback = normalizeCallback(update, this.identity);
 					const message = normalizeTelegramUpdate(update, this.identity);
-					if (callback) await this.#options.onCallback(callback);
-					else if (message) await this.#options.onMessage(message);
+					try {
+						if (callback) await this.#options.onCallback(callback);
+						else if (message) await this.#options.onMessage(message);
+						handlerFailures = 0;
+					} catch (error) {
+						if (this.#controller.signal.aborted) return;
+						// 确定性失败（毒消息）重试若干次后跳过：推进游标、告警留痕，不退出进程——
+						// 退出留给传输级故障（401/409）与游标无法落盘（cursor 分支）
+						if (++handlerFailures < 6) throw error;
+						const cause = error instanceof TelegramError ? error : new TelegramError("Telegram 更新处理失败");
+						const notice = new TelegramError(`Telegram update ${update.update_id} 连续处理失败，已跳过该消息：${cause.message}`, { code: cause.code });
+						try { this.#options.onError(notice); } catch { /* Reporting must not break recovery. */ }
+						console.error(`[dwell] Telegram update ${update.update_id} 连续处理失败，跳过:`, cause);
+					}
 					phase = "cursor";
 					const offset = update.update_id + 1;
 					await writeStateJson(this.#cursorFile, { botId: this.identity.id, offset });
 					await chmod(this.#cursorFile, 0o600);
 					this.#offset = offset;
-					handlerFailures = 0;
+					cursorFailures = 0;
 				}
 				// Empty mocked responses and unexpected proxy responses must not busy-spin.
 				if (!updates.length) await this.#wait(50);
@@ -324,7 +337,7 @@ export class TelegramBot {
 					? error instanceof TelegramError ? error : new TelegramError("Telegram 轮询请求失败")
 					: new TelegramError(phase === "handler" ? "Telegram 更新处理失败；保留游标以便重试" : "Telegram 游标保存失败；保留游标以便重试");
 				try { this.#options.onError(safe); } catch { /* Reporting must not break recovery. */ }
-				if (safe.code === 401 || safe.code === 409 || (phase !== "transport" && ++handlerFailures >= 6)) { this.#fail(safe); return; }
+				if (safe.code === 401 || safe.code === 409 || (phase === "cursor" && ++cursorFailures >= 6)) { this.#fail(safe); return; }
 				const attempts = phase === "transport" ? ++failures : handlerFailures;
 				try { await this.#wait(Math.min(30_000, 500 * 2 ** Math.min(attempts - 1, 6))); } catch { return; }
 			}

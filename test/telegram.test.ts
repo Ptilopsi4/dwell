@@ -254,6 +254,23 @@ test("Telegram connect discards raw network errors and their token-bearing cause
 	});
 });
 
+test("Telegram skips a handler update after repeated failures instead of failing the bot", async (t) => {
+	// 毒消息：重试 6 次后跳过（游标推进、告警留痕），传输层继续服务，onFatal 不触发
+	let attempts = 0;
+	let fatal = 0;
+	const ids: string[] = [];
+	const f = await fixture(t, {
+		respond: async (request) => request.method === "getUpdates" && (request.body as { offset: number }).offset === 0 ? ok([update()]) : blocked(request.signal),
+		onMessage: async (message) => { ids.push(message.requestId!); attempts++; throw new Error(`poison ${message.requestId}`); },
+	});
+	f.bot.start();
+	await until(() => f.requests.some((r) => r.method === "getUpdates" && (r.body as { offset: number }).offset === 10));
+	assert.equal(attempts, 6, "第六次失败后跳过，不再重试");
+	assert.deepEqual(JSON.parse(await readFile(f.stateFile, "utf8")), { botId: "123", offset: 10 }, "游标已跳过毒消息");
+	assert.equal(f.errors.some((error) => error.message.includes("已跳过该消息")), true, "跳过已告警");
+	assert.equal(f.bot.status() !== "failed", true, "bot 未进入 failed");
+});
+
 test("Telegram cursor advances only after durable admission; failed handlers replay the same request ID", async (t) => {
 	let attempts = 0;
 	const ids: string[] = [];

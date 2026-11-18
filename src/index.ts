@@ -898,7 +898,7 @@ async function rebuildConversationScope(): Promise<void> {
 
 async function replyTo(target: ReplyTarget, text: string, conversation?: Conversation): Promise<void> {
 	if (target.destination?.kind === "telegram") {
-		if (telegram === undefined || !telegramChatAllowed(target.destination)) throw new Error("Telegram 目的地未启用");
+		if (telegram === undefined || !telegramChatAllowed(target.destination)) throw new TelegramError("Telegram 目的地未启用");
 		const sent = await telegram.send(target.destination, text, { replyTo: target.messageId });
 		if (conversation !== undefined) for (const messageId of sent.messageIds) await sessions.anchor(messageId, conversation.id);
 		return;
