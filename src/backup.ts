@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -75,7 +75,10 @@ async function sqliteIntegrity(directory: string): Promise<void> {
 export async function createBackup(options: BackupOptions): Promise<Manifest> {
 	if (!options.stopped) throw new Error("Stop the service and all workspace writers before creating a backup; pass --stopped to acknowledge this requirement");
 	const [data, state, code] = await Promise.all([options.data, options.state, options.code].map((path) => realpath(path)));
-	const output = join(await realpath(dirname(resolve(options.output))), resolve(options.output).split(sep).at(-1)!);
+	const outputParent = await realpath(dirname(resolve(options.output)));
+	// 备份可能含 --env 的全部明文密钥：拒世界可写目录（/tmp、/var/tmp 等带 other-write 位）作输出位置
+	if ((await stat(outputParent)).mode & 0o002) throw new Error("Backup output must not be inside a world-writable directory such as /tmp; choose a private location");
+	const output = join(outputParent, resolve(options.output).split(sep).at(-1)!);
 	if ([data, state, code].some((root) => within(output, root))) throw new Error("Backup output must be outside code, data and state directories");
 	if (within(data, state) || within(state, data)) throw new Error("Data and state directories must be separate");
 	await mkdir(output, { mode: 0o700 });
