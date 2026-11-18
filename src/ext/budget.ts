@@ -2,7 +2,7 @@ import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context"
 import { CompactionTask, defineDoc, defineExtension, defineTask, GenerationTask, hook, LiveDoc, ToolTask, type ConversationId, type Cursor, type Harness, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 
 export type BudgetLimits = { modelAdmissions: number; toolAdmissions: number; executionMs: number };
-export const DEFAULT_BUDGET_LIMITS: Readonly<BudgetLimits> = { modelAdmissions: 32, toolAdmissions: 128, executionMs: 15 * 60_000 };
+export const DEFAULT_BUDGET_LIMITS: Readonly<BudgetLimits> = { modelAdmissions: 32, toolAdmissions: 128, executionMs: 30 * 60_000 };
 export type BudgetStopReason = "model_limit" | "tool_limit" | "execution_limit" | "unknown_budget" | "storage_error";
 export type BudgetRecord = {
 	limits: BudgetLimits;
