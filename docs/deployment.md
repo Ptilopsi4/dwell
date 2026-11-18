@@ -25,7 +25,7 @@ dwell uses the long connection (WebSocket) of the official SDK, so the server ne
    | `im:message.p2p_msg:readonly` | Receive direct messages |
    | `im:message.group_at_msg:readonly` | Receive @bot messages in groups |
    | `im:message.group_msg` | Receive all group messages (replies without @, topic groups) and read history for `dwell.lark.read`; needs admin approval |
-   | `im:resource` | Download images and files from messages, upload files for `dwell.lark.send` |
+   | `im:resource` | Download images and files from messages, upload files for `dwell.send` |
    | `cardkit:card:write` | Streaming reply cards |
    | `contact:user.base:readonly` | Show user names |
    | `im:chat:readonly` | Show group names |

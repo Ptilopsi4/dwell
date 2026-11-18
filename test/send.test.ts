@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeFileSendTool, makeSendExtension, type FileSendInput, type SendDeps } from "../src/ext/send.ts";
-import { makeLarkExtension } from "../src/ext/lark.ts";
 import type { ConversationDestination } from "../src/pipeline.ts";
 
 const context = {} as never;
@@ -92,25 +91,6 @@ test("unconfirmed Telegram delivery never claims success or offers a panel downl
 	assert.match(out(r as never), /send path is not wired up/);
 });
 
-test("legacy Feishu tool rejects a Telegram destination without falling back to panel", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "report.txt"), "report");
-	let sent = false;
-	const extension = makeLarkExtension({
-		getClient: () => undefined,
-		getDirectory: () => undefined,
-		chatOf: () => undefined,
-		destinationOf: () => telegram,
-		sendToChat: async () => { sent = true; return { messageId: "om_wrong" }; },
-	});
-	const tool = extension.tools?.find((tool) => tool.name === "dwell.lark.send");
-	assert.ok(tool);
-	const r = await tool.execute({ path: "report.txt" }, api(cwd), context);
-	assert.equal((r as { isError?: boolean }).isError, true);
-	assert.match(out(r as never), /Telegram conversation.*Use dwell\.send/);
-	assert.doesNotMatch(out(r as never), /Offered as a download|Sent /);
-	assert.equal(sent, false);
-});
 
 test("path checks reject traversal, sibling prefixes and symlink escapes before delivery", async (t) => {
 	const root = await tempCwd(t);

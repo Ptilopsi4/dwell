@@ -164,13 +164,6 @@ async function main(): Promise<void> {
 			isAdmin: (id) => users.isAdmin(id),
 			senderOf: (id) => runSender.get(id),
 			getSelfAppId: () => larkAppId,
-			// dwell.lark.send 的出口：发送复用 index 的锚点/话题规则，发出的文件消息即成为新锚点（回复它即续接任务线）；scope：后台子会话按父线的 chat 发
-			sendToChat: async (id, input) => {
-				const scope = scopeOf(id);
-				const sent = await sendToConversationChat(scope, input);
-				if (sent !== undefined) await sessions.anchor(sent.messageId, scope as ConversationId);
-				return sent;
-			},
 		}),
 		makeSendExtension({ destinationOf: (id) => sessions.destinationOf(scopeOf(id)), send: sendFileToConversation }),
 		// 文件工具路径治理：按会话解析 cwd（write/edit 限 cwd+tmp；read 禁 state/应用根/sqlite/proc）
