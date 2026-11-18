@@ -532,6 +532,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? undefined;
 			const result = await resolveDownload(cwd, url.searchParams.get("path") ?? "");
 			if (result.status !== 200) { json(res, result.status, { error: result.error }); return; }
+			// 整读而非流式：复用 guarded-env 的统一读取与 30MB 限额，代价是内存峰值 = 并发下载数 × 文件大小（panel 为内网信任边界）
 			res.writeHead(200, downloadHeaders(result.name, result.size));
 			res.end(result.buffer);
 			return;
@@ -667,7 +668,11 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 				tokens: usage.reduce((n, u) => n + (u.totalTokens ?? 0), 0),
 				cost: usage.reduce((n, u) => n + (u.cost?.total ?? 0), 0),
 			};
-			res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`);
+			// 背压保护：停滞客户端（TCP 窗归零不 RST）会让写队列无限堆积 sync 帧；超过水位直接断开，由前端重连逻辑重新订阅
+			if (res.write(`event: sync\ndata: ${JSON.stringify({ mode: append ? "append" : "replace", entries, live: slim, meta })}\n\n`) === false && res.writableLength > 4 * 1024 * 1024) {
+				console.error("[dwell] panel SSE 客户端停滞，写队列超水位，断开重连");
+				res.destroy();
+			}
 		};
 		// subscribe 契约先投当前值再投变更（chord Readable），首帧由它发；手动再发会重复一帧全量 replace
 		let frameWork = Promise.resolve();
@@ -729,7 +734,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		}
 		if ((await harness.snapshot(PiLiveDoc, conversation.id, BACKGROUND_CONTEXT))?.run === undefined) await setRunAttribution(id, feishu.operator(), "panel");
 		const submission = await conversation.submit(
-			{ type: "input", content: input, requestId: `panel-${Date.now()}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
+			{ type: "input", content: input, requestId: `panel-${Date.now()}-${randomBytes(4).toString("hex")}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
