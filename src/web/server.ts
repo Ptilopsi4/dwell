@@ -409,7 +409,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 				if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
 				if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
 				try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
-				catch (error) { throw new HttpError(409, (error as Error).message); }
+				catch (error) {
+					// 只有已知冲突才向操作者呈现原文（409）；其余是内部故障，统一 500 避免英文堆栈或 undefined 透给面板
+					const known = new Set(["该开启目标请求与原记录不一致", "请在父会话中开启新目标", "当前仍在运行或有排队输入，请先等待完成或取消", "当前目标已变化，请刷新后重试", "本会话的目标操作记录已满，请开启新的会话"]);
+					const message = error instanceof Error && error.message !== undefined ? error.message : "";
+					console.error("[dwell] 开启新目标未通过:", error);
+					throw known.has(message) ? new HttpError(409, message) : new HttpError(500, "开启新目标失败，请稍后重试；若持续失败请查看服务日志。");
+				}
 				return;
 			}
 			if (req.method === "POST" && url.pathname === "/api/work/accept") {
@@ -428,7 +434,9 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 					"Work verification changed during acceptance": "验收期间验证记录已更新，请刷新记录后重新核对。",
 				};
 				console.error("[dwell] 工作验收未通过:", error);
-				throw new HttpError(409, messages[error instanceof Error ? error.message : ""] ?? "无法确认验收，请检查工作区和产物后重试。");
+				// 字典命中的是业务冲突（409 给操作者可理解的文案）；其余是内部故障，统一 500 不透传原始英文
+				const message = error instanceof Error && error.message !== undefined ? error.message : "";
+				throw messages[message] !== undefined ? new HttpError(409, messages[message]) : new HttpError(500, "无法确认验收，请稍后重试；若持续失败请查看服务日志。");
 			}
 			return;
 		}
