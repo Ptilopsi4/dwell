@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 import type { NormalizedMessage } from "./pipeline.ts";
 import type { ImageDescriber } from "./harness.ts";
+import { modelFailure } from "./model-failure.ts";
 import type { SaveUpload } from "./uploads.ts";
 
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
@@ -70,7 +71,9 @@ export async function ingestBuffer(
 		return { saved: path, part: `[图片${opts.index} ${path}]\n${description}` };
 	} catch (err) {
 		signal?.throwIfAborted();
-		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（视觉分析失败：${err instanceof Error ? err.message : String(err)}）。` };
+		// 视觉失败的原始 provider 错误可能回显提交的 key 片段：归一为分类诊断，不进上下文与转录
+		const detail = err instanceof Error ? err.message : String(err);
+		return { saved: path, part: `[图片${opts.index}] 已存 ${path}（视觉分析失败：${modelFailure(detail).message}）。` };
 	}
 }
 
