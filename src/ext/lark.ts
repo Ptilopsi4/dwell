@@ -165,7 +165,7 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"Read Feishu chat history (the current chat by default). Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages from other bots are returned with their extracted text; dwell's own reply cards show only a placeholder (normally their content is in your context) unless you pass ownCards: true, e.g. after compaction or when the user asks what an earlier card said. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
+			"Read Feishu chat history (the current chat by default). Feishu conversations only — this tool is not applicable in Telegram chats. Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages from other bots are returned with their extracted text; dwell's own reply cards show only a placeholder (normally their content is in your context) unless you pass ownCards: true, e.g. after compaction or when the user asks what an earlier card said. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
 		parameters: Type.Object({
 			count: Type.Optional(Type.Number({ description: "Number of messages to read (default 20, max 50)" })),
 			around: Type.Optional(Type.String({ description: "Message id (starts with om_): read half before and half after it; take it from this tool's previous output" })),
@@ -251,14 +251,14 @@ function makeImageTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.image",
 		description:
-			"Understand the content of a Feishu image message. Input a message id (starts with om_, from dwell.lark.read output); the tool downloads the image and returns a description (subject, transcribed text, chart data). Typical case: the user asks what something is or how to solve it, but the image is not in your context. Call dwell.lark.read first, find the message id of the [image] placeholder, then call this tool. Only image messages are supported; stickers are not.",
+			"Understand the content of a Feishu image message. Feishu conversations only — not applicable in Telegram chats. Input a message id (starts with om_, from dwell.lark.read output); the tool downloads the image and returns a description (subject, transcribed text, chart data). Typical case: the user asks what something is or how to solve it, but the image is not in your context. Call dwell.lark.read first, find the message id of the [image] placeholder, then call this tool. Only image messages are supported; stickers are not.",
 		parameters: Type.Object({
 			message: Type.String({ description: "Image message id (starts with om_), from dwell.lark.read output" }),
 		}),
 		replay: "safe",
 		executionMode: "sequential",
 		async execute(args, api) {
-			if (deps.destinationOf?.(api.conversationId as number).kind === "telegram") return text("Feishu image lookup is unavailable in Telegram conversations.", true);
+			if (deps.destinationOf?.(api.conversationId as number).kind === "telegram") return text("Feishu image lookup applies to Feishu messages only. An image the user sent directly already carries its visual description in your context.", true);
 			const client = deps.getClient();
 			if (client === undefined) return text("Feishu channel is not ready", true);
 			const describer = deps.getDescriber?.() ?? null;
@@ -308,7 +308,7 @@ export function makeLarkExtension(deps: LarkDeps) {
 		sections: [
 			section(
 				"lark",
-				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. Deliver files with dwell.send.",
+				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. dwell.lark.read and dwell.lark.image apply to Feishu messages only and do nothing in Telegram chats — an image a Telegram user sends you already arrives with its visual description in your context. Deliver files with dwell.send.",
 				{ tag: false },
 			),
 		],
