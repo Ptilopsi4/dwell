@@ -136,7 +136,8 @@ for (const failActivity of [false, true]) test(`main Telegram attachment prepara
 		// 附件准备前就发持久占位（下载+视觉描述可达数秒），且不触发模型
 		const placeholder = f.requests("telegram", "sendMessage").find((event) => event.body.text === "正在接收附件…");
 		assert.ok(placeholder, "A persistent placeholder must appear before attachment preparation");
-		assert.equal(placeholder.body.reply_to_message_id, 215);
+		const reply = placeholder.body.reply_parameters as { message_id?: number } | undefined;
+		assert.equal(reply?.message_id, 215);
 		assert.equal(f.requests("model").length, 0);
 		f.release("file:hold-activity");
 		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:215" && event.body.state === "done");

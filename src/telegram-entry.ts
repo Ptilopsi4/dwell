@@ -102,7 +102,7 @@ export class TelegramInbox {
 	async preparationFailed(id: string): Promise<boolean | undefined> {
 		return this.#harness.commit(async (tx) => {
 			const row = (await tx.doc(TelegramInboxDoc)).inputs[id];
-			if (row === undefined || row.output !== "pending") return undefined;
+			if (row === undefined || (row.output !== "pending" && row.output !== "tracking")) return undefined;
 			row.preparationAttempts = (row.preparationAttempts ?? 0) + 1;
 			row.retryAt = Date.now() + Math.min(30_000, 1000 * 2 ** (row.preparationAttempts - 1));
 			if (row.preparationAttempts >= 3) row.output = "failed";
@@ -110,7 +110,8 @@ export class TelegramInbox {
 		}, BACKGROUND_CONTEXT);
 	}
 	async pendingInputs(): Promise<[string, TelegramInputReceipt][]> {
-		return (await this.recoverable()).filter(([, row]) => row.raw !== undefined && row.submissionId === undefined && row.output === "pending");
+		// tracking（附件占位已发）同样未 prepared：重启后与 pending 一起恢复，否则占位后硬重启的输入永久卡住
+		return (await this.recoverable()).filter(([, row]) => row.raw !== undefined && row.submissionId === undefined && (row.output === "pending" || row.output === "tracking"));
 	}
 	async cancelInputs(ids: string[]): Promise<void> {
 		await this.#harness.commit(async (tx) => {
