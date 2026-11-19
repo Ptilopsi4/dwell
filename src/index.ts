@@ -70,6 +70,7 @@ async function main(): Promise<void> {
 	const larkAppId = process.env.LARK_APP_ID;
 	const larkAppSecret = process.env.LARK_APP_SECRET;
 	const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+	const telegramProxy = process.env.TELEGRAM_PROXY;
 	directory = new Directory(larkAppId, larkAppSecret);
 	imageDescriber = makeImageDescriber();
 	await initStateDir();
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
 		channel = await connectChannel({ appId: larkAppId, appSecret: larkAppSecret, onMessage: (msg) => void handleMessage(msg), onCardAction: (evt) => void handleCardAction(evt) });
 	}
 	if (telegramToken) {
-		telegram = await TelegramBot.connect({ token: telegramToken, onMessage: handleMessage, onCallback: handleTelegramCallback, onError: (error) => console.error("[dwell] Telegram 连接异常:", error.message),
+		telegram = await TelegramBot.connect({ token: telegramToken, proxy: telegramProxy, onMessage: handleMessage, onCallback: handleTelegramCallback, onError: (error) => console.error("[dwell] Telegram 连接异常:", error.message),
 			isDestinationAllowed: telegramChatAllowed,
 			onFatal: (error) => { console.error("[dwell] Telegram 已停止，退出并交由服务管理器恢复:", error.message); void shutdown(1); },
 		});

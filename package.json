@@ -19,7 +19,8 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
     "@larksuiteoapi/node-sdk": "^1.76.0",
-    "marked": "18.2.0"
+    "marked": "18.2.0",
+    "undici": "8.12.4"
   },
   "devDependencies": {
     "@types/node": "^26",

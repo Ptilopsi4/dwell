@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
-import { TelegramBot, TelegramError, normalizeTelegramUpdate, telegramChatKey, telegramMessageKey,
+import { TelegramBot, TelegramError, normalizeTelegramUpdate, telegramChatKey, telegramMessageKey, telegramFetch,
 	type TelegramUpdate, type TelegramCallback } from "../src/telegram.ts";
 import type { NormalizedMessage, TelegramDestination } from "../src/pipeline.ts";
 
@@ -773,4 +773,15 @@ test("Telegram download caps Content-Length and streaming data; successful bytes
 	assert.equal(cancelled, true);
 	mode = "error";
 	await assert.rejects(f.bot.download("doc"), (e: unknown) => e instanceof TelegramError && !e.stack!.includes(token) && !e.cause);
+});
+
+test("TELEGRAM_PROXY 校验：未设置用全局 fetch，非法值拒绝且报错不回显 URL", () => {
+	assert.equal(telegramFetch(undefined), fetch);
+	assert.equal(telegramFetch(""), fetch);
+	for (const bad of ["not a url", "ftp://example.invalid:8080", "telegram.org"]) {
+		assert.throws(() => telegramFetch(bad), (e: unknown) => e instanceof TelegramError && !String(e.message).includes(bad) && !e.stack!.includes(bad), bad);
+	}
+	// 合法 scheme 构造不抛（后续请求才连代理）；带凭证的 URL 不进任何报错路径
+	assert.equal(typeof telegramFetch("http://user:pass@192.168.128.1:7890"), "function");
+	assert.equal(typeof telegramFetch("socks5://192.168.128.1:1080"), "function");
 });

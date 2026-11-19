@@ -24,7 +24,7 @@ import { RuntimeTelemetry } from "./telemetry.ts";
 export const MODEL_CONFIG = loadModelsConfig();
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
-const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_MODEL_API_KEY", "OPENCODE_GO_API_KEY", "DWELL_MODEL_API_KEY", "DWELL_VISION_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "TELEGRAM_BOT_TOKEN", "DWELL_TELEGRAM_CHATS", "DWELL_ALLOW", "DWELL_ADMINS"];
+const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_MODEL_API_KEY", "OPENCODE_GO_API_KEY", "DWELL_MODEL_API_KEY", "DWELL_VISION_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_PROXY", "DWELL_TELEGRAM_CHATS", "DWELL_ALLOW", "DWELL_ADMINS"];
 
 export async function scrubSecretEnv(): Promise<void> {
 	const values: string[] = [];
