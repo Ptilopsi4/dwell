@@ -4,9 +4,9 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { JsonRecord } from "./telegram-main-hook.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
-test("main Telegram delivers both answers when a busy input becomes a later generation", { timeout: 60_000 }, async (t) => {
+test("main Telegram delivers both answers when a busy input becomes a later generation", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "ANSWER_A", wait: "first-answer" }, { text: "ANSWER_B" }]);
 	let passed = false;
 	try {
@@ -38,7 +38,7 @@ test("main Telegram delivers both answers when a busy input becomes a later gene
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram cancels a blocked attachment and admits later input on the same route", { timeout: 60_000 }, async (t) => {
+test("main Telegram cancels a blocked attachment and admits later input on the same route", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Other chat completed.", match: "Another chat ordinary input" }, { text: "Replacement completed.", match: "Replacement after attachment cancellation" }]);
 	let passed = false;
 	try {
@@ -77,7 +77,7 @@ test("main Telegram cancels a blocked attachment and admits later input on the s
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram cancels vision preparation and preserves the cancelled receipt across restart", { timeout: 60_000 }, async (t) => {
+test("main Telegram cancels vision preparation and preserves the cancelled receipt across restart", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ text: "Cancelled vision description", wait: "cancel-vision", match: "Describe this image" },
 		{ text: "Vision replacement completed.", match: "Replacement after vision cancellation" },
@@ -124,7 +124,7 @@ test("main Telegram cancels vision preparation and preserves the cancelled recei
 	} finally { await f.close(passed); }
 });
 
-for (const failActivity of [false, true]) test(`main Telegram attachment preparation is visible before model admission${failActivity ? " even when the activity endpoint fails" : ""}`, { timeout: 60_000 }, async (t) => {
+for (const failActivity of [false, true]) test(`main Telegram attachment preparation is visible before model admission${failActivity ? " even when the activity endpoint fails" : ""}`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "ATTACHMENT_PROCESSED" }], { failActivity });
 	let passed = false;
 	try {
@@ -147,7 +147,7 @@ for (const failActivity of [false, true]) test(`main Telegram attachment prepara
 	} finally { f.release("file:hold-activity"); await f.close(passed); }
 });
 
-test("main Telegram recovers the persisted raw attachment after cursor advancement and a hard restart", { timeout: 60_000 }, async (t) => {
+test("main Telegram recovers the persisted raw attachment after cursor advancement and a hard restart", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -180,7 +180,7 @@ test("main Telegram recovers the persisted raw attachment after cursor advanceme
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram entry enforces admission and delivers real Harness results to private and directed topic inputs", { timeout: 60_000 }, async (t) => {
+test("main Telegram entry enforces admission and delivers real Harness results to private and directed topic inputs", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -228,7 +228,7 @@ test("main Telegram entry enforces admission and delivers real Harness results t
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram identity commands return the current chat ID without admitting an unlisted group", { timeout: 60_000 }, async (t) => {
+test("main Telegram identity commands return the current chat ID without admitting an unlisted group", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -269,7 +269,7 @@ test("main Telegram identity commands return the current chat ID without admitti
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram entry replays a cursor-write failure without a second model run or answer", { timeout: 60_000 }, async (t) => {
+test("main Telegram entry replays a cursor-write failure without a second model run or answer", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -295,7 +295,7 @@ test("main Telegram entry replays a cursor-write failure without a second model 
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram entry advances past failed unsupported-media notices and accepts the next private input", { timeout: 60_000 }, async (t) => {
+test("main Telegram entry advances past failed unsupported-media notices and accepts the next private input", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -328,7 +328,7 @@ test("main Telegram entry advances past failed unsupported-media notices and acc
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram approval buttons reject another member and admit one continuation for the original actor", { timeout: 60_000 }, async (t) => {
+test("main Telegram approval buttons reject another member and admit one continuation for the original actor", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {

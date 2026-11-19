@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { PendingApproval, ApprovalDecision } from "../src/ext/approval.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 import type { JsonRecord, MainFixtureEvent } from "./telegram-main-hook.ts";
 
 const topic = { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 };
@@ -30,7 +30,7 @@ function callback(updateId: number, actor: number, id: string, card: MainFixture
 	} };
 }
 
-test("main restarts a tracked Telegram topic run without input redelivery or a second placeholder", { timeout: 60_000 }, async (t) => {
+test("main restarts a tracked Telegram topic run without input redelivery or a second placeholder", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const answer = "The restarted topic run completed.";
 	const f = await mainFixture(t, [{ text: answer, wait: "topic-before-kill" }]);
 	let passed = false;
@@ -75,7 +75,7 @@ test("main restarts a tracked Telegram topic run without input redelivery or a s
 	} finally { await f.close(passed); }
 });
 
-test("main restores the original approval card and recovers one actor-authorized topic continuation across crashes", { timeout: 90_000 }, async (t) => {
+test("main restores the original approval card and recovers one actor-authorized topic continuation across crashes", { ...posixOnly, timeout: 90_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -154,7 +154,7 @@ test("main restores the original approval card and recovers one actor-authorized
 	} finally { await f.close(passed); }
 });
 
-test("main recovers a real background child and delivers one autonomous report to its original Telegram topic", { timeout: 90_000 }, async (t) => {
+test("main recovers a real background child and delivers one autonomous report to its original Telegram topic", { ...posixOnly, timeout: 90_000 }, async (t) => {
 	const childTask = "Perform the isolated restart acceptance child task and return its result.";
 	const f = await mainFixture(t, [
 		{ tool: "dwell.task", arguments: { action: "start", name: "restart-worker", message: childTask } },
@@ -222,7 +222,7 @@ test("main recovers a real background child and delivers one autonomous report t
 	} finally { await f.close(passed); }
 });
 
-test("main visibly relays real panel HTTP input before its model run and recovers the original topic placeholder after a crash", { timeout: 60_000 }, async (t) => {
+test("main visibly relays real panel HTTP input before its model run and recovers the original topic placeholder after a crash", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const content = "Continue this topic with **literal asterisks** and `literal backticks` sent through the local panel.";
 	const answer = "The panel input completed in its original Telegram topic.";
 	const f = await mainFixture(t, [

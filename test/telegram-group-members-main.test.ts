@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 import type { JsonRecord, MainFixtureEvent } from "./telegram-main-hook.ts";
 
 const group = { chat: { id: -301, type: "supergroup" }, message_thread_id: 9 };
@@ -28,7 +28,7 @@ function replyToBot(card: MainFixtureEvent): JsonRecord {
 	return { reply_to_message: { message_id: card.messageId, date: 10, ...group, from: { id: 100, is_bot: true } } };
 }
 
-test("allowgroup discovers its own group and recovers group-only work without granting private access", { timeout: 60_000 }, async (t) => {
+test("allowgroup discovers its own group and recovers group-only work without granting private access", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Before restart", wait: "group-member-restart" }], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -70,7 +70,7 @@ test("allowgroup discovers its own group and recovers group-only work without gr
 	} finally { await f.close(passed); }
 });
 
-test("group grants cannot bypass explicit blocks, old control receipts, or a later group shutdown", { timeout: 60_000 }, async (t) => {
+test("group grants cannot bypass explicit blocks, old control receipts, or a later group shutdown", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Explicit private access works." }], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -96,7 +96,7 @@ test("group grants cannot bypass explicit blocks, old control receipts, or a lat
 	} finally { await f.close(passed); }
 });
 
-test("group-only users cannot preapprove or click approval while a dwell admin can resume the original actor", { timeout: 60_000 }, async (t) => {
+test("group-only users cannot preapprove or click approval while a dwell admin can resume the original actor", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ tool: "bash", arguments: { command: "rm -rf scratch/group-fixture" } }, { text: "Waiting for admin approval." }, { text: "Admin-approved continuation." }], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -122,7 +122,7 @@ test("group-only users cannot preapprove or click approval while a dwell admin c
 	} finally { await f.close(passed); }
 });
 
-test("group-member attachments recheck a block before model admission", { timeout: 60_000 }, async (t) => {
+test("group-member attachments recheck a block before model admission", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -143,7 +143,7 @@ test("group-member attachments recheck a block before model admission", { timeou
 	} finally { await f.close(passed); }
 });
 
-test("members replying to a busy legacy thread cannot borrow its actor or approval window", { timeout: 60_000 }, async (t) => {
+test("members replying to a busy legacy thread cannot borrow its actor or approval window", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ text: "Legacy admin finished.", wait: "legacy-active" },
 		{ tool: "bash", arguments: { command: "rm -rf scratch/member-isolation" } },
@@ -179,7 +179,7 @@ test("members replying to a busy legacy thread cannot borrow its actor or approv
 	} finally { await f.close(passed); }
 });
 
-test("isolated lines keep panel and member inputs in separate runs while busy", { timeout: 60_000 }, async (t) => {
+test("isolated lines keep panel and member inputs in separate runs while busy", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Guest's first result.", wait: "member-busy" }, { text: "Panel result." }, { text: "Guest followup result." }], { admins: "tg:200", panel: true });
 	let passed = false;
 	try {
@@ -209,7 +209,7 @@ test("isolated lines keep panel and member inputs in separate runs while busy", 
 	} finally { await f.close(passed); }
 });
 
-test("revocation during attribution prevents prepared member input from reaching the model", { timeout: 60_000 }, async (t) => {
+test("revocation during attribution prevents prepared member input from reaching the model", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200", panel: true, holdAttributionFor: "tg-update:100:121" });
 	let passed = false;
 	try {
@@ -228,7 +228,7 @@ test("revocation during attribution prevents prepared member input from reaching
 	} finally { await f.close(passed); }
 });
 
-test("revocation while an accepted approval awaits attribution prevents its continuation", { timeout: 60_000 }, async (t) => {
+test("revocation while an accepted approval awaits attribution prevents its continuation", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ tool: "bash", arguments: { command: "rm -rf scratch/revoked-continuation" } }, { text: "Waiting for an administrator." }], { admins: "tg:200", panel: true, holdAttributionFor: "approval" });
 	let passed = false;
 	try {
@@ -251,7 +251,7 @@ test("revocation while an accepted approval awaits attribution prevents its cont
 	} finally { await f.close(passed); }
 });
 
-test("default panel operators retain approval authority without a global bot role", { timeout: 60_000 }, async (t) => {
+test("default panel operators retain approval authority without a global bot role", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ tool: "bash", arguments: { command: "ssh synthetic.invalid" } }, { text: "Panel approval is required." }, { text: "Panel approval continued." }], { panel: true, defaultPanelOperator: true });
 	let passed = false;
 	try {
@@ -274,7 +274,7 @@ test("default panel operators retain approval authority without a global bot rol
 	} finally { await f.close(passed); }
 });
 
-test("member file tools apply their isolated scope through the main assembly", { timeout: 60_000 }, async (t) => {
+test("member file tools apply their isolated scope through the main assembly", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200" });
 	let passed = false;
 	try {

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
-for (const group of [false, true]) test(`main Telegram streams text before settlement in a ${group ? "group topic" : "private chat"}`, { timeout: 60_000 }, async (t) => {
+for (const group of [false, true]) test(`main Telegram streams text before settlement in a ${group ? "group topic" : "private chat"}`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const partial = "逐步生成的开头。";
 	const final = `${partial}最终内容已完整送达。`;
 	const f = await mainFixture(t, [{ text: final, partial: { text: partial, wait: "finish-text" } }]);
@@ -28,7 +28,7 @@ for (const group of [false, true]) test(`main Telegram streams text before settl
 	} finally { f.release("finish-text"); await f.close(passed); }
 });
 
-test("main Telegram retains measured tool progress without command arguments or output", { timeout: 60_000 }, async (t) => {
+test("main Telegram retains measured tool progress without command arguments or output", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const secret = "synthetic-command-and-output-marker";
 	const f = await mainFixture(t, [
 		{ tool: "bash", arguments: { command: `node -e 'setTimeout(() => console.log("${secret}"), 750)'` } },
@@ -50,7 +50,7 @@ test("main Telegram retains measured tool progress without command arguments or 
 	} finally { f.release("finish-tool"); await f.close(passed); }
 });
 
-test("main Telegram cancellation replaces a visible partial and prevents late overwrite", { timeout: 60_000 }, async (t) => {
+test("main Telegram cancellation replaces a visible partial and prevents late overwrite", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "这段过期内容不应在取消后出现。", partial: { text: "这段过期内容", wait: "cancel-stream" } }]);
 	let passed = false;
 	try {

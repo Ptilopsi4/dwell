@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 import type { JsonRecord } from "./telegram-main-hook.ts";
 
-for (const action of ["approve", "deny"] as const) test(`Telegram /${action} closes the original approval card without replaying the control effect`, { timeout: 60_000 }, async (t) => {
+for (const action of ["approve", "deny"] as const) test(`Telegram /${action} closes the original approval card without replaying the control effect`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ tool: "bash", arguments: { command: "docker ps" } }, { text: "WAITING_APPROVAL" }, { text: "APPROVED_CONTINUATION" }]);
 	let passed = false;
 	try {
@@ -33,7 +33,7 @@ for (const action of ["approve", "deny"] as const) test(`Telegram /${action} clo
 	} finally { await f.close(passed); }
 });
 
-test("Telegram owner preapproval explains another actor's pending request and preserves their authority", { timeout: 60_000 }, async (t) => {
+test("Telegram owner preapproval explains another actor's pending request and preserves their authority", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "OWNER_SEED" }, { tool: "bash", arguments: { command: "docker ps" } }, { text: "COLLABORATOR_WAITING" }, { text: "COLLABORATOR_CONTINUED" }]);
 	let passed = false;
 	const topic = { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 };

@@ -501,7 +501,7 @@ test("logs check durable kind and exact conversation, including shared-cwd conve
 	});
 });
 
-test("pipe capture flushes stdout and stderr before reporting and bounds log/tool output", { skip: procSkip }, async () => {
+test("pipe capture flushes stdout and stderr before reporting and bounds log/tool output", { skip: process.platform === "win32" ? "POSIX pipe capture semantics" : procSkip }, async () => {
 	await withProcessHarness(async ({ start, wait, logs, conversation }) => {
 		const flushed = await start("flush", "echo FINAL-STDOUT; echo FINAL-STDERR >&2", true);
 		await wait(flushed);

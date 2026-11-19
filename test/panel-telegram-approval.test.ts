@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PendingApproval } from "../src/ext/approval.ts";
 import type { JsonRecord } from "./telegram-main-hook.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
 async function post(base: string, path: string, body: JsonRecord): Promise<JsonRecord> {
 	const response = await fetch(`${base}${path}`, {
@@ -20,7 +20,7 @@ async function pending(directory: string): Promise<PendingApproval[]> {
 	return state.pending.map(([, approval]) => approval);
 }
 
-for (const target of ["private", "group", "topic"] as const) test(`ordinary Telegram ${target} approval retains its destination and local reply anchor`, { timeout: 60_000 }, async (t) => {
+for (const target of ["private", "group", "topic"] as const) test(`ordinary Telegram ${target} approval retains its destination and local reply anchor`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ tool: "bash", arguments: { command: "ssh synthetic.invalid" } },
 		{ text: "Ordinary Telegram approval is required." },
@@ -46,7 +46,7 @@ for (const target of ["private", "group", "topic"] as const) test(`ordinary Tele
 	} finally { await f.close(passed); }
 });
 
-for (const topic of [false, true]) test(`panel input on a Telegram ${topic ? "topic" : "group"} sends its approval privately without a foreign anchor`, { timeout: 60_000 }, async (t) => {
+for (const topic of [false, true]) test(`panel input on a Telegram ${topic ? "topic" : "group"} sends its approval privately without a foreign anchor`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ text: "Original group task prepared." },
 		{ tool: "bash", arguments: { command: "ssh synthetic.invalid" } },
@@ -88,7 +88,7 @@ for (const topic of [false, true]) test(`panel input on a Telegram ${topic ? "to
 	} finally { await f.close(passed); }
 });
 
-test("private approval completion preserves the topic send anchor after restart", { timeout: 60_000 }, async (t) => {
+test("private approval completion preserves the topic send anchor after restart", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ text: "The original topic is ready." },
 		{ tool: "bash", arguments: { command: "ssh synthetic.invalid" } },
@@ -155,7 +155,7 @@ test("private approval completion preserves the topic send anchor after restart"
 	} finally { await f.close(passed); }
 });
 
-for (const legacy of [false, true]) test(`replying to a panel notification retains panel approval authority across ${legacy ? "legacy" : "current"} Telegram preprocessing recovery`, { timeout: 60_000 }, async (t) => {
+for (const legacy of [false, true]) test(`replying to a panel notification retains panel approval authority across ${legacy ? "legacy" : "current"} Telegram preprocessing recovery`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Panel task initial answer." }, { text: "Another member keeps a separate task." }], { panel: true, legacyTelegramInput: legacy });
 	let passed = false;
 	try {

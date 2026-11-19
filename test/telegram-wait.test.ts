@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BACKGROUND_WAIT_NOTICE } from "../src/answer.ts";
 import { modelFailure } from "../src/model-failure.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
-test("main Telegram presents a real background wait and later report in the original topic", { timeout: 60_000 }, async (t) => {
+test("main Telegram presents a real background wait and later report in the original topic", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ tool: "dwell.task", arguments: { action: "start", name: "reader", message: "worker:late-topic-result" }, match: "Wait topic acceptance" },
 		{ tool: "dwell.task.wait", arguments: {}, match: "Wait topic acceptance" },
@@ -37,7 +37,7 @@ test("main Telegram presents a real background wait and later report in the orig
 	} finally { f.release("late-child"); await f.close(passed); }
 });
 
-for (const status of [401, 403]) test(`main Telegram and panel present a safe HTTP ${status} model failure after one request`, { timeout: 60_000 }, async (t) => {
+for (const status of [401, 403]) test(`main Telegram and panel present a safe HTTP ${status} model failure after one request`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const secret = `provider-private-body-${status}`;
 	const f = await mainFixture(t, [{ error: JSON.stringify({ error: { message: `${secret}; credential=synthetic-secret`, type: "api_error" } }), status }], { panel: true });
 	let passed = false;

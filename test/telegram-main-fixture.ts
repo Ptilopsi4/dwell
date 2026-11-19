@@ -11,6 +11,10 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { TelegramInputReceipt } from "../src/telegram-entry.ts";
 import type { JsonRecord, MainFixtureEvent, ModelReply } from "./telegram-main-hook.ts";
 
+// The fixture asserts graceful SIGTERM shutdown, guarded file access, and POSIX shell behavior;
+// Windows terminates on signal without running shutdown handlers, so these cases skip there.
+export const posixOnly = { skip: process.platform === "win32" ? "main-process acceptance requires POSIX signals and guarded files" : false };
+
 export function message(id: number, text: string, overrides: JsonRecord = {}): JsonRecord {
 	return { update_id: id, message: { message_id: id, date: 10, chat: { id: 200, type: "private" },
 		from: { id: 200, first_name: "Member" }, text, ...overrides } };
