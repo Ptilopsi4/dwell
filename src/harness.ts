@@ -8,7 +8,8 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AgentDoc, createRegistry, defineExtension, Harness, section, type ConversationId, type Cursor, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord/context";
+import { AgentDoc, createRegistry, defineExtension, Harness, hook, section, ToolTask, type ConversationId, type Cursor, type Extension, type HookApi, type ReportInfo, type TaskGraph, type ToolExecutionResult, type ToolHookCall } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard, type CanSelfApprove } from "./ext/approval.ts";
 import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
@@ -177,6 +178,30 @@ export async function checkGithubToken(token: string, now: Date = new Date()): P
 		if (days < 14) warnings.push(`GH_TOKEN 将于 ${expiry} 到期（不足 14 天）`);
 	}
 	return warnings;
+}
+
+/** read 工具的图片输出经视觉模型转描述：主模型无视觉时 read 图片文件不再只是占位符；describer 缺位或失败时保持原行为。 */
+export function makeReadVisionExtension(getDescriber: () => ImageDescriber | null): Extension {
+	return defineExtension({
+		name: "dwell-read-vision",
+		hooks: [
+			hook(ToolTask, {
+				afterTool: async (call: ToolHookCall, result: ToolExecutionResult, _api: HookApi, context: Context) => {
+					if (call.name !== "read" || result.isError || result.output === undefined) return undefined;
+					const image = result.output.find((part) => part.type === "image");
+					if (image === undefined || image.type !== "image") return undefined;
+					const describer = getDescriber();
+					if (describer === null) return undefined;
+					try {
+						const description = await describer(image.data, image.mimeType, context.abortSignal);
+						return { ...result, output: [{ type: "text" as const, text: `Read image file [${image.mimeType}]. Vision description:\n${description}` }] };
+					} catch {
+						return undefined; // 视觉失败回退占位符路径，不阻断 read
+					}
+				},
+			}),
+		],
+	});
 }
 
 const DwellExtension = defineExtension({

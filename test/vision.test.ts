@@ -170,3 +170,26 @@ test("one-shot vision on OpenCode receives a distinct session and the configured
 	assert.ok(requests.every((request) => request.headers.get("User-Agent") === "dwell/synthetic-vision"));
 	assert.ok(requests.every((request) => request.url === "https://opencode.ai/inference/go/openai/v1/chat/completions"));
 });
+
+test("read-vision：read 的图片输出转视觉描述，其余工具与失败路径不动", async () => {
+	const { makeReadVisionExtension } = await import("../src/harness.ts");
+	const handlers = () => {
+		const ext = makeReadVisionExtension(() => async () => "a blue test chart");
+		const afterTool = (ext.hooks?.[0]?.handlers as { afterTool?: (call: { name: string }, result: { output?: { type: string; data?: string; mimeType?: string; text?: string }[]; isError?: boolean }, api: unknown, context: { abortSignal?: AbortSignal }) => Promise<unknown> }).afterTool;
+		if (afterTool === undefined) throw new Error("afterTool 未注册");
+		return afterTool;
+	};
+	const afterTool = handlers();
+	const imageResult = { output: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] };
+	const replaced = await afterTool({ name: "read" }, imageResult as never, {} as never, {}) as { output: { type: string; text: string }[] };
+	assert.equal(replaced.output[0]!.type, "text");
+	assert.match(replaced.output[0]!.text, /^Read image file \[image\/png\]\. Vision description:\na blue test chart$/);
+	// 非 read 工具与非图片输出原样放行（undefined）
+	assert.equal(await afterTool({ name: "write" }, imageResult as never, {} as never, {}), undefined);
+	assert.equal(await afterTool({ name: "read" }, { output: [{ type: "text", text: "hi" }] } as never, {} as never, {}), undefined);
+	// describer 缺位与视觉失败都回退占位符路径
+	const absent = makeReadVisionExtension(() => null).hooks?.[0]?.handlers as { afterTool?: (call: { name: string }, result: unknown, api: unknown, context: { abortSignal?: AbortSignal }) => Promise<unknown> };
+	assert.equal(await absent.afterTool!({ name: "read" }, imageResult as never, {} as never, {}), undefined);
+	const failing = makeReadVisionExtension(() => async () => { throw new Error("429"); }).hooks?.[0]?.handlers as { afterTool?: (call: { name: string }, result: unknown, api: unknown, context: { abortSignal?: AbortSignal }) => Promise<unknown> };
+	assert.equal(await failing.afterTool!({ name: "read" }, imageResult as never, {} as never, {}), undefined);
+});

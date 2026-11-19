@@ -44,13 +44,27 @@ export async function ingestBuffer(
 ): Promise<{ saved: string; part: string }> {
 	signal?.throwIfAborted();
 	if (opts.kind === "file") {
-		// file：落盘，read 工具可直接读（无需视觉）
 		const safeName = `${opts.tag}${uploadName(basename(opts.name ?? `file-${opts.index}`))}`;
 		await save(cwd, safeName, buffer);
 		signal?.throwIfAborted();
+		const path = `uploads/${safeName}`;
+		const size = `${(buffer.length / 1024).toFixed(1)}KB`;
+		// 文件形态的图片（如 Telegram 大图 document）同样送视觉：主模型无视觉时 read 图片只是占位符，落盘即描述才可见
+		const mime = sniffImageMime(buffer);
+		if (mime !== null && describer !== null && buffer.length <= IMAGE_MAX_BYTES) {
+			try {
+				const description = await describer(buffer.toString("base64"), mime, signal);
+				signal?.throwIfAborted();
+				return { saved: path, part: `[图片文件${opts.index} ${path}]（${size}）\n${description}` };
+			} catch (err) {
+				signal?.throwIfAborted();
+				const detail = err instanceof Error ? err.message : String(err);
+				return { saved: path, part: `[文件${opts.index}] ${safeName}（${size}）已保存到 ${path}（视觉分析失败：${modelFailure(detail).message}），可用 read 工具读取。` };
+			}
+		}
 		return {
-			saved: `uploads/${safeName}`,
-			part: `[文件${opts.index}] ${safeName}（${(buffer.length / 1024).toFixed(1)}KB）已保存到 uploads/${safeName}，可用 read 工具读取。`,
+			saved: path,
+			part: `[文件${opts.index}] ${safeName}（${size}）已保存到 ${path}，可用 read 工具读取。`,
 		};
 	}
 	const mime = sniffImageMime(buffer);
