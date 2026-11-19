@@ -266,6 +266,6 @@ test("Telegram conversations cannot look up Feishu images even as an administrat
 	assert.ok(tool);
 	const r = await tool.execute({ message: "om_other" }, api, context);
 	assert.equal((r as { isError?: boolean }).isError, true);
-	assert.match(out(r as never), /Feishu image lookup is unavailable in Telegram/);
+	assert.match(out(r as never), /Feishu image lookup applies to Feishu messages only/);
 	assert.equal(clientAccesses, 0);
 });
