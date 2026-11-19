@@ -12,6 +12,9 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { TelegramInbox, TelegramInboxDoc } from "../src/telegram-entry.ts";
 import { createBackup, restoreBackup, verifyBackup, type BackupOptions } from "../src/backup.ts";
 
+// Verification reads through the guarded POSIX file stack and the fixtures rely on directory symlinks.
+const posixBackup = { skip: process.platform === "win32" ? "guarded file access and directory symlinks are POSIX-only" : false };
+
 async function fixture(t: import("node:test").TestContext): Promise<BackupOptions> {
 	const root = await mkdtemp(join(tmpdir(), "dwell-backup-test-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
@@ -26,7 +29,7 @@ async function fixture(t: import("node:test").TestContext): Promise<BackupOption
 	return { data: join(root, "data"), state: join(root, "state"), code: join(root, "app"), models: join(root, "models.json"), env: join(root, ".env"), output: join(root, "backup"), stopped: true };
 }
 
-test("backup restores a matched SQLite and JSON checkpoint into a fresh directory", async (t) => {
+test("backup restores a matched SQLite and JSON checkpoint into a fresh directory", posixBackup, async (t) => {
 	const options = await fixture(t);
 	await rm(join(options.data, "dwell.sqlite"));
 	const models = createModels(); models.setProvider(fauxProvider().provider);
@@ -59,7 +62,7 @@ test("backup restores a matched SQLite and JSON checkpoint into a fresh director
 	} finally { await restored.close(context); }
 });
 
-test("backup verification detects changed files, omitted state, extra files and corrupt SQLite", async (t) => {
+test("backup verification detects changed files, omitted state, extra files and corrupt SQLite", posixBackup, async (t) => {
 	const options = await fixture(t);
 	await writeFile(join(options.state, "approvals.json"), "{}");
 	await createBackup(options);
@@ -78,7 +81,7 @@ test("backup verification detects changed files, omitted state, extra files and 
 	await assert.rejects(createBackup({ ...options, output: options.output + "-broken" }), /database/);
 });
 
-test("backup requires a stopped source and refuses existing destinations and symlinks", async (t) => {
+test("backup requires a stopped source and refuses existing destinations and symlinks", posixBackup, async (t) => {
 	const options = await fixture(t);
 	await assert.rejects(createBackup({ ...options, stopped: false }), /Stop the service/);
 	await assert.rejects(createBackup({ ...options, output: join(options.data, "backup") }), /outside/);
@@ -89,7 +92,7 @@ test("backup requires a stopped source and refuses existing destinations and sym
 	await assert.rejects(createBackup({ ...options, output: options.output + "-symlink" }), /symlinks/);
 });
 
-test("workspace symlinks survive backup and restore without reading external targets", async (t) => {
+test("workspace symlinks survive backup and restore without reading external targets", posixBackup, async (t) => {
 	const options = await fixture(t);
 	const workspace = join(options.data, "work", "2");
 	await mkdir(join(workspace, "node_modules", ".bin"), { recursive: true });
@@ -120,7 +123,7 @@ test("workspace symlinks survive backup and restore without reading external tar
 	assert.equal(await readFile(join(target, "state/private.txt"), "utf8"), "PRIVATE CONTENT");
 });
 
-test("changed workspace symlink targets invalidate verification and block restore", async (t) => {
+test("changed workspace symlink targets invalidate verification and block restore", posixBackup, async (t) => {
 	const options = await fixture(t);
 	await mkdir(join(options.data, "work", "2"), { recursive: true });
 	await symlink("original.txt", join(options.data, "work", "2", "result"));
@@ -134,7 +137,7 @@ test("changed workspace symlink targets invalidate verification and block restor
 	await assert.rejects(lstat(target), { code: "ENOENT" });
 });
 
-test("symlink support stays confined to workspace descendants during creation and verification", async (t) => {
+test("symlink support stays confined to workspace descendants during creation and verification", posixBackup, async (t) => {
 	const options = await fixture(t);
 	for (const [name, path] of [
 		["state", join(options.state, "private-link")],

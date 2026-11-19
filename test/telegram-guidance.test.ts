@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonRecord } from "./telegram-main-hook.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
 const group = { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 };
 const replyTo = (id: number) => ({ message_id: id, date: 10, chat: group.chat, from: { id: 100, is_bot: true } });
 
-test("main Telegram host guidance uses the real username and preserves admission without model calls", { timeout: 60_000 }, async (t) => {
+test("main Telegram host guidance uses the real username and preserves admission without model calls", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -77,7 +77,7 @@ test("main Telegram host guidance uses the real username and preserves admission
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram host guidance command receipts survive a failed cursor write without duplicate replies", { timeout: 60_000 }, async (t) => {
+test("main Telegram host guidance command receipts survive a failed cursor write without duplicate replies", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {
@@ -107,7 +107,7 @@ test("main Telegram host guidance command receipts survive a failed cursor write
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram ask text, directed group replies and attachment-only asks still reach the model", { timeout: 60_000 }, async (t) => {
+test("main Telegram ask text, directed group replies and attachment-only asks still reach the model", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t);
 	let passed = false;
 	try {

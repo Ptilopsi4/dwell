@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { makeFileSendTool, makeSendExtension, type FileSendInput, type SendDeps } from "../src/ext/send.ts";
 import type { ConversationDestination } from "../src/pipeline.ts";
 
+// File delivery reads through the guarded worker, which fails closed outside POSIX.
+const posixFiles = { skip: process.platform === "win32" ? "POSIX file boundary; Windows fails closed" : false };
+
 const context = {} as never;
 const api = (cwd: string) => ({ conversationId: 42, env: { cwd } }) as never;
 const out = (r: { output?: { text?: string }[] }) => String(r.output?.[0]?.text ?? "");
@@ -30,7 +33,7 @@ function sendDeps(destination: ConversationDestination = telegram, result: boole
 	return { deps, inputs };
 }
 
-test("dwell.send delivers Telegram files through the current conversation sender", async (t) => {
+test("dwell.send delivers Telegram files through the current conversation sender", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "report.md"), "# Report");
 	const { deps, inputs } = sendDeps();
@@ -43,7 +46,7 @@ test("dwell.send delivers Telegram files through the current conversation sender
 	assert.deepEqual(inputs, [{ id: 42, input: { buffer: Buffer.from("# Report"), fileName: "report.md", image: false } }]);
 });
 
-test("image detection uses file contents and sends larger images as documents", async (t) => {
+test("image detection uses file contents and sends larger images as documents", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "chart.bin"), PNG);
 	await writeFile(join(cwd, "text.png"), "This is text.");
@@ -63,7 +66,7 @@ test("image detection uses file contents and sends larger images as documents", 
 	assert.deepEqual(inputs.map(({ input }) => input.image), [true, false, true, false]);
 });
 
-test("panel offers a validated download without invoking or requiring a chat sender", async (t) => {
+test("panel offers a validated download without invoking or requiring a chat sender", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "report.txt"), "report");
 	const { deps, inputs } = sendDeps({ kind: "panel" });
@@ -75,7 +78,7 @@ test("panel offers a validated download without invoking or requiring a chat sen
 	assert.match(out(r as never), /Offered as a download/);
 });
 
-test("unconfirmed Telegram delivery never claims success or offers a panel download", async (t) => {
+test("unconfirmed Telegram delivery never claims success or offers a panel download", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "report.txt"), "report");
 	for (const result of [false, undefined]) {
@@ -112,7 +115,7 @@ test("path checks reject traversal, sibling prefixes and symlink escapes before 
 	}
 });
 
-test("a symlinked workspace and links staying inside that workspace can send files", async (t) => {
+test("a symlinked workspace and links staying inside that workspace can send files", posixFiles, async (t) => {
 	const root = await tempCwd(t);
 	const cwd = join(root, "actual");
 	await mkdir(cwd);
@@ -125,7 +128,7 @@ test("a symlinked workspace and links staying inside that workspace can send fil
 	assert.equal(inputs[0]?.input.buffer.toString(), "report");
 });
 
-test("missing files, directories, empty files and oversized files never reach transport", async (t) => {
+test("missing files, directories, empty files and oversized files never reach transport", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await mkdir(join(cwd, "directory"));
 	await writeFile(join(cwd, "empty.txt"), "");
@@ -142,7 +145,7 @@ test("missing files, directories, empty files and oversized files never reach tr
 	assert.equal(inputs.length, 0);
 });
 
-test("transport errors remain failures and preserve Feishu API error details", async (t) => {
+test("transport errors remain failures and preserve Feishu API error details", posixFiles, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "report.txt"), "report");
 	for (const destination of [telegram, { kind: "feishu", chatId: "oc_current" } as const]) {

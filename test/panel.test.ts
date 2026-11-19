@@ -179,14 +179,14 @@ async function tempCwd(t: import("node:test").TestContext): Promise<string> {
 	return cwd;
 }
 
-test("resolveDownload：cwd 内文件 200（real/name/size）", async (t) => {
+test("resolveDownload：cwd 内文件 200（real/name/size）", { skip: process.platform === "win32" ? "POSIX file boundary; Windows fails closed" : false }, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "hello");
 	// 期望值走 realpath：macOS 的 /var 是 /private/var 软链
 	assert.deepEqual(await resolveDownload(cwd, "a.txt"), { status: 200, real: await realpath(join(cwd, "a.txt")), size: 5, name: "a.txt", buffer: Buffer.from("hello") });
 });
 
-test("resolveDownload：无 cwd 404 / 空 path 400 / 越界 403 / 目录与不存在 404", async (t) => {
+test("resolveDownload：无 cwd 404 / 空 path 400 / 越界 403 / 目录与不存在 404", { skip: process.platform === "win32" ? "POSIX file boundary; Windows fails closed" : false }, async (t) => {
 	const cwd = await tempCwd(t);
 	await mkdir(join(cwd, "sub"));
 	assert.deepEqual(await resolveDownload(undefined, "a.txt"), { status: 404, error: "该会话没有工作目录" });

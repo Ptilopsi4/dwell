@@ -15,7 +15,10 @@ import { messageAction } from "../src/pipeline.ts";
 import { normalizeTelegramUpdate, type TelegramUpdate } from "../src/telegram.ts";
 import { TelegramInbox } from "../src/telegram-entry.ts";
 import { startPanel } from "../src/web/server.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
+
+// node:sqlite can keep the -shm sidecar locked briefly after close on Windows; teardown then fails with EBUSY.
+const winSqlite = { skip: process.platform === "win32" ? "Windows holds SQLite sidecar files locked during teardown" : false };
 
 function workRecord(id: string): WorkRecord {
 	return {
@@ -114,7 +117,7 @@ test("new-goal command recognition preserves Telegram addressing and takes prior
 	assert.equal(normalizeTelegramUpdate(message(2, "/newgoal@AnotherBot", { chat: { id: -300, type: "supergroup" } }) as TelegramUpdate, { id: "100", username: "AcceptanceBot" }), null);
 });
 
-test("new-goal Telegram receipts retain the original work target, including no current work, after reopen", async (t) => {
+test("new-goal Telegram receipts retain the original work target, including no current work, after reopen", winSqlite, async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-new-goal-receipt-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const open = () => openNodeSqliteStorage(join(directory, "dwell.sqlite")).then((storage) => Harness.open(storage, { models: createModels(), registry: createRegistry() }, context));
@@ -153,7 +156,7 @@ function assertWorkPreserved(actual: WorkRecord, expected: WorkRecord): void {
 	for (const [member, position] of Object.entries(expectedCursors)) assert.ok(actualCursors[member] >= position);
 }
 
-test("main Telegram new-goal enforces owner and admin authority without model calls or history reset", { timeout: 90_000 }, async (t) => {
+test("main Telegram new-goal enforces owner and admin authority without model calls or history reset", { ...posixOnly, timeout: 90_000 }, async (t) => {
 	const start = (goal: string) => ({ tool: "dwell.work", arguments: { action: "start", goal, acceptance: ["The old goal remains inspectable"] } });
 	const f = await mainFixture(t, [start("Original goal"), { text: "Original goal saved." }]);
 	const topic = (id: number, text: string, actor = 200) => message(id, text, { chat: { id: -300, type: "supergroup" }, message_thread_id: 9, from: { id: actor, first_name: "Member" } });

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { setImmediate } from "node:timers/promises";
 import { TelegramBot, TelegramError } from "../src/telegram.ts";
 import { startPanel } from "../src/web/server.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
 type PanelOptions = Parameters<typeof startPanel>[0];
 
@@ -87,7 +87,7 @@ test("terminal Telegram failure reports once and supports reentrant repeated clo
 	assert.doesNotMatch(errors[0].message, /PRIVATE_|SYNTHETIC_OPS_TOKEN/);
 });
 
-test("runtime reports pending raw input and graceful shutdown preserves it for restart", { timeout: 20_000 }, async (t) => {
+test("runtime reports pending raw input and graceful shutdown preserves it for restart", { ...posixOnly, timeout: 20_000 }, async (t) => {
 	const f = await mainFixture(t, [], { panel: true });
 	let passed = false;
 	try {
@@ -155,7 +155,7 @@ async function isolatedMain(t: TestContext, scenario: string, sandbox = "off") {
 	return { child, exited, events, until, logs: () => logs };
 }
 
-test("startup readiness waits for Telegram handshake and repeated signals close once", { timeout: 12_000 }, async (t) => {
+test("startup readiness waits for Telegram handshake and repeated signals close once", { ...posixOnly, timeout: 12_000 }, async (t) => {
 	const f = await isolatedMain(t, "handshake-wait");
 	await f.until("ops.handshake-waiting");
 	const listening = await f.until("panel.listening");
@@ -188,7 +188,7 @@ test("required sandbox failure prevents bot connection before resume", { skip: p
 	assert.equal(f.events.some((event) => event.method === "ops.fatal-response"), false);
 });
 
-test("stalled transport close is bounded by the shutdown deadline", { timeout: 38_000 }, async (t) => {
+test("stalled transport close is bounded by the shutdown deadline", { ...posixOnly, timeout: 38_000 }, async (t) => {
 	const f = await isolatedMain(t, "stalled-close");
 	await f.until("getUpdates");
 	const started = Date.now();

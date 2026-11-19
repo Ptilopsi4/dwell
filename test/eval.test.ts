@@ -11,6 +11,10 @@ import { RequestBudget, guardedProvider, requestCostBound } from "../eval/budget
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 
+// Faux trials write workspace files through the guarded POSIX file stack, and the real-mode
+// path guard asserts POSIX absolute-path layout against host path separators.
+const posixEval = { skip: process.platform === "win32" ? "eval trials and path guards require POSIX file semantics" : false };
+
 const evidence = (): TrialEvidence => ({ status: "completed", wallMs: 1, requests: 1, tools: 1, assistance: [], transcripts: [], tasks: [], usage: null, sandbox: { enabled: false }, observations: [] });
 
 test("eval: wrong amounts, missing items and extra files fail final-state grading", () => {
@@ -97,7 +101,7 @@ test("eval: a custom connection is copied completely while only its key referenc
 	} finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: the faux CLI completes with an invalid host model configuration and no credentials", async () => {
+test("eval: the faux CLI completes with an invalid host model configuration and no credentials", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-faux-isolation-"));
 	try {
 		const cli = spawnSync(process.execPath, [join(import.meta.dirname, "../eval/run.ts"), "--cases", "csv-reconciliation", "--out", directory], {
@@ -146,7 +150,7 @@ test("eval: verification guidance versions the revised scenarios and explicit No
 	}
 });
 
-test("eval: real requires explicit bounded selection and isolated Linux storage", () => {
+test("eval: real requires explicit bounded selection and isolated Linux storage", posixEval, () => {
 	assert.equal(parseArgs([]).mode, "faux");
 	assert.equal(parseArgs([]).cases.length, 14);
 	assert.throws(() => parseArgs(["--real"]), /显式/);
@@ -201,7 +205,7 @@ test("eval: provider boundary blocks an unaffordable request and disables hidden
 	assert.equal(budget.snapshot().requests, 1);
 });
 
-test("eval: realistic scenarios verify unseen behavior and reject fixture changes or extra files", async () => {
+test("eval: realistic scenarios verify unseen behavior and reject fixture changes or extra files", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-scenarios-"));
 	const ids = ["invoice-workflow-repair", "ledger-reconciliation", "policy-clarification", "release-background-audit"];
 	try {
@@ -270,7 +274,7 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 	} finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: faux review cannot silently clear an unresolved clarification blocker", async () => {
+test("eval: faux review cannot silently clear an unresolved clarification blocker", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-blocker-"));
 	const c = cases.find((item) => item.id === "policy-clarification")!;
 	const original = c.script;
@@ -324,7 +328,7 @@ test("eval: request exhaustion aborts before a second provider call and preserve
 	} finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: aborted work retains its declared contract without replacing the original failure", async () => {
+test("eval: aborted work retains its declared contract without replacing the original failure", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-aborted-work-"));
 	try {
 		const result = await run({ mode: "faux", cases: ["invoice-workflow-repair"], trials: 1, out: directory, limits: { deadlineMs: 15_000, requests: 2, tools: 10 } });
@@ -346,7 +350,7 @@ test("eval: aborted work retains its declared contract without replacing the ori
 	} finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: a corrected check revision recovers in the same work and finishes without a final model response", async () => {
+test("eval: a corrected check revision recovers in the same work and finishes without a final model response", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-revise-"));
 	const c = cases.find((item) => item.id === "invoice-workflow-repair")!;
 	const original = c.script;
@@ -375,7 +379,7 @@ test("eval: a corrected check revision recovers in the same work and finishes wi
 	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: successful exit cannot bypass unfinished hidden Node assertions", async () => {
+test("eval: successful exit cannot bypass unfinished hidden Node assertions", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-code-test-"));
 	const c = cases.find((item) => item.id === "node-bugfix")!;
 	const original = c.script;
@@ -398,7 +402,7 @@ test("eval: successful exit cannot bypass unfinished hidden Node assertions", as
 	}
 });
 
-test("eval: node bugfix requires a successful executed Node check associated with its proposal", async () => {
+test("eval: node bugfix requires a successful executed Node check associated with its proposal", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-node-verification-"));
 	const c = cases.find((item) => item.id === "node-bugfix")!;
 	const original = c.script;
@@ -437,7 +441,7 @@ test("eval: node bugfix requires a successful executed Node check associated wit
 	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
-test("eval: only questions about the currency receive the planned clarification", async () => {
+test("eval: only questions about the currency receive the planned clarification", posixEval, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-clarification-test-"));
 	const c = cases.find((item) => item.id === "clarification")!;
 	const original = c.script;

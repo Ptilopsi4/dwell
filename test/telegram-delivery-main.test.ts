@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
-for (const topic of [false, true]) test(`Telegram completes once after its source reply disappears in ${topic ? "a forum topic" : "private chat"}`, { timeout: 60_000 }, async (t) => {
+for (const topic of [false, true]) test(`Telegram completes once after its source reply disappears in ${topic ? "a forum topic" : "private chat"}`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "RESULT_WITHOUT_SOURCE" }]);
 	let passed = false;
 	try {
@@ -20,7 +20,7 @@ for (const topic of [false, true]) test(`Telegram completes once after its sourc
 	} finally { await f.close(passed); }
 });
 
-test("Telegram definite placeholder rejection is failed rather than uncertain and is not retried", { timeout: 60_000 }, async (t) => {
+test("Telegram definite placeholder rejection is failed rather than uncertain and is not retried", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "REJECTED_RESULT" }]);
 	let passed = false;
 	try {

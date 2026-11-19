@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { JsonRecord, MainFixtureEvent } from "./telegram-main-hook.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
 const group = { chat: { id: -301, type: "supergroup" }, message_thread_id: 9 };
 const seededGroup = { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 };
@@ -16,7 +16,7 @@ function callback(updateId: number, actor: number, id: string, card: MainFixture
 		message: { message_id: card.messageId, date: 10, ...group, from: { id: 100, is_bot: true }, ...overrides } } };
 }
 
-test("main Telegram administrators manage group admission before routing, attachments, or model execution", { timeout: 60_000 }, async (t) => {
+test("main Telegram administrators manage group admission before routing, attachments, or model execution", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200" });
 	let passed = false;
 	try {
@@ -63,7 +63,7 @@ test("main Telegram administrators manage group admission before routing, attach
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram group buttons use current dwell roles and persist effects even when acknowledgement fails", { timeout: 60_000 }, async (t) => {
+test("main Telegram group buttons use current dwell roles and persist effects even when acknowledgement fails", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [], { admins: "tg:200,tg:202" });
 	let passed = false;
 	try {
@@ -103,7 +103,7 @@ test("main Telegram group buttons use current dwell roles and persist effects ev
 	} finally { await f.close(passed); }
 });
 
-test("main Telegram disabling a group stops later streaming and prepared input without cancelling admitted work", { timeout: 60_000 }, async (t) => {
+test("main Telegram disabling a group stops later streaming and prepared input without cancelling admitted work", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [{ text: "Visible progress before disabling. The admitted work still completed.", partial: { text: "Visible progress before disabling.", wait: "finish-after-disable" } }], { admins: "tg:200" });
 	let passed = false;
 	try {

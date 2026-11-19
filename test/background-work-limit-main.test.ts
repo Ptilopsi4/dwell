@@ -7,9 +7,9 @@ import { createRegistry, Harness, type ConversationId } from "@earendil-works/pi
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BACKGROUND_WAIT_NOTICE } from "../src/answer.ts";
 import { WorkDoc } from "../src/ext/work.ts";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
-for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram reports a persisted shared ${reason} after recovering a waiting child without another model request`, { timeout: 60_000 }, async (t) => {
+for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram reports a persisted shared ${reason} after recovering a waiting child without another model request`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ tool: "dwell.work", arguments: { action: "start", goal: "Inspect isolated material", acceptance: ["Report the inspection"] }, match: "Work-limit delivery acceptance" },
 		{ tool: "dwell.task", arguments: { action: "start", name: "reader", message: "worker:work-limit-fixture" }, match: "Work-limit delivery acceptance" },

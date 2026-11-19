@@ -12,7 +12,10 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Type } from "typebox";
-import { mainFixture, message } from "./telegram-main-fixture.ts";
+import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
+
+// The truncation variant appends a "#" comment to the verification check command; cmd.exe has no shell comments.
+const posixShell = { skip: process.platform === "win32" ? "truncated check commands rely on POSIX shell comments" : false };
 
 const privateState = await mkdtemp(join(tmpdir(), "dwell-ready-state-"));
 process.env.DWELL_STATE = privateState;
@@ -247,7 +250,7 @@ for (const severity of ["info", "warn", "error"] as const) test(`panel ready rec
 	assert.equal(projected.workReady?.text, severity === "error" ? undefined : WORK_READY_NOTICE);
 });
 
-for (const truncate of [false, true]) test(`ready SSE frames carry host-validated presentation with ${truncate ? "truncated" : "ordinary"} output`, { timeout: 30_000 }, async (t) => {
+for (const truncate of [false, true]) test(`ready SSE frames carry host-validated presentation with ${truncate ? "truncated" : "ordinary"} output`, { ...(truncate ? posixShell : {}), timeout: 30_000 }, async (t) => {
 	// This script covers delivery; a summarizer would consume its queued tool replies.
 	const s = await setup({ compaction: false }); t.after(() => s.close());
 	const conversation = await s.conversation();
@@ -296,7 +299,7 @@ for (const truncate of [false, true]) test(`ready SSE frames carry host-validate
 		assert.equal(notices[0]!.workReady!.text, notice);
 });
 
-test("main Telegram delivers a ready host notice in its original topic without a follow-up model request", { timeout: 60_000 }, async (t) => {
+test("main Telegram delivers a ready host notice in its original topic without a follow-up model request", { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
 		{ tool: "dwell.work", arguments: { action: "start", goal: "Prepare the topic review output", acceptance: ["The isolated output passes its declared check"], verification: { checks: [{ name: "Native check", command: 'node -e "process.exit(0)"' }], artifacts: ["result.txt"] } } },
 		{ tool: "write", arguments: { path: "result.txt", content: "Review output\n" } },

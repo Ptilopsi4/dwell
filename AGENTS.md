@@ -57,7 +57,7 @@ docs/               部署文档（中英双语）
 
 ```sh
 npm run check   # tsc --noEmit，改完必跑
-npm test        # node:test 单测；平台限定的上传与 shell 用例可能跳过，探针需单独执行
+npm test        # node:test 单测；主进程验收、guarded 文件栈、shell/管道等 POSIX 专属用例在 Windows 跳过（以 Linux CI 为准），探针需单独执行
 npm run smoke   # 无 key 时 faux 模型验证装配链路
 npm run eval    # 默认 faux；真实调用需显式 --real，并使用隔离 Linux 环境
 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start   # 只启动本地面板，不连接任何 bot
