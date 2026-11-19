@@ -102,13 +102,15 @@ test("runtime reports pending raw input and graceful shutdown preserves it for r
 		assert.equal(response.status, 200);
 		const body = await response.text();
 		const runtime = JSON.parse(body);
-		assert.equal(runtime.telegram.inbox.pending, 1);
+		assert.equal(runtime.telegram.inbox.tracking, 1);
 		assert.equal(runtime.telegram.workers.activeRoutes, 1);
 		assert.doesNotMatch(body, /PRIVATE_RAW_INPUT|hold-shutdown|SYNTHETIC_TEST_TOKEN/);
 		assert.deepEqual(await f.stop(), [0, null]);
 		const row = (await f.snapshot()).inbox.inputs["tg-update:100:800"];
 		assert.equal(row.prepared, false);
-		assert.equal(row.output, "pending");
+		// 附件占位已发出并登记：重启后恢复会复用同一条占位消息
+		assert.equal(row.output, "tracking");
+		assert.ok(row.messageId !== undefined);
 		assert.match(row.raw!, /hold-shutdown/);
 		const telemetry = JSON.parse(await readFile(join(f.directory, "state", "runtime-telemetry.json"), "utf8"));
 		assert.ok(Array.isArray(telemetry.traces));

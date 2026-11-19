@@ -134,8 +134,7 @@ for (const failActivity of [false, true]) test(`main Telegram attachment prepara
 		await f.until((event) => event.method === "media.waiting");
 		assert.deepEqual(activity.body, { chat_id: "200", action: "typing" });
 		// 附件准备前就发持久占位（下载+视觉描述可达数秒），且不触发模型
-		const placeholder = f.requests("telegram", "sendMessage").find((event) => event.body.text === "正在接收附件…");
-		assert.ok(placeholder, "A persistent placeholder must appear before attachment preparation");
+		const placeholder = await f.until((event) => event.method === "sendMessage" && event.body.text === "正在接收附件…");
 		const reply = placeholder.body.reply_parameters as { message_id?: number } | undefined;
 		assert.equal(reply?.message_id, 215);
 		assert.equal(f.requests("model").length, 0);

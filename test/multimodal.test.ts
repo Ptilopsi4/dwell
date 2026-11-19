@@ -184,11 +184,11 @@ test("ingestBuffer：文件形态的图片也送视觉并注入描述（Telegram
 	const { saved, part } = await ingestBuffer(PNG, { kind: "file", index: 4, tag: "x-", name: "art.png" }, dir, async () => "a blue chart");
 	assert.equal(saved, "uploads/x-art.png");
 	assert.equal(part, "[图片文件4 uploads/x-art.png]（0.0KB）\na blue chart");
-	// 无 describer 时保持纯文件行为
-	const plain = await ingestBuffer(PNG, { kind: "file", index: 5, tag: "x-", name: "art.png" }, dir, null);
-	assert.match(plain.part, /^\[文件5\] x-art\.png/);
+	// 无 describer 时保持纯文件行为（另名避开独占创建）
+	const plain = await ingestBuffer(PNG, { kind: "file", index: 5, tag: "x-", name: "plain.png" }, dir, null);
+	assert.match(plain.part, /^\[文件5\] x-plain\.png/);
 	// 视觉失败降级为文件文案并保留 read 提示
-	const failed = await ingestBuffer(PNG, { kind: "file", index: 6, tag: "x-", name: "art.png" }, dir, async () => { throw new Error("upstream 429"); });
+	const failed = await ingestBuffer(PNG, { kind: "file", index: 6, tag: "x-", name: "failed.png" }, dir, async () => { throw new Error("upstream 429"); });
 	assert.match(failed.part, /视觉分析失败/);
 	assert.match(failed.part, /可用 read 工具读取/);
 });

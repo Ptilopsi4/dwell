@@ -35,7 +35,7 @@ export async function mainFixture(t: TestContext, initialReplies: ModelReply[] =
 	let child: ChildProcess;
 	let generation = 0;
 	const running = () => child.exitCode === null && child.signalCode === null;
-	const diagnostic = () => `${logs.slice(-8000)}\nFixture diagnostics: ${join(directory, "child.log")}\nObserved events: ${events.map((event) => `${event.generation}:${event.method ?? event.kind}`).join(", ")}`;
+	const diagnostic = () => `${logs.slice(-8000)}\nFixture diagnostics: ${join(directory, "child.log")}\nObserved events: ${JSON.stringify(events.map((event) => [event.generation, event.method ?? event.kind, event.body]))}`;
 	function start(replies: ModelReply[] = []): void {
 		assert.ok(child === undefined || !running(), "Stop the previous main process before restarting");
 		const currentGeneration = ++generation;
