@@ -193,7 +193,12 @@ async function main(): Promise<void> {
 	} });
 	telegramWorkers = new TelegramInputWorkers(telegramInbox, processTelegramInput, async (id, row, error, terminal) => {
 		console.error(`[dwell] Telegram 输入预处理${terminal ? "失败，已保留原始消息" : "稍后重试"}（${id}）:`, error);
-		if (terminal) await replyNotice({ chatId: telegramChatKey(row.destination.botId, row.destination.chatId), messageId: row.replyTo, destination: row.destination }, "消息预处理失败，请重新发送；原始消息已保留供排查。");
+		if (terminal) {
+			// 占位已发的行改写占位，不发第二条；未发占位的行才另发提示
+			const current = await telegramInbox.input(id);
+			if (current?.messageId !== undefined) await telegram!.edit(current.destination, current.messageId, "消息预处理失败，请重新发送；原始消息已保留供排查。").catch(() => {});
+			else await replyNotice({ chatId: telegramChatKey(row.destination.botId, row.destination.chatId), messageId: row.replyTo, destination: row.destination }, "消息预处理失败，请重新发送；原始消息已保留供排查。");
+		}
 	});
 	await pruneProcLogs(harness).catch((err: unknown) => console.error("[dwell] 旧进程日志清理失败:", err));
 	// 后台子会话 → 父会话映射重建（审批窗口按父线开；重启后 approval 扩展立即能用）
