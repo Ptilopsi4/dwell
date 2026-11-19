@@ -1028,9 +1028,23 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	if (conversation === undefined || !actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); return; }
 	const msg = JSON.parse(row.raw!) as NormalizedMessage;
 	let content = row.content;
+	// 附件准备可达数秒（下载+视觉描述），typing 指示器可见性差：与飞书先占位卡对齐，先发持久占位再准备
+	const stopPlaceholder = async (text: string): Promise<void> => {
+		const current = await telegramInbox.input(id);
+		if (current?.messageId !== undefined && current.output === "tracking") {
+			await telegram!.edit(current.destination, current.messageId, text).catch(() => console.error("[dwell] Telegram 占位收尾失败，消息将停留在占位文案"));
+		}
+	};
 	if (!row.prepared) {
 		content = msg.content.trim();
 		if (msg.resources.length > 0) {
+			if ((await telegramInbox.input(id))?.messageId === undefined) {
+				try {
+					const sent = await telegram!.send(row.destination, "正在接收附件…", { replyTo: row.replyTo || undefined });
+					await telegramInbox.output(id, "tracking", sent.messageId);
+					await sessions.anchor(sent.messageId, row.conversationId as ConversationId);
+				} catch { /* 占位失败不阻断处理，replyTelegram 兑底 */ }
+			}
 			const stopActivity = telegram!.startActivity(row.destination, signal);
 			telegramPreparationActivities.set(id, stopActivity);
 			try {
@@ -1042,15 +1056,15 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 				if (telegramPreparationActivities.get(id) === stopActivity) telegramPreparationActivities.delete(id);
 			}
 		}
-		if (signal.aborted) return;
+		if (signal.aborted) { await stopPlaceholder("已中止当前任务。"); return; }
 		await telegramInbox.prepared(id, content);
 	}
 	await withTelegramAdmission(row.conversationId, async () => {
 		if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
-		if (!actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); return; }
+		if (!actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await stopPlaceholder("输入未通过准入检查，已取消。"); await telegramInbox.output(id, "failed"); return; }
 		const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : "telegram");
 		await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
-		if (!actorAllowed(row.sender, row.destination, authorityVia) || !conversationActorAllowed(row.sender, row.conversationId, authorityVia)) { await telegramInbox.output(id, "failed"); return; }
+		if (!actorAllowed(row.sender, row.destination, authorityVia) || !conversationActorAllowed(row.sender, row.conversationId, authorityVia)) { await stopPlaceholder("输入未通过准入检查，已取消。"); await telegramInbox.output(id, "failed"); return; }
 		const submission = await submitInput(conversation, content, msg, authorityVia);
 		await telegramInbox.admitted(id, submission.id as number);
 		void replyTelegram(id, conversation, submission);
