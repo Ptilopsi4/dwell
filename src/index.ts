@@ -2,7 +2,7 @@
 import { resolve } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { LiveDoc, type Conversation, type ConversationId, type Harness, type SubmissionId, type SubmissionRecord, type TaskId, type TaskGraph, type TaskGraphNode, type TaskGraphState } from "@earendil-works/pi-durable";
-import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, openDwell, runConversations, runtimeBudgets, runtimeTelemetry, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
+import { MODEL, applyGithubEnv, busyConversations, checkGithubToken, githubEnabled, makeImageDescriber, makeReadVisionExtension, openDwell, runConversations, runtimeBudgets, runtimeTelemetry, sandboxState, scrubSecretEnv, setSandboxState, type ImageDescriber } from "./harness.ts";
 import { Uploads } from "./uploads.ts";
 import { readWorkspaceFile } from "./guarded-env.ts";
 import { makeReporter } from "./report.ts";
@@ -155,6 +155,8 @@ async function main(): Promise<void> {
 		forbidden: () => [scheduleExt, backgroundExt, procExt],
 	}, () => harness);
 	harness = await openDwell(undefined, [
+		// read 图片文件 → 视觉描述（主模型无视觉时的旁路识图）
+		makeReadVisionExtension(() => imageDescriber),
 		// lark 依赖运行时对象（channel/sessions/directory 后于 harness 初始化），getter 延迟绑定
 		makeLarkExtension({
 			getClient: () => channel?.rawClient,

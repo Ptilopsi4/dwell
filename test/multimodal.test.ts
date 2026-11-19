@@ -178,3 +178,17 @@ test("ingestBuffer：文件落盘 sanitize 并提示 read 路径", posix, async 
 	assert.equal(part, "[文件3] x-report.txt（0.0KB）已保存到 uploads/x-report.txt，可用 read 工具读取。");
 	assert.equal(await readFile(join(dir, "uploads", "x-report.txt"), "utf8"), "hello");
 });
+
+test("ingestBuffer：文件形态的图片也送视觉并注入描述（Telegram 大图 document）", posix, async () => {
+	const dir = await mkdtemp(join(tmpdir(), "dwell-mm-"));
+	const { saved, part } = await ingestBuffer(PNG, { kind: "file", index: 4, tag: "x-", name: "art.png" }, dir, async () => "a blue chart");
+	assert.equal(saved, "uploads/x-art.png");
+	assert.equal(part, "[图片文件4 uploads/x-art.png]（0.0KB）\na blue chart");
+	// 无 describer 时保持纯文件行为
+	const plain = await ingestBuffer(PNG, { kind: "file", index: 5, tag: "x-", name: "art.png" }, dir, null);
+	assert.match(plain.part, /^\[文件5\] x-art\.png/);
+	// 视觉失败降级为文件文案并保留 read 提示
+	const failed = await ingestBuffer(PNG, { kind: "file", index: 6, tag: "x-", name: "art.png" }, dir, async () => { throw new Error("upstream 429"); });
+	assert.match(failed.part, /视觉分析失败/);
+	assert.match(failed.part, /可用 read 工具读取/);
+});
