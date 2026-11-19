@@ -38,7 +38,7 @@ dwell 使用官方 SDK 的长连接（WebSocket），服务器需要能访问公
 
 ### Telegram（可选）
 
-1. 用 BotFather 创建机器人，将令牌写入私有环境文件的 `TELEGRAM_BOT_TOKEN`，保持群隐私模式开启。主机需要通过 HTTPS 出站访问 Bot API，长轮询不需要公开的入站端点。
+1. 用 BotFather 创建机器人，将令牌写入私有环境文件的 `TELEGRAM_BOT_TOKEN`，保持群隐私模式开启。主机需要通过 HTTPS 出站访问 Bot API，长轮询不需要公开的入站端点。若 Bot API 不能直连（如境内主机），可设置 `TELEGRAM_PROXY` 为一个 http/https/socks5 代理 URL（可内嵌凭证）；仅 Telegram 出站流量经代理，模型与其他出站不受影响，凭证同样在启动擦除名单内。
 2. 在首次使用正式状态目录前取得用户 ID。尚不知道 ID 时，用下方独立的 `bootstrap` 目录临时启动，私聊机器人发送 `/whoami`，收到 `tg:<数字用户 ID>` 后停止临时进程。把该 ID 填入 `DWELL_ADMINS`，再首次启动正式实例。已有 `state/users.json` 时修改环境变量不会更新用户，此时用现有管理员的 `/allow tg:123456789 admin` 或受信任的面板添加。Telegram 管理员和面板操作者需先私聊启动机器人，才能收到通知。
 3. 群聊需先邀请机器人入群，再由 dwell 管理员在目标群发送 `/allowgroup@your_bot` 或点击「允许本群成员使用」。命令自动识别群 ID，成员随后可使用各自的任务线与工作目录。若只允许显式授权用户使用，在群里发送 `/allowchat@your_bot`，或私聊发送 `/allowchat -1001234567890`。群尚未启用时，`/whoami@your_bot` 也能查询数字群 ID。`/disallowgroup` 停用当前群，`/disallowchat` 也接受 ID，`/chats` 显示开放模式。`DWELL_TELEGRAM_CHATS` 只播种逐人授权群；`$DWELL_STATE/telegram-chats.json` 已有当前机器人记录时以文件为准，包括空名单，历史记录保持逐人授权模式。保持隐私模式开启，群中用 `/ask@your_bot 内容` 或回复这个机器人的消息，单独 @ 不会发起任务；简写命令只有在 Telegram 实际投递时才生效。
 4. 每个令牌只运行一个轮询实例。启动时若已有 webhook 则拒绝启动并保留 webhook，启用长轮询前需单独处理它。认证失败 401 或轮询冲突 409 会使服务以非零退出码停止，需先修正令牌或停止竞争客户端再启动。临时传输故障持续重试，退避间隔有上限。本地副本不要使用生产令牌。

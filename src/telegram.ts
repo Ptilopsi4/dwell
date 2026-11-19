@@ -123,6 +123,19 @@ type Timing = {
 	privateIntervalMs?: number;
 	groupIntervalMs?: number;
 };
+import { fetch as undiciFetch, ProxyAgent } from "undici";
+
+/** Telegram 出站代理：仅本传输使用（http/https/socks5），凭证可内嵌 URL，报错绝不回显 URL 本身。 */
+export function telegramFetch(proxyUrl: string | undefined): typeof fetch {
+	if (proxyUrl === undefined || proxyUrl === "") return fetch;
+	let url: URL;
+	try { url = new URL(proxyUrl); } catch { throw new TelegramError("TELEGRAM_PROXY 不是合法 URL"); }
+	if (!["http:", "https:", "socks5:"].includes(url.protocol)) throw new TelegramError("TELEGRAM_PROXY 仅支持 http/https/socks5");
+	// dispatcher 必须与 fetch 同源（内置 fetch 与 npm undici 的内部符号不互通），代理链路统一走 undici 包
+	const agent = new ProxyAgent(url.toString());
+	return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => undiciFetch(input as never, { ...init, dispatcher: agent } as never)) as unknown as typeof fetch;
+}
+
 type ConnectOptions = {
 	token: string;
 	onMessage: (message: NormalizedMessage) => Promise<void>;
@@ -131,6 +144,7 @@ type ConnectOptions = {
 	onFatal?: (error: TelegramError) => void;
 	isDestinationAllowed?: (destination: TelegramDestination) => boolean;
 	stateFile?: string;
+	proxy?: string;
 	fetch?: typeof fetch;
 	timing?: Timing;
 };
@@ -180,7 +194,7 @@ export class TelegramBot {
 	private constructor(options: ConnectOptions, identity: TelegramIdentity) {
 		this.identity = identity;
 		this.#token = options.token;
-		this.#fetch = options.fetch ?? fetch;
+		this.#fetch = options.fetch ?? telegramFetch(options.proxy);
 		// Do not retain the options object: it contains a second copy of the credential.
 		this.#options = { ...options, token: "" };
 		this.#now = options.timing?.now ?? Date.now;
