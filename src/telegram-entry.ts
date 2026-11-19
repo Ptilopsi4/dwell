@@ -94,7 +94,7 @@ export class TelegramInbox {
 	async prepared(id: string, content: string): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const row = (await tx.doc(TelegramInboxDoc)).inputs[id];
-			if (row === undefined || row.output !== "pending" || row.submissionId !== undefined) return;
+			if (row === undefined || (row.output !== "pending" && row.output !== "tracking") || row.submissionId !== undefined) return;
 			row.content = content;
 			row.prepared = true;
 		}, BACKGROUND_CONTEXT);
@@ -118,7 +118,8 @@ export class TelegramInbox {
 			const doc = await tx.doc(TelegramInboxDoc);
 			for (const id of ids) {
 				const row = doc.inputs[id];
-				if (row !== undefined && row.submissionId === undefined && row.output === "pending") row.output = "failed";
+				// tracking（附件占位已发）同样未 submit：一并置终态，否则会永久留在恢复队列里抢占后续输入
+				if (row !== undefined && row.submissionId === undefined && (row.output === "pending" || row.output === "tracking")) row.output = "failed";
 			}
 		}, BACKGROUND_CONTEXT);
 	}

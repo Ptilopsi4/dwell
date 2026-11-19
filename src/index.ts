@@ -1029,7 +1029,7 @@ async function withTelegramAdmission<T>(id: number, action: () => Promise<T>): P
 
 async function processTelegramInput(id: string, row: TelegramInputReceipt, signal: AbortSignal): Promise<void> {
 	const conversation = await sessions.byConversation(row.conversationId as ConversationId);
-	if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
+	{ const state = (await telegramInbox.input(id))?.output; if (signal.aborted || state === undefined || (state !== "pending" && state !== "tracking")) return; }
 	if (conversation === undefined || !actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await telegramInbox.output(id, "failed"); return; }
 	const msg = JSON.parse(row.raw!) as NormalizedMessage;
 	let content = row.content;
@@ -1043,29 +1043,35 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	if (!row.prepared) {
 		content = msg.content.trim();
 		if (msg.resources.length > 0) {
-			if ((await telegramInbox.input(id))?.messageId === undefined) {
+			// cwd 先取：conversation.agent() 若撞上 /cancel 的 abort 会永久挂起（pi-durable 现状），占位发送只能在其后并行
+			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
+			// 占位 fire-and-forget：不改变主流程时序（取消窗口保持在下载阶段）；仅 pending 行可登记，防覆盖终态
+			void (async () => {
 				try {
+					if ((await telegramInbox.input(id))?.messageId !== undefined || (await telegramInbox.input(id))?.output !== "pending") return;
 					const sent = await telegram!.send(row.destination, "正在接收附件…", { replyTo: row.replyTo || undefined });
+					if ((await telegramInbox.input(id))?.output !== "pending") return;
 					await telegramInbox.output(id, "tracking", sent.messageId);
 					await sessions.anchor(sent.messageId, row.conversationId as ConversationId);
 				} catch { /* 占位失败不阻断处理，replyTelegram 兑底 */ }
-			}
+			})();
 			const stopActivity = telegram!.startActivity(row.destination, signal);
 			telegramPreparationActivities.set(id, stopActivity);
 			try {
-				const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
 				const attachment = await describeResources(msg, cwd, { download: (key, _type, signal) => telegram!.download(key, signal), describer: imageDescriber, save: uploads.save }, signal);
 				content = [content, attachment].filter(Boolean).join("\n\n");
 			} finally {
 				stopActivity();
 				if (telegramPreparationActivities.get(id) === stopActivity) telegramPreparationActivities.delete(id);
+				// 异常路径（含取消）也要收尾占位：正常路径的 aborted 检查在 try 外，抛出时会跳过
+				if (signal.aborted) await stopPlaceholder("已中止当前任务。").catch(() => {});
 			}
 		}
 		if (signal.aborted) { await stopPlaceholder("已中止当前任务。"); return; }
 		await telegramInbox.prepared(id, content);
 	}
 	await withTelegramAdmission(row.conversationId, async () => {
-		if (signal.aborted || (await telegramInbox.input(id))?.output !== "pending") return;
+		{ const state = (await telegramInbox.input(id))?.output; if (signal.aborted || state === undefined || (state !== "pending" && state !== "tracking")) return; }
 		if (!actorAllowed(row.sender, row.destination, row.authorityVia ?? "telegram")) { await stopPlaceholder("输入未通过准入检查，已取消。"); await telegramInbox.output(id, "failed"); return; }
 		const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : "telegram");
 		await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
