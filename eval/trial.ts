@@ -11,6 +11,8 @@ import { modelFailure } from "../src/model-failure.ts";
 import type { ScriptStep, TrialEvidence, TrialInput } from "./cases.ts";
 import { guardedProvider, RequestBudget } from "./budget.ts";
 import { getWork } from "../src/ext/work.ts";
+import { WorkDoc } from "../src/ext/work.ts";
+import { configure } from "@earendil-works/pi-durable";
 
 const configPath = process.argv[2];
 if (configPath === undefined) throw new Error("Trial configuration is required");
@@ -219,6 +221,8 @@ try {
 	harness = await open();
 	harness.resume();
 	let root = await harness.root(context, { agent: { model, cwd: process.cwd() } });
+	// 评测剧本以 dwell.work 开头：模拟用户已发 /goal（否则新会话默认隐藏该工具）
+	await harness.commit(async (tx) => { (await tx.doc(WorkDoc, root.id)).goalMode = true; await configure(tx, root.id, { tools: null }); }, context);
 	await attribute(root.id as number);
 	const submit = async (input: string, requestId: string): Promise<void> => {
 		const settled = await (await root.submit({ type: "input", content: input, requestId, entry: { kind: "chat.message", data: { sender: "eval-user", via: "panel" } } }, context)).wait(context);

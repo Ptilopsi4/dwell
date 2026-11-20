@@ -45,7 +45,8 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`shared ${reas
 	const open = async () => { harness = await Harness.open(await openNodeSqliteStorage(join(directory, `${reason}.sqlite`)), { models, registry }, context); };
 	await open(); await budget.attach(harness); await work.attach(harness);
 	try {
-		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context); parentId = parent.id;
+		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		await harness.commit(async (tx) => { (await tx.doc(WorkDoc, parent.id)).goalMode = true; }, context); parentId = parent.id;
 		faux.setResponses([call("dwell.work", { action: "start", goal: "Inspect existing material", acceptance: ["Return an inspection"] }), done()]);
 		await (await parent.submit({ type: "input", content: "start", entry: actor }, context)).wait(context);
 		const child = await parent.commit(async (tx) => {
@@ -92,6 +93,7 @@ test("a work-limit report interrupted during onFired reuses its parent submissio
 	await open();
 	try {
 		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
+		await harness.commit(async (tx) => { (await tx.doc(WorkDoc, parent.id)).goalMode = true; }, context);
 		faux.setResponses([call("dwell.work", { action: "start", goal: "Inspect material", acceptance: ["Return a result"] }), done()]);
 		await (await parent.submit({ type: "input", content: "start", entry: actor }, context)).wait(context);
 		const reporter = await parent.commit(async (tx) => {

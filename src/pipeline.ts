@@ -53,7 +53,7 @@ export function sameDestination(a: ConversationDestination, b: ConversationDesti
 }
 
 /** 命令表精确匹配首个空白分隔词：未知斜杠文本（如路径「/usr/bin 下有什么」）当普通输入交模型，不回「未知命令」。 */
-export const KNOWN_COMMANDS = new Set(["/help", "/whoami", "/new", "/newgoal", "/status", "/cancel", "/approve", "/deny", "/allow", "/disallow"]);
+export const KNOWN_COMMANDS = new Set(["/help", "/whoami", "/new", "/goal", "/status", "/cancel", "/approve", "/deny", "/allow", "/disallow"]);
 
 /** Telegram requires a transport-verified trigger; Feishu also admits topics and anchored replies. */
 export function groupAdmits(msg: NormalizedMessage, isAnchored: (messageId: string) => boolean): boolean {

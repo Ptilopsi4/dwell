@@ -341,7 +341,13 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 				data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(scope === undefined ? {} : { readScope: scope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
 		};
 		await telemetry.start();
-		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } } }, context);
+		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } },
+			// goal 从常驻提示词摘除：新会话默认隐藏 dwell.work，用户 /goal 后才恢复（存量会话靠 execute 守卫兑底）
+			conversationCreated: async (tx, conversation) => {
+				const agent = await tx.doc(AgentDoc, conversation.id);
+				agent.tools = { remove: ["dwell.work"] };
+			},
+		}, context);
 		telemetryByHarness.set(harness, telemetry);
 		// SDK close listeners run synchronously at shutdown admission and do not await cleanup.
 		harness.subscribeClose(() => telemetry.stop());

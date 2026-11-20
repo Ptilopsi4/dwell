@@ -465,7 +465,7 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 					approvalRequestId: pendingApprovals.get(windowKey(conversation.id as number, msg.senderId))?.requestId ?? "",
 					...(expiresAt === undefined ? {} : { windowExpiresAt: expiresAt }),
 					...(content.split(/\s+/)[0] === "/deny" ? { denial: captureApprovalRevocation(conversation.id as number, users.isAdmin(msg.senderId) ? undefined : msg.senderId) } : {}),
-					...(content.split(/\s+/)[0] === "/newgoal" ? { newGoalWorkId: (await getWork(harness, conversation.id as number)).current ?? null } : {}),
+					...(content.split(/\s+/)[0] === "/goal" ? { goalWorkId: (await getWork(harness, conversation.id as number)).current ?? null } : {}),
 				});
 				if (commandReceipt.done) return;
 				if (["/allow", "/disallow"].includes(commandReceipt.command.split(/\s+/)[0]) && users.commandApplied(msg.requestId)) {
@@ -1291,7 +1291,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					`私聊：直接发送文字、图片或文件，也可使用 /ask 内容。`,
 					`群聊：使用 /ask${bot} 内容，或回复 ${bot} 的消息继续；群聊需先获准使用。`,
 					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
-					"/newgoal：开启新目标，保留聊天历史与旧任务记录（线主/管理员）",
+					"/goal：开启目标模式并解绑旧目标，保留聊天历史与旧记录（线主/管理员）",
 					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
 					users.isAllowed(msg.senderId) ? "/approve [分钟]：开启危险命令批准窗口，默认 10 分钟" : "危险操作：需 dwell 管理员点击审批卡批准，群成员不能自行 /approve",
 					"/deny：关闭批准窗口并取消待审请求",
@@ -1309,18 +1309,18 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 		case "/whoami":
 			await replyTo(target, `你的 ID：${msg.senderId}${users.isAdmin(msg.senderId) ? "（管理员）" : ""}${target.destination?.kind === "telegram" ? `；聊天 ID：${target.destination.chatId}` : ""}`);
 			break;
-		case "/newgoal": {
+		case "/goal": {
 			if (!isOwner && !admin) {
 				await replyTo(target, "这是他人的任务线，仅线主或管理员可开启新目标。");
 				return;
 			}
 			const requestId = `command:${msg.requestId ?? msg.messageId}`;
 			const previous = receipt === undefined ? (await harness.snapshot(NewGoalDoc, conversation.id, context))?.requests[requestId] : undefined;
-			const expectedWorkId = receipt === undefined ? previous === undefined ? (await getWork(harness, convId)).current ?? null : previous.workId : receipt.newGoalWorkId ?? null;
+			const expectedWorkId = receipt === undefined ? previous === undefined ? (await getWork(harness, convId)).current ?? null : previous.workId : receipt.goalWorkId ?? null;
 			let result;
 			try { result = await beginNewGoal(harness, { conversationId: convId, expectedWorkId, operator: msg.senderId, requestId }); }
 			catch (error) { await replyTo(target, (error as Error).message); return; }
-			await replyTo(target, result.changed ? "已开启新目标。聊天历史、旧任务记录和预算保留，请发送新的目标。" : "当前没有工作目标，请直接发送新的目标。", conversation);
+			await replyTo(target, result.changed ? "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。" : "已开启目标模式，请发送你的目标。", conversation);
 			break;
 		}
 		case "/new":
@@ -1508,7 +1508,7 @@ function helpCard(): Record<string, unknown> {
 		body: { elements: [
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
-				cmd("/newgoal", "开启新目标，保留聊天历史与旧任务记录（线主/管理员）"),
+				cmd("/goal", "开启目标模式并解绑旧目标，保留历史与旧记录（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),

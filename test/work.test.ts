@@ -46,7 +46,7 @@ async function setup(options: { path?: string; limits?: Partial<WorkLimits>; pri
 	harness = await Harness.open(await openNodeSqliteStorage(path), { models, registry, settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 }, compaction: { keepRecentTokens: 1, reserveTokens: 64 } } }, context);
 	await work.attach(harness);
 	return { harness, faux, path, dir, work,
-		conversation: () => harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context),
+		conversation: async () => { const c = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context); await harness.commit(async (tx) => { (await tx.doc(WorkDoc, c.id)).goalMode = true; }, context); return c; },
 		close: async (keep = false) => { await work.close(); await harness.close(context); if (dir !== undefined && !keep) await rm(dir, { recursive: true, force: true }); },
 	};
 }
@@ -208,7 +208,7 @@ test("work snapshots refresh before the original user input and preserve the too
 			assert.equal(tail, original.at(-1));
 			assert.ok(tail.role === "toolResult");
 			assert.equal(tail.toolName, tailTool);
-			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1));
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{")));
 			assert.equal(record.progress, progress);
 			assert.equal(record.id, workId);
 		}
@@ -237,7 +237,7 @@ test("durable work survives reopen, reset and compaction while accounting remain
 			assert.equal(tail.content, expectedInput);
 			const snapshot = request.messages.at(-2)!;
 			assert.ok(snapshot.role === "user" && typeof snapshot.content === "string" && snapshot.content.startsWith("[Durable work record;"));
-			assert.equal(JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1)).progress, "First check completed");
+			assert.equal(JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{"))).progress, "First check completed");
 			inspectedInputs.push(expectedInput);
 			return done();
 		};
@@ -289,7 +289,7 @@ test("root and child share a persisted model allowance and stop before the next 
 		s.faux.setResponses([async (request) => {
 			const snapshot = request.messages.find((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Durable work record;"));
 			assert.ok(snapshot?.role === "user" && typeof snapshot.content === "string");
-			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("\n") + 1));
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{")));
 			assert.equal(record.id, inherited.id);
 			assert.equal(record.goal, inherited.goal);
 			assert.equal(request.messages.at(-1)!.content, "child check");

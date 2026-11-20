@@ -19,7 +19,7 @@ const posixShell = { skip: process.platform === "win32" ? "truncated check comma
 
 const privateState = await mkdtemp(join(tmpdir(), "dwell-ready-state-"));
 process.env.DWELL_STATE = privateState;
-const { makeWorkController, getWork, workReadyAnswer } = await import("../src/ext/work.ts");
+const { makeWorkController, getWork, workReadyAnswer, WorkDoc } = await import("../src/ext/work.ts");
 const { beginNewGoal } = await import("../src/new-goal.ts");
 const { presentAnswer, workReadyNotice, WORK_READY_NOTICE, WORK_READY_NEXT_STEP } = await import("../src/answer.ts");
 const { mirrorRestoredSubmission } = await import("../src/feishu/recovery.ts");
@@ -57,7 +57,7 @@ async function setup(options: { compaction?: boolean } = {}) {
 	await work.attach(harness);
 	return {
 		harness, faux, directory,
-		conversation: () => harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" }, cwd: directory } }, context),
+		conversation: async () => { const c = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" }, cwd: directory } }, context); await harness.commit(async (tx) => { (await tx.doc(WorkDoc, c.id)).goalMode = true; }, context); return c; },
 		close: async () => { await work.close(); await harness.close(context); await rm(directory, { recursive: true, force: true }); },
 	};
 }
@@ -309,6 +309,9 @@ test("main Telegram delivers a ready host notice in its original topic without a
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
+		f.updates([message(301, "/goal@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302);
 		f.updates([message(302, "/ask@AcceptanceBot Prepare topic review output", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
 		const ready = await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(`${WORK_READY_NOTICE}\n\n目标（工作声明）：`) && String(event.body.text).includes(WORK_READY_NEXT_STEP));
 		assert.match(String(ready.body.text), /Prepare the topic review output/);
@@ -320,10 +323,12 @@ test("main Telegram delivers a ready host notice in its original topic without a
 		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:302" && event.body.state === "done");
 		assert.equal(f.requests("model").length, 4);
 		const sends = f.requests("telegram", "sendMessage");
-		assert.equal(sends.length, 1);
-		assert.equal(sends[0]!.body.chat_id, "-300");
-		assert.equal(sends[0]!.body.message_thread_id, 9);
-		assert.deepEqual(sends[0]!.body.reply_parameters, { message_id: 302, allow_sending_without_reply: true });
+		// 301 的 /goal 开模式回复 + 302 的处理占位
+		assert.equal(sends.length, 2);
+		assert.deepEqual(sends[0]!.body.reply_parameters, { message_id: 301, allow_sending_without_reply: true });
+		assert.equal(sends[1]!.body.chat_id, "-300");
+		assert.equal(sends[1]!.body.message_thread_id, 9);
+		assert.deepEqual(sends[1]!.body.reply_parameters, { message_id: 302, allow_sending_without_reply: true });
 		assert.doesNotMatch(JSON.stringify(f.requests("telegram")), /空回复|没有产出文本|处理失败|已验收/);
 		assert.equal(f.requests("unexpected").length, 0);
 		passed = true;

@@ -58,7 +58,7 @@ async function setup(options: { directory?: string; toolAdmissions?: number; ext
 	await work.attach(harness);
 	return {
 		harness, faux, directory, cwd, environment,
-		conversation: () => harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" }, cwd } }, context),
+		conversation: async () => { const c = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" }, cwd } }, context); await harness.commit(async (tx) => { (await tx.doc(WorkDoc, c.id)).goalMode = true; }, context); return c; },
 		close: async (keep = false) => { await work.close(); await harness.close(context); if (!keep) await rm(directory, { recursive: true, force: true }); },
 	};
 }
@@ -507,7 +507,7 @@ test("model summaries retain revision metadata without repeating historical comm
 		let injected = "";
 		s.faux.setResponses([async (request) => {
 			const content = request.messages.filter((item) => item.role === "user" && typeof item.content === "string" && item.content.startsWith("[Durable work record;")).at(-1)?.content;
-			if (typeof content === "string") injected = content.slice(content.indexOf("\n") + 1);
+			if (typeof content === "string") injected = content.slice(content.indexOf("{"));
 			return done();
 		}]);
 		await (await conversation.submit({ type: "input", content: "inspect current progress", entry: actor }, context)).wait(context);
@@ -677,7 +677,7 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText } from '@ear
 import { createRegistry, defineExtension, defineTool, Harness } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { Type } from 'typebox';
-import { makeWorkController } from ${JSON.stringify(crashModule)};
+import { makeWorkController, WorkDoc } from ${JSON.stringify(crashModule)};
 import { GuardedExecutionEnv } from ${JSON.stringify(guardedModule)};
 const directory = process.argv[1], cwd = join(directory, 'work');
 await mkdir(join(cwd, 'job'), {recursive:true}); await writeFile(join(cwd, 'job/result.txt'), 'result');
@@ -689,6 +689,7 @@ const faux = fauxProvider({tokensPerSecond:100000}); const models=createModels()
 faux.setResponses([fauxAssistantMessage(fauxToolCall('dwell.work',{action:'start',goal:'Crash recovery',acceptance:['Check passes'],verification:{checks:[{name:'blocked',command:'blocked'}],artifacts:['job/result.txt']}}),{stopReason:'toolUse'}),fauxAssistantMessage(fauxToolCall('dwell.work',{action:'verify'}),{stopReason:'toolUse'}),fauxAssistantMessage(fauxText('done'))]);
 const harness=await Harness.open(await openNodeSqliteStorage(join(directory,'s.sqlite')),{models,registry},ctx);await work.attach(harness);
 const conversation=await harness.createConversation({ownership:{kind:'ownerless'},agent:{model:{provider:'faux',modelId:'faux-1'},cwd}},ctx);
+await harness.commit(async tx=>{(await tx.doc(WorkDoc,conversation.id)).goalMode=true;},ctx);
 await writeFile(join(directory,'conversation'),String(conversation.id));
 await (await conversation.submit({type:'input',content:'verify',entry:{kind:'chat.message',data:{sender:'owner',via:'panel'}}},ctx)).wait(ctx);
 `;

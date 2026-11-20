@@ -401,7 +401,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			json(res, 200, await getWork(harness, id));
 			return;
 		}
-			if (req.method === "POST" && url.pathname === "/api/work/newgoal") {
+			if (req.method === "POST" && url.pathname === "/api/work/goal") {
 				const body = await readBody(req);
 				const id = Number(body?.id);
 				const workId = body?.workId;
@@ -476,13 +476,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		if (req.method === "POST" && url.pathname === "/api/reset") {
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
-			// 清空上下文不清 work 记录：未完结的 goal 会以宿主数据继续注入，提示操作者用 /newgoal 或验收收尾
+			// 清空上下文不清 work 记录：未完结的 goal 会以宿主数据继续注入，提示操作者用 /goal 或验收收尾
 			const open = Object.values((await getWork(harness, conv.id as number)).records).filter((record) => record.status !== "accepted");
 			await conv.reset(undefined, BACKGROUND_CONTEXT);
 			// 新上下文里落一条展示型分隔回（模型不可见），panel 侧可见「已清空」而非无声空白
 			await conv.submit({ type: "write", entry: { kind: "context.reset", data: { by: "panel" } } }, BACKGROUND_CONTEXT);
 			void feishu.notice(conv.id as number, "管理员在 panel 清空了这条任务线的上下文，之后的消息从新对话开始。");
-			json(res, 200, { ok: true, ...(open.length === 0 ? {} : { notice: `此任务线仍有 ${open.length} 条未验收的工作记录（goal 文本会在新对话中继续注入）；在「工作记录」页验收，或用 /newgoal 开新目标。` }) });
+			json(res, 200, { ok: true, ...(open.length === 0 ? {} : { notice: `此任务线仍有 ${open.length} 条未验收的工作记录（goal 文本会在新对话中继续注入）；在「工作记录」页验收，或用 /goal 开启目标模式。` }) });
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/abort") {

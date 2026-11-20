@@ -19,6 +19,9 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
+		f.updates([message(900, "/goal@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 901);
 		f.updates([message(901, "/ask@AcceptanceBot Work-limit delivery acceptance", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
 		await f.until((event) => event.method === "model.waiting" && event.body.token === "work-limit-child");
 		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(BACKGROUND_WAIT_NOTICE));
@@ -47,7 +50,7 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram
 		assert.equal(notice.body.message_thread_id, 9);
 		const completed = await f.until((event) => event.method === "telegram.output" && String(event.body.id).startsWith("tg-reply:") && event.body.state === "done", restart);
 		assert.equal(f.requests("model").length, providerCalls, "Neither the stopped child nor its parent report may call the provider again");
-		assert.equal(f.requests("telegram", "sendMessage").length, 2, "Recover the original waiting answer and deliver one terminal report");
+		assert.equal(f.requests("telegram", "sendMessage").length, 3, "Goal-mode reply, the recovered waiting answer, and one terminal report");
 		assert.equal(f.requests("unexpected").length, 0);
 		await f.stop();
 		const terminal = await f.snapshot();
