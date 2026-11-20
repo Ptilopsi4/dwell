@@ -42,7 +42,7 @@ For work spanning runs, `dwell.work` stores the goal, acceptance criteria, progr
 
 Each work record freezes aggregate limits of 128 generation admissions and 512 tool admissions across its root and assigned background children. Per-run limits still apply. The work ledger reports `usage.scope: "generation_and_tools"`; compaction and vision calls are excluded. Its cost is a recorded-usage estimate when `pricingKnown` is true, or `null` when pricing is unknown.
 
-Use [`/newgoal`](usage.md#commands) to detach the current goal and begin another work record while retaining old records and conversation history. A conversation retains up to 64 work records; use `/new` in either bot or create a new panel conversation when it is full. Existing records remain available in the old conversation.
+Work records exist only in goal mode: the user enables it with [`/goal`](usage.md#commands), which also detaches the current goal and starts fresh while retaining old records and conversation history. A conversation retains up to 64 work records; use `/new` in either bot or create a new panel conversation when it is full. Existing records remain available in the old conversation.
 
 ## Verification and acceptance
 
@@ -50,7 +50,7 @@ Use [`/newgoal`](usage.md#commands) to detach the current goal and begin another
 
 For code or file work, declare a verification contract at `start`. It contains exact `checks: [{name, command}]`, required workspace-relative `artifacts`, and optional `allowedChanges` for tasks with strict output rules. For example, `artifacts: ["job", "job/result.json"]` with `allowedChanges: ["job/result.json"]` checks the containing directory for unexpected changes and requires the result file. Directories are recursive; scopes are limited to 1024 entries, 16 MiB of content, and 64 directory levels. Choose a narrow scope instead of scanning a whole clone or dependency tree.
 
-Artifacts describe the required final state. For a temporary file that will be deleted, include a containing directory that will remain in `artifacts` and its exact path in `allowedChanges`; do not require that temporary file to exist at completion. If `job/disposable` will be removed, declare `job` as the directory scope. An incorrect artifact scope cannot be repaired with `revise`. The model should checkpoint the blocker and explain it, then the operator can use `/newgoal` to declare a corrected goal while preserving the old record and history. `dwell.work` rejects unknown parameters so a request cannot appear successful after a field was ignored.
+Artifacts describe the required final state. For a temporary file that will be deleted, include a containing directory that will remain in `artifacts` and its exact path in `allowedChanges`; do not require that temporary file to exist at completion. If `job/disposable` will be removed, declare `job` as the directory scope. An incorrect artifact scope cannot be repaired with `revise`. The model should checkpoint the blocker and explain it, then the operator can use `/goal` to declare a corrected goal while preserving the old record and history. `dwell.work` rejects unknown parameters so a request cannot appear successful after a field was ignored.
 
 ### Run checks
 

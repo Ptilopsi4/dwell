@@ -17,6 +17,7 @@ delete process.env.DWELL_MODELS_FILE;
 process.env.DWELL_PROVIDER = "deepseek";
 process.env.DWELL_MODEL = "deepseek-chat";
 const { MODEL } = await import("../src/harness.ts");
+const { WorkDoc } = await import("../src/ext/work.ts");
 const { Sessions, TelegramSessionDoc } = await import("../src/sessions.ts");
 const { getWork, makeWorkController } = await import("../src/ext/work.ts");
 const { beginNewGoal } = await import("../src/new-goal.ts");
@@ -172,6 +173,7 @@ test("Feishu /new starts work after a real Harness has retained 64 goals without
 		const sessions = t.sessionsFor();
 		const msg = message("direct");
 		const original = await sessions.forFeishu(msg);
+		await t.harness.commit(async (tx) => { (await tx.doc(WorkDoc, original.id)).goalMode = true; }, context);
 		const start = (goal: string) => fauxAssistantMessage(fauxToolCall("dwell.work", { action: "start", goal, acceptance: ["The requested result is available"] }), { stopReason: "toolUse" });
 		const submit = async (conversation: typeof original, goal: string) => {
 			t.faux.setResponses([start(goal), fauxAssistantMessage("Goal recorded.")]);
@@ -191,6 +193,7 @@ test("Feishu /new starts work after a real Harness has retained 64 goals without
 		const failure = entries.filter((entry) => ToolResultEntry.is(entry)).at(-1)!;
 		assert.match(JSON.stringify(failure.model), /64 work records/);
 		const fresh = await sessions.forFeishu(msg, "om_work_limit_new");
+		await t.harness.commit(async (tx) => { (await tx.doc(WorkDoc, fresh.id)).goalMode = true; }, context);
 		assert.notEqual(fresh.id, original.id);
 		assert.equal((await submit(fresh, "Fresh goal after new task line")).status, "done");
 		const renewed = await getWork(t.harness, fresh.id);

@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { InboxDoc, LiveDoc, defineDoc, type ConversationId, type Harness } from "@earendil-works/pi-durable";
+import { InboxDoc, LiveDoc, configure, defineDoc, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { WorkDoc } from "./ext/work.ts";
 import { TelegramInboxDoc } from "./telegram-entry.ts";
 
@@ -28,6 +28,8 @@ export async function beginNewGoal(harness: Harness, input: { conversationId: nu
 		if (Object.keys(journal.requests).length >= 10_000) throw new Error("本会话的目标操作记录已满，请开启新的会话");
 		if (work.current === undefined) {
 			journal.requests[input.requestId] = { workId: null, operator: input.operator, at: Date.now() };
+			work.goalMode = true;
+			await configure(tx, id, { tools: null });
 			return { changed: false };
 		}
 		const workId = work.current;
@@ -39,6 +41,8 @@ export async function beginNewGoal(harness: Harness, input: { conversationId: nu
 			model: [{ role: "user", content: "The user explicitly requested a new work goal. The previous work record, budget and evidence remain unchanged. Subsequent ordinary user input can establish a fresh goal; late reports and approvals retain their original work. Conversation history is preserved.", timestamp: at }],
 		});
 		journal.requests[input.requestId] = { workId, operator: input.operator, at, entryId: entry.id };
+		work.goalMode = true;
+		await configure(tx, id, { tools: null });
 		return { changed: true, workId, entryId: entry.id };
 	}, BACKGROUND_CONTEXT);
 }

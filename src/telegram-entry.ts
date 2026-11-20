@@ -33,7 +33,7 @@ export type TelegramCommandReceipt = {
 	approvalRequestId?: string;
 	windowExpiresAt?: number;
 	denial?: ApprovalRevocation;
-	newGoalWorkId?: string | null;
+	goalWorkId?: string | null;
 	done: boolean;
 };
 export const TelegramInboxDoc = defineDoc<{

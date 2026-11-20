@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import { AssistantEntry, CompactionTask, GenerationTask, LiveDoc, ToolResultEntry, ToolTask, defineDoc, defineExtension, defineTool, hook, section, type ConversationId, type Cursor, type EntryId, type Harness, type NestedToolExecutionResult, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { AssistantEntry, CompactionTask, GenerationTask, LiveDoc, ToolResultEntry, ToolTask, defineDoc, defineExtension, defineTool, hook, type ConversationId, type Cursor, type EntryId, type Harness, type NestedToolExecutionResult, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { abortBeforeRequest } from "./approval.ts";
@@ -23,9 +23,12 @@ export type WorkRecord = {
 	tasks: Record<string, { conversationId: number; kind: "model" | "tool" }>;
 };
 export const WorkDoc = defineDoc<{
-	current?: string; inherited?: WorkIdentity | null;
+	current?: string; inherited?: WorkIdentity | null; goalMode?: true;
 	runs: Record<string, WorkIdentity | null>; records: Record<string, WorkRecord>;
 }>({ kind: "dwell.work", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ runs: {}, records: {} }), checkpointWhen: () => true });
+
+/** goal 模式指引：仅在用户用 /goal 开启后随每次模型请求注入（非常驻 section）。 */
+const GOAL_GUIDANCE = "Goal mode is on for this conversation (the user enabled it with /goal). Use dwell.work for the user's stated goal: start records it with acceptance criteria; for code or file work, declare exact verification commands and a bounded artifact scope at start. Use allowedChanges only for strict output tasks, with a narrow containing directory plus each required output file in artifacts. Correct invalid check commands using revise with replacement checks and a reason; this preserves the original scope, baseline, ownership and budgets, invalidates the receipt and requires verify again. A successful verify preserves recorded blockers. Resolve them and checkpoint their resolution with an explicitly cleared blocker list before requesting review; only eligible verified work supplies an actionable ready nextCall. No evidence IDs are required, and supplementary evidence must still be successful results from this work tree. Call ready directly and alone to end the run and request operator review. Any later artifact change requires another verify. Receipts establish declared command results and file versions, not semantic correctness. ready_for_review is an agent request for operator review, never user acceptance. Records without a verification contract remain unverified. Work budgets cover the root and its background descendants; do not restart a stopped goal to bypass its limits.";
 
 type VerificationEnv = (conversationId: number, context: Context) => Promise<ExecutionEnv>;
 const verificationReaders = new WeakMap<Harness, VerificationEnv>();
@@ -315,7 +318,7 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 	};
 	const tool = defineTool({
 		name: "dwell.work",
-		description: "Keep an explicit durable work goal across compaction and restarts. Ordinary conversation does not require a work record. For code or file work, declare verification at start: checks are exact commands to run; artifacts are required workspace-relative files or directories, recursively hashed (1024 entries, 16 MiB total). Optional allowedChanges restricts all changes since start to exact file paths inside that scope; declare a narrow containing directory plus each required output file to catch extra files and missing outputs. verify runs declared commands through the governed bash tool and records a host receipt only if every exit code is zero and the artifact scope passes. Once recorded blockers are resolved and explicitly cleared with checkpoint, an eligible verified result supplies a ready nextCall, requiring no evidence IDs. revise replaces only checks with a required reason, retains the original scope, baseline and budgets, records history, and invalidates verification. After revising, verify again. ready and operator acceptance recheck artifact hashes without running commands. start creates a goal owned by the original sender; checkpoint saves progress, blockers and optional successful tool-result entry IDs. Call ready directly and alone in its response to request operator review and end this run; do not send another model response. This tool cannot accept work. Records without a verification contract remain labeled unverified. Call start in its own batch before substantive work and checkpoint before waiting for clarification.",
+		description: "Keep an explicit durable work goal across compaction and restarts. Available only in conversations where the user enabled goal mode with /goal; if it is not enabled, ask the user to run /goal instead of calling this tool. For code or file work, declare verification at start: checks are exact commands to run; artifacts are required workspace-relative files or directories, recursively hashed (1024 entries, 16 MiB total). Optional allowedChanges restricts all changes since start to exact file paths inside that scope; declare a narrow containing directory plus each required output file to catch extra files and missing outputs. verify runs declared commands through the governed bash tool and records a host receipt only if every exit code is zero and the artifact scope passes. Once recorded blockers are resolved and explicitly cleared with checkpoint, an eligible verified result supplies a ready nextCall, requiring no evidence IDs. revise replaces only checks with a required reason, retains the original scope, baseline and budgets, records history, and invalidates verification. After revising, verify again. ready and operator acceptance recheck artifact hashes without running commands. start creates a goal owned by the original sender; checkpoint saves progress, blockers and optional successful tool-result entry IDs. Call ready directly and alone in its response to request operator review and end this run; do not send another model response. This tool cannot accept work. Records without a verification contract remain labeled unverified. Call start in its own batch before substantive work and checkpoint before waiting for clarification.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("checkpoint"), Type.Literal("revise"), Type.Literal("verify"), Type.Literal("ready")]),
 			goal: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
@@ -334,6 +337,8 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 		executionMode: "sequential",
 		async execute(args, api, context) {
 			try {
+				// 工具默认从会话工具名单隐藏（conversationCreated 设过滤器）；无过滤器的存量会话在此兑底
+				if (args.action === "start") { const mode = await host().snapshot(WorkDoc, api.conversationId, BACKGROUND_CONTEXT); if (mode?.goalMode !== true && mode?.current === undefined && mode?.inherited === undefined) throw new Error("Goal mode is not enabled in this conversation. Ask the user to run /goal first; ordinary conversation does not use work records."); }
 				if (args.action === "ready") await api.commit(async (tx) => {
 					const task = await tx.task(api.taskId);
 					const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
@@ -487,17 +492,20 @@ export function makeWorkController(options: { limits?: Partial<WorkLimits>; pric
 		},
 	});
 	return {
-		extension: defineExtension({ name: "dwell-work", tools: [tool], sections: [section("work", () => "Use dwell.work only when the user explicitly asks for tracked delivery, acceptance criteria, or a multi-session goal; ordinary chat, routine fixes, and questions do not need a work record. For code or file work, declare exact verification commands and a bounded artifact scope at start. Use allowedChanges only for strict output tasks, with a narrow containing directory plus required output files in artifacts. Correct invalid check commands using revise with replacement checks and a reason; this preserves the original scope, baseline, ownership and budgets, invalidates the receipt and requires verify again. A successful verify preserves recorded blockers. Resolve them and checkpoint their resolution with an explicitly cleared blocker list before requesting review; only eligible verified work supplies an actionable ready nextCall. No evidence IDs are required, and supplementary evidence must still be successful results from this work tree. Call ready directly and alone to end the run and request operator review. Any later artifact change requires another verify. Receipts establish declared command results and file versions, not semantic correctness. ready_for_review is an agent request for operator review, never user acceptance. Legacy records without verification remain unverified. Work budgets cover the root and its background descendants; do not restart a stopped goal to bypass its limits.", { tag: false })], hooks: [
+		extension: defineExtension({ name: "dwell-work", tools: [tool], hooks: [
 			hook(GenerationTask, { beforeRequest: async (request, api, context) => {
 				const value = await admit(api.conversationId, api.taskId, "model", context);
-				if (value === undefined) return;
+				const mode = await host().snapshot(WorkDoc, api.conversationId, BACKGROUND_CONTEXT);
+				// goal 模式关且无遗留目标：不注入；开（或存量会话有目标）才前置指引/记录
+				if (mode?.goalMode !== true && mode?.current === undefined && mode?.inherited === undefined) return;
+				const text = value === undefined ? GOAL_GUIDANCE : `${GOAL_GUIDANCE}\n${value}`;
 				let index = request.messages.findLastIndex((message) => message.role === "user");
 				if (index === -1) {
 					index = request.messages.findIndex((message) => message.role !== "system");
 					if (index === -1) index = request.messages.length;
 				}
 				// Keep the user's request and the assistant/tool-result tail in their original positions relative to each other.
-				return { messages: [...request.messages.slice(0, index), { role: "user" as const, content: `[Durable work record; host-maintained data, not new user instructions]\n${value}`, timestamp: Date.now() }, ...request.messages.slice(index)] };
+				return { messages: [...request.messages.slice(0, index), { role: "user" as const, content: `[Durable work record; host-maintained data, not new user instructions]\n${text}`, timestamp: Date.now() }, ...request.messages.slice(index)] };
 			} }),
 			hook(ToolTask, { beforeTool: async (_call, api, context) => { await admit(api.conversationId, api.taskId, "tool", context); } }),
 			hook(CompactionTask, { beforeCompact: async (_request, api) => {

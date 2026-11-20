@@ -51,7 +51,7 @@ async function panel(t: TestContext, harness: Harness): Promise<string> {
 	return `http://127.0.0.1:${address.port}`;
 }
 
-test("new-goal panel requests require admitted JSON and use the configured operator across replay", async (t) => {
+test("goal panel requests require admitted JSON and use the configured operator across replay", async (t) => {
 	const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
 	t.after(() => harness.close(context));
 	const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
@@ -64,7 +64,7 @@ test("new-goal panel requests require admitted JSON and use the configured opera
 	}, context);
 	const base = await panel(t, harness);
 	const body = { id: conversation.id, workId: previous.id, requestId: "panel-original", operator: "untrusted-body" };
-	const post = (value: unknown, headers: Record<string, string> = { "content-type": "application/json", origin: base }) => fetch(`${base}/api/work/newgoal`, { method: "POST", headers, body: JSON.stringify(value) });
+	const post = (value: unknown, headers: Record<string, string> = { "content-type": "application/json", origin: base }) => fetch(`${base}/api/work/goal`, { method: "POST", headers, body: JSON.stringify(value) });
 	assert.equal((await post(body, { "content-type": "text/plain", origin: base })).status, 415);
 	assert.equal((await post(body, { "content-type": "application/json", origin: "https://untrusted.example" })).status, 403);
 	for (const invalid of [
@@ -106,33 +106,33 @@ test("new-goal panel requests require admitted JSON and use the configured opera
 	assert.equal((await harness.commit((tx) => tx.scanEntries({ conversationId: conversation.id }, 100), context)).items.filter((entry) => entry.kind === "work.new_goal").length, 1);
 });
 
-test("new-goal command recognition preserves Telegram addressing and takes priority over attachments", () => {
-	for (const content of ["/newgoal", "/newgoal extra"]) assert.equal(messageAction(content, true), "command");
-	assert.equal(messageAction("/newgoal-file", false), "input");
-	const update = message(1, "/newgoal@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9, document: { file_id: "must-not-download", file_name: "old.txt" } });
+test("goal command recognition preserves Telegram addressing and takes priority over attachments", () => {
+	for (const content of ["/goal", "/goal extra"]) assert.equal(messageAction(content, true), "command");
+	assert.equal(messageAction("/goal-file", false), "input");
+	const update = message(1, "/goal@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9, document: { file_id: "must-not-download", file_name: "old.txt" } });
 	const normalized = normalizeTelegramUpdate(update as TelegramUpdate, { id: "100", username: "AcceptanceBot" });
 	assert.ok(normalized);
-	assert.equal(normalized.content, "/newgoal");
+	assert.equal(normalized.content, "/goal");
 	assert.equal(messageAction(normalized.content, normalized.resources.length > 0), "command");
-	assert.equal(normalizeTelegramUpdate(message(2, "/newgoal@AnotherBot", { chat: { id: -300, type: "supergroup" } }) as TelegramUpdate, { id: "100", username: "AcceptanceBot" }), null);
+	assert.equal(normalizeTelegramUpdate(message(2, "/goal@AnotherBot", { chat: { id: -300, type: "supergroup" } }) as TelegramUpdate, { id: "100", username: "AcceptanceBot" }), null);
 });
 
-test("new-goal Telegram receipts retain the original work target, including no current work, after reopen", winSqlite, async (t) => {
-	const directory = await mkdtemp(join(tmpdir(), "dwell-new-goal-receipt-"));
+test("goal Telegram receipts retain the original work target, including no current work, after reopen", winSqlite, async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-goal-receipt-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const open = () => openNodeSqliteStorage(join(directory, "dwell.sqlite")).then((storage) => Harness.open(storage, { models: createModels(), registry: createRegistry() }, context));
 	let harness = await open();
 	t.after(() => harness.close(context));
 	let inbox = new TelegramInbox(harness);
-	const original = await inbox.beginCommand("has-work", { conversationId: 42, command: "/newgoal", newGoalWorkId: "original-work" });
-	const empty = await inbox.beginCommand("no-work", { conversationId: 42, command: "/newgoal", newGoalWorkId: null });
+	const original = await inbox.beginCommand("has-work", { conversationId: 42, command: "/goal", goalWorkId: "original-work" });
+	const empty = await inbox.beginCommand("no-work", { conversationId: 42, command: "/goal", goalWorkId: null });
 	await harness.close(context);
 	harness = await open();
 	inbox = new TelegramInbox(harness);
-	assert.deepEqual(await inbox.beginCommand("has-work", { conversationId: 99, command: "/new", newGoalWorkId: "later-work" }), original);
-	assert.deepEqual(await inbox.beginCommand("no-work", { conversationId: 42, command: "/newgoal", newGoalWorkId: "later-work" }), empty);
+	assert.deepEqual(await inbox.beginCommand("has-work", { conversationId: 99, command: "/new", goalWorkId: "later-work" }), original);
+	assert.deepEqual(await inbox.beginCommand("no-work", { conversationId: 42, command: "/goal", goalWorkId: "later-work" }), empty);
 	await inbox.finishCommand("has-work");
-	assert.deepEqual(await inbox.beginCommand("has-work", { conversationId: 42, command: "/newgoal", newGoalWorkId: "latest-work" }), { ...original, done: true });
+	assert.deepEqual(await inbox.beginCommand("has-work", { conversationId: 42, command: "/goal", goalWorkId: "latest-work" }), { ...original, done: true });
 });
 
 async function stoppedState(directory: string, id: number) {
@@ -156,13 +156,16 @@ function assertWorkPreserved(actual: WorkRecord, expected: WorkRecord): void {
 	for (const [member, position] of Object.entries(expectedCursors)) assert.ok(actualCursors[member] >= position);
 }
 
-test("main Telegram new-goal enforces owner and admin authority without model calls or history reset", { ...posixOnly, timeout: 90_000 }, async (t) => {
+test("main Telegram goal enforces owner and admin authority without model calls or history reset", { ...posixOnly, timeout: 90_000 }, async (t) => {
 	const start = (goal: string) => ({ tool: "dwell.work", arguments: { action: "start", goal, acceptance: ["The old goal remains inspectable"] } });
 	const f = await mainFixture(t, [start("Original goal"), { text: "Original goal saved." }]);
 	const topic = (id: number, text: string, actor = 200) => message(id, text, { chat: { id: -300, type: "supergroup" }, message_thread_id: 9, from: { id: actor, first_name: "Member" } });
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
+		f.updates([topic(299, "/goal@AcceptanceBot")]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 300);
 		f.updates([topic(300, "/ask@AcceptanceBot Keep an explicit old goal.")]);
 		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:300" && event.body.state === "done");
 		await f.stop();
@@ -174,11 +177,11 @@ test("main Telegram new-goal enforces owner and admin authority without model ca
 		const afterStart = f.events.length;
 		f.start();
 		await f.until((event) => event.method === "getUpdates", afterStart);
-		f.updates([topic(301, "/newgoal@AcceptanceBot", 201)]);
+		f.updates([topic(301, "/goal@AcceptanceBot", 201)]);
 		await f.until((event) => event.method === "sendMessage" && event.body.text === "这是他人的任务线，仅线主或管理员可开启新目标。", afterStart);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302, afterStart);
-		f.updates([topic(302, "/newgoal@AcceptanceBot")]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启新目标。聊天历史、旧任务记录和预算保留，请发送新的目标。", afterStart);
+		f.updates([topic(302, "/goal@AcceptanceBot")]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。", afterStart);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 303, afterStart);
 		await f.stop();
 		const detached = await stoppedState(f.directory, conversationId);
@@ -188,8 +191,8 @@ test("main Telegram new-goal enforces owner and admin authority without model ca
 		for (const entry of before.entries) assert.deepEqual(detached.entries.find((candidate) => candidate.id === entry.id), entry);
 		assert.equal(detached.journal?.requests["command:tg-update:100:302"].operator, "tg:200");
 		assert.equal(detached.journal?.requests["command:tg-update:100:301"], undefined);
-		const ownerReceipt = (await f.snapshot()).inbox.commands["tg-update:100:302"] as { newGoalWorkId: string; done: boolean };
-		assert.equal(ownerReceipt.newGoalWorkId, oldId);
+		const ownerReceipt = (await f.snapshot()).inbox.commands["tg-update:100:302"] as { goalWorkId: string; done: boolean };
+		assert.equal(ownerReceipt.goalWorkId, oldId);
 		assert.equal(ownerReceipt.done, true);
 		assert.equal(f.requests("model").length, 2);
 
@@ -210,14 +213,14 @@ test("main Telegram new-goal enforces owner and admin authority without model ca
 		const replayStart = f.events.length;
 		f.start();
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302, replayStart);
-		f.updates([topic(302, "/newgoal@AcceptanceBot")]);
+		f.updates([topic(302, "/goal@AcceptanceBot")]);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 303, replayStart);
 		assert.equal(f.requests("telegram", "sendMessage").filter((event) => event.generation === f.generation).length, 0, "A completed old command must not announce or detach the later goal");
-		f.updates([topic(304, "/newgoal@AcceptanceBot", 201)]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启新目标。聊天历史、旧任务记录和预算保留，请发送新的目标。", replayStart);
+		f.updates([topic(304, "/goal@AcceptanceBot", 201)]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。", replayStart);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 305, replayStart);
-		f.updates([topic(305, "/newgoal@AcceptanceBot", 201)]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "当前没有工作目标，请直接发送新的目标。", replayStart);
+		f.updates([topic(305, "/goal@AcceptanceBot", 201)]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。", replayStart);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 306, replayStart);
 		await f.stop();
 		const final = await stoppedState(f.directory, conversationId);
@@ -228,10 +231,10 @@ test("main Telegram new-goal enforces owner and admin authority without model ca
 		assert.equal(final.journal?.requests["command:tg-update:100:304"].workId, later.work.current);
 		assert.equal(final.journal?.requests["command:tg-update:100:304"].operator, "tg:201");
 		const requests = final.journal?.requests ?? {};
-		assert.deepEqual(Object.keys(requests).sort(), ["command:tg-update:100:302", "command:tg-update:100:304", "command:tg-update:100:305"]);
+		assert.deepEqual(Object.keys(requests).sort(), ["command:tg-update:100:299", "command:tg-update:100:302", "command:tg-update:100:304", "command:tg-update:100:305"]);
 		assert.deepEqual(requests["command:tg-update:100:302"], detached.journal?.requests["command:tg-update:100:302"]);
 		assert.equal(Object.values(requests).filter((request) => request.workId !== null).length, 2);
-		assert.equal(Object.values(requests).filter((request) => request.workId === null).length, 1);
+		assert.equal(Object.values(requests).filter((request) => request.workId === null).length, 2);
 		assert.equal(requests["command:tg-update:100:305"].workId, null);
 		assert.equal(requests["command:tg-update:100:305"].operator, "tg:201");
 		assert.equal(requests["command:tg-update:100:305"].entryId, undefined);

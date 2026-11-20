@@ -11,7 +11,7 @@ Bot commands require user authorization. Telegram `/whoami` also works before au
 | Command | Effect | Who |
 |---|---|---|
 | `/new` | Open a new default task thread while retaining the old thread and history | Thread owner, admins |
-| `/newgoal` | Start a new work goal while retaining history, old records, and budgets | Thread owner, admins |
+| `/goal` | Enable goal mode and detach the current goal while retaining history, old records, and budgets | Thread owner, admins |
 | `/cancel` | Abort the current task | Thread owner, admins |
 | `/status` | List running tasks | Admins |
 | `/approve [minutes]` | Open your approval window for dangerous commands; resume a waiting command | Explicitly authorized users; group-only users require an admin |
@@ -30,7 +30,7 @@ Bot commands require user authorization. Telegram `/whoami` also works before au
 
 Commands match the known command list exactly. Approval windows default to 10 minutes; `/approve` accepts 1–120 minutes. `/deny` with nothing pending does not start a new run. In Feishu, identify users with `@someone` or their `ou_...` ID. In Telegram, use `tg:<numeric user ID>`; usernames are not permission IDs.
 
-`/newgoal` requires no running or queued input in the current conversation; use `/cancel` first if needed. It releases the current goal binding so you can send a new goal after a budget is exhausted. Old work records, budgets, evidence, and approvals remain, and old background-task and process reports still belong to the work that created them. It does not clear chat history. See [Agent behavior](agent.md) for budgets, background work, and verification records.
+`/goal` requires no running or queued input in the current conversation; use `/cancel` first if needed. It enables goal mode (the dwell.work tool and its guidance are absent until you run this) and releases the current goal binding so you can send a new goal after a budget is exhausted. Old work records, budgets, evidence, and approvals remain, and old background-task and process reports still belong to the work that created them. It does not clear chat history. See [Agent behavior](agent.md) for budgets, background work, and verification records.
 
 ## Approving dangerous commands
 
@@ -122,7 +122,7 @@ Open `http://<host>:<DWELL_PANEL_PORT>/` from a trusted workstation. The panel h
 - Download files produced by `dwell.send` or `write` from tool rows. Downloads must be within the conversation's working directory and at most 30 MiB; they are forced attachments, never executed inline. File sending and panel attachment forwarding use the same guarded workspace reader.
 - Status dots reflect the panel stream and bot connections: green for healthy, yellow for connecting/reconnecting, red for disconnected. The bell shows recent runtime alerts and an unread count. The clock lists active schedules across all conversations and lets you cancel them.
 - Background child conversations appear under their parents. Open their transcript or abort the current run through the conversation menu.
-- Create panel tasks, rename, archive, clear context, abort, approve commands, and manage users. The conversation menu also offers New goal with the same behavior as `/newgoal`.
+- Create panel tasks, rename, archive, clear context, abort, approve commands, and manage users. The conversation menu also offers Goal mode with the same behavior as `/goal`.
 - Open Work records and acceptance from the conversation menu or a ready notice. Compare goals, criteria, artifact scopes, recorded checks, and delivery notes before confirming acceptance. Failed acceptance leaves an error and a refresh action; changed files require fresh verification.
 - Messages sent to a Feishu/Telegram conversation first appear in the original chat as "From admin", then the bot replies. Group members can see them. Aborting or clearing that conversation from the panel also notifies the original chat.
 - Enable bot notifications for a panel task to receive direct messages through the operator's configured platform on completion, failure, or approval requests. Reply to a notification to continue the task from that platform.

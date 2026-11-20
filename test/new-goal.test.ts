@@ -11,7 +11,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { Type } from "typebox";
 import type { WorkLimits } from "../src/ext/work.ts";
 
-const privateState = await mkdtemp(join(tmpdir(), "dwell-new-goal-state-"));
+const privateState = await mkdtemp(join(tmpdir(), "dwell-goal-state-"));
 process.env.DWELL_STATE = privateState;
 const { getWork, inheritWork, makeWorkController, WorkDoc, workIdentity } = await import("../src/ext/work.ts");
 const { BudgetDoc, makeBudgetController } = await import("../src/ext/budget.ts");
@@ -32,7 +32,7 @@ const gate = () => {
 };
 
 async function setup(options: { path?: string; limits?: Partial<WorkLimits>; responses?: FauxResponseStep[]; background?: boolean; extra?: (harness: () => Harness) => Extension[] } = {}) {
-	const dir = options.path === undefined ? await mkdtemp(join(tmpdir(), "dwell-new-goal-")) : undefined;
+	const dir = options.path === undefined ? await mkdtemp(join(tmpdir(), "dwell-goal-")) : undefined;
 	const path = options.path ?? join(dir!, "work.sqlite");
 	const work = makeWorkController({ limits: options.limits });
 	const budget = makeBudgetController();
@@ -40,7 +40,7 @@ async function setup(options: { path?: string; limits?: Partial<WorkLimits>; res
 	faux.setResponses(options.responses ?? [start(), done()]);
 	const models = createModels(); models.setProvider(faux.provider);
 	const registry = createRegistry(); registry.install(work.extension); registry.install(budget.extension);
-	registry.install(defineExtension({ name: "new-goal-fixtures", tasks: options.background ? [] : [BackgroundAnchor], tools: [
+	registry.install(defineExtension({ name: "goal-fixtures", tasks: options.background ? [] : [BackgroundAnchor], tools: [
 		defineTool({ name: "probe", description: "Run an observable check", parameters: Type.Object({}), replay: "safe", async execute() { return { output: [{ type: "text", text: "check passed" }] }; } }),
 	] }));
 	let harness!: Harness;
@@ -50,7 +50,7 @@ async function setup(options: { path?: string; limits?: Partial<WorkLimits>; res
 	let closed = false;
 	return {
 		harness, faux, budget, dir, path,
-		conversation: () => harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context),
+		conversation: async () => { const c = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context); await harness.commit(async (tx) => { (await tx.doc(WorkDoc, c.id)).goalMode = true; }, context); return c; },
 		close: async (keep = false) => { if (closed) return; closed = true; await budget.close(); await work.close(); await harness.close(context); if (dir !== undefined && !keep) await rm(dir, { recursive: true, force: true }); },
 	};
 }
@@ -75,7 +75,7 @@ async function childOf(s: Awaited<ReturnType<typeof setup>>, parent: Conversatio
 	return (await s.harness.conversation(id, context))!;
 }
 
-test("host new-goal preserves an exhausted goal, its receipts and history while enabling a fresh goal", { timeout: 10_000 }, async () => {
+test("host goal preserves an exhausted goal, its receipts and history while enabling a fresh goal", { timeout: 10_000 }, async () => {
 	const s = await setup({ limits: { modelAdmissions: 4 }, responses: [start(), call("probe"), done()] });
 	try {
 		const parent = await s.conversation();
@@ -104,7 +104,7 @@ test("host new-goal preserves an exhausted goal, its receipts and history while 
 		const before = (await s.harness.snapshot(WorkDoc, parent.id, context))!;
 		const budgetBefore = await s.harness.snapshot(BudgetDoc, parent.id, context);
 		const history = await entries(s.harness, parent.id);
-		const result = await beginNewGoal(s.harness, { conversationId: parent.id, expectedWorkId: old.id, operator: "owner", requestId: "new-goal-1" });
+		const result = await beginNewGoal(s.harness, { conversationId: parent.id, expectedWorkId: old.id, operator: "owner", requestId: "goal-1" });
 		assert.equal(result.changed, true); assert.equal(result.workId, old.id);
 		const { current: detached, ...retained } = before;
 		assert.equal(detached, old.id);
@@ -136,7 +136,7 @@ test("host new-goal preserves an exhausted goal, its receipts and history while 
 	} finally { await s.close(); }
 });
 
-test("new-goal request replay survives reopen without detaching a later goal", { timeout: 10_000 }, async () => {
+test("goal request replay survives reopen without detaching a later goal", { timeout: 10_000 }, async () => {
 	const s = await setup();
 	let reopened: Awaited<ReturnType<typeof setup>> | undefined;
 	try {
@@ -164,7 +164,7 @@ test("new-goal request replay survives reopen without detaching a later goal", {
 	} finally { if (reopened !== undefined) await reopened.close(); else await s.close(); await rm(s.dir!, { recursive: true, force: true }); }
 });
 
-test("an empty new-goal request remains a no-op after a later goal and reopen", { timeout: 10_000 }, async () => {
+test("an empty goal request remains a no-op after a later goal and reopen", { timeout: 10_000 }, async () => {
 	const s = await setup();
 	let reopened: Awaited<ReturnType<typeof setup>> | undefined;
 	try {
@@ -189,7 +189,7 @@ test("an empty new-goal request remains a no-op after a later goal and reopen", 
 	} finally { if (reopened !== undefined) await reopened.close(); else await s.close(); await rm(s.dir!, { recursive: true, force: true }); }
 });
 
-test("new-goal rejects live runs and persisted SDK or raw Telegram input backlogs", { timeout: 10_000 }, async () => {
+test("goal rejects live runs and persisted SDK or raw Telegram input backlogs", { timeout: 10_000 }, async () => {
 	const s = await setup();
 	const held = gate(); const started = gate();
 	try {
@@ -244,7 +244,7 @@ test("children cannot detach inherited work or explicit absence of work", { time
 	} finally { await s.close(); }
 });
 
-test("late child, approval and real background Reporter keep their old work after new-goal", { timeout: 10_000 }, async () => {
+test("late child, approval and real background Reporter keep their old work after goal", { timeout: 10_000 }, async () => {
 	const fired = gate();
 	const deps = { senderOf: () => "owner", viaOf: () => "panel" as const, forbidden: () => [], attribute: async () => {}, onStarted: () => {}, onFired: () => { fired.release(); } };
 	const s = await setup({ background: true, extra: (getHarness) => [makeBackgroundExtension({ ...deps, getHarness })] });
@@ -280,7 +280,7 @@ test("late child, approval and real background Reporter keep their old work afte
 	} finally { await s.close(); }
 });
 
-test("managed process follow-up retains its creation work after new-goal", { timeout: 10_000 }, async () => {
+test("managed process follow-up retains its creation work after goal", { timeout: 10_000 }, async () => {
 	const fired = gate();
 	const reportHeld = gate();
 	const s = await setup({ extra: (getHarness) => [makeProcExtension({ getHarness, senderOf: () => "owner", viaOf: () => "panel", shell: () => ({ path: "", sandboxed: false }), attribute: async () => { await reportHeld.promise; }, onFired: () => { fired.release(); } })] });
