@@ -1508,7 +1508,7 @@ function helpCard(): Record<string, unknown> {
 		body: { elements: [
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
-				cmd("/goal", "开启目标模式并解绑旧目标，保留历史与旧记录（线主/管理员）"),
+				cmd("/goal", "开启目标模式并解绑旧目标，保留聊天历史与旧记录（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),
