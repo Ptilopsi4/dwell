@@ -507,7 +507,7 @@ test("model summaries retain revision metadata without repeating historical comm
 		let injected = "";
 		s.faux.setResponses([async (request) => {
 			const content = request.messages.filter((item) => item.role === "user" && typeof item.content === "string" && item.content.startsWith("[Durable work record;")).at(-1)?.content;
-			if (typeof content === "string") injected = content.slice(content.indexOf("{"));
+			if (typeof content === "string") injected = content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1);
 			return done();
 		}]);
 		await (await conversation.submit({ type: "input", content: "inspect current progress", entry: actor }, context)).wait(context);
