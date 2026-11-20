@@ -1,5 +1,5 @@
 // Preload only in isolated acceptance tests. Model and Telegram fetches remain synthetic.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { Server } from "node:http";
 import { TelegramInbox } from "../src/telegram-entry.ts";
 import { Harness } from "@earendil-works/pi-durable";
@@ -41,13 +41,21 @@ Harness.open = async function (storage, options, context) {
 };
 let waitingUpdates: ((updates: unknown[]) => void) | undefined;
 const counterFile = process.env.DWELL_TEST_TRANSPORT_STATE;
-const counters: { messageId: number; responseId: number } = counterFile !== undefined && existsSync(counterFile)
-	? JSON.parse(readFileSync(counterFile, "utf8")) : { messageId: 1000, responseId: 0 };
+// A killed generation can catch the counter file mid-write; reads tolerate a truncated file
+// (a torn write only ever loses an ID bump, never merges old data) and writes are atomic.
+const counters: { messageId: number; responseId: number } = (() => {
+	if (counterFile === undefined || !existsSync(counterFile)) return { messageId: 1000, responseId: 0 };
+	try { return JSON.parse(readFileSync(counterFile, "utf8")); } catch { return { messageId: 1000, responseId: 0 }; }
+})();
 
 function nextId(key: keyof typeof counters): number {
 	const id = ++counters[key];
 	// The fake remote service outlives a killed bot process, including its allocated IDs.
-	if (counterFile !== undefined) writeFileSync(counterFile, JSON.stringify(counters));
+	if (counterFile !== undefined) {
+		const tmp = counterFile + ".tmp";
+		writeFileSync(tmp, JSON.stringify(counters));
+		renameSync(tmp, counterFile);
+	}
 	return id;
 }
 
