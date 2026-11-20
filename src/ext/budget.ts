@@ -86,13 +86,16 @@ export function makeBudgetController(options: {
 		throw new Error("Budget stopped");
 	};
 	const elapsed = (record: Readonly<BudgetRecord>, now: number) => record.executionMs + (record.activeSince === undefined ? 0 : Math.max(0, now - record.activeSince));
-	const finish = async (tx: Tx, record: BudgetRecord, now: number) => {
-		if (record.activeSince === undefined) return;
+	/** 归还被释放的 watchdog：run 已结束时不等它睡满 deadline（最长残留 30 分钟，会占用任务图）。 */
+	const finish = async (tx: Tx, record: BudgetRecord, now: number): Promise<TaskId | undefined> => {
+		if (record.activeSince === undefined) return undefined;
 		const task = record.lastTaskId === undefined ? undefined : await tx.task(record.lastTaskId);
 		record.executionMs = elapsed(record, Math.min(now, task?.endedAt ?? now));
 		delete record.activeSince;
 		delete record.activeInput;
+		const watchdog = record.watchdog;
 		delete record.watchdog;
+		return watchdog;
 	};
 	const identity = async (conversationId: ConversationId): Promise<RunIdentity | undefined> => {
 		const current = host();
@@ -144,6 +147,7 @@ export function makeBudgetController(options: {
 		let cancel = taskId;
 		let budgetId = "unavailable";
 		let reason: BudgetStopReason | undefined;
+		let retired: TaskId | undefined;
 		try {
 			const current = host();
 			const run = await identity(conversationId);
@@ -155,7 +159,7 @@ export function makeBudgetController(options: {
 				cancel = live.run.taskId;
 				const doc = await tx.doc(BudgetDoc, conversationId);
 				const previous = doc.current === undefined ? undefined : doc.records[doc.current];
-				if (previous !== undefined && previous.activeInput !== String(run.input)) await finish(tx, previous, Date.now());
+				if (previous !== undefined && previous.activeInput !== String(run.input)) retired = (await finish(tx, previous, Date.now())) ?? retired;
 				let record = doc.records[budgetId];
 				if (record === undefined) {
 					record = { limits: { ...limits }, modelAdmissions: 0, toolAdmissions: 0, toolTasks: {}, executionMs: 0, ...(run.continuation ? { stopped: "unknown_budget" as const } : {}) };
@@ -194,6 +198,7 @@ export function makeBudgetController(options: {
 			failures.set(conversationId as number, reason);
 			console.error("[dwell] 预算状态不可用，停止本次运行:", error);
 		}
+		if (retired !== undefined) await host().abortTask(retired, BACKGROUND_CONTEXT).catch(() => {});
 		if (reason !== undefined) {
 			notify(conversationId as number, budgetId, reason);
 			if (kind !== "observe") await halt(cancel, context);
@@ -201,6 +206,7 @@ export function makeBudgetController(options: {
 		return reason;
 	};
 	const reconcile = async (conversationId: ConversationId) => {
+		const obsolete: TaskId[] = [];
 		await host().commit(async (tx) => {
 			const live = await tx.doc(LiveDoc, conversationId);
 			const doc = await tx.doc(BudgetDoc, conversationId);
@@ -212,10 +218,11 @@ export function makeBudgetController(options: {
 					if (record.watchdog === undefined) {
 						watchers.push({ budgetId, record });
 					}
-				} else await finish(tx, record, Date.now());
+				} else { const retired = await finish(tx, record, Date.now()); if (retired !== undefined) obsolete.push(retired); }
 			}
 			for (const { budgetId, record } of watchers) record.watchdog = await tx.createTask(Watchdog, { conversationId: conversationId as number, budgetId, input: record.activeInput! }, { ownership: { kind: "conversation" }, background: true, conversationId });
 		}, BACKGROUND_CONTEXT);
+		for (const id of obsolete) await host().abortTask(id, BACKGROUND_CONTEXT).catch(() => {});
 	};
 	const enqueue = () => {
 		if (scheduled || closed) return;

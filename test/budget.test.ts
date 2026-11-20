@@ -450,3 +450,19 @@ test("storage admission failure never reaches the provider", { timeout: 5000 }, 
 		assert.equal(await s.budget.stopReason(conversation.id), "storage_error");
 	} finally { s.harness.commit = original; await s.close(); }
 });
+
+test("a finished run releases its watchdog instead of sleeping to the deadline", { timeout: 5000 }, async () => {
+	const s = await setup({ limits: { executionMs: 60_000 } });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "quick" }, context)).wait(context);
+		// The watchdog is created on the first admission; after the run settles, reconcile must abort it
+		// instead of leaving a sleeping task in the graph for the rest of the execution budget.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const tasks = await s.harness.taskGraph?.(context);
+		try {
+			const sleeping = Object.values(tasks?.value.tasks ?? {}).filter((t) => t.kind === "dwell.budget-watch");
+			assert.equal(sleeping.length, 0);
+		} finally { tasks?.dispose(); }
+	} finally { await s.close(); }
+});

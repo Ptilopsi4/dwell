@@ -1340,7 +1340,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			const graphState = await harness.taskGraph?.(context);
 			let tasks: TaskGraphNode[] = [];
 			try {
-					tasks = Object.values((graphState?.value as TaskGraph | undefined)?.tasks ?? {});
+					tasks = Object.values((graphState?.value as TaskGraph | undefined)?.tasks ?? {}).filter((t) => t.kind !== "dwell.budget-watch");
 				} finally {
 					graphState?.dispose();
 			}
