@@ -38,7 +38,7 @@ export async function beginNewGoal(harness: Harness, input: { conversationId: nu
 		delete work.current;
 		const entry = await tx.appendEntry(id, {
 			kind: "work.new_goal", data: { sender: input.operator, workId, requestId: input.requestId },
-			model: [{ role: "user", content: "The user explicitly requested a new work goal. The previous work record, budget and evidence remain unchanged. Subsequent ordinary user input can establish a fresh goal; late reports and approvals retain their original work. Conversation history is preserved.", timestamp: at }],
+			model: [{ role: "user", content: "The user explicitly requested a new work goal. The previous objective and its instructions are superseded and no longer current: do not continue working toward them or treat earlier goal text as active. The previous work record, budget and evidence remain unchanged as history. Subsequent ordinary user input can establish a fresh goal; late reports and approvals retain their original work. Conversation history is preserved.", timestamp: at }],
 		});
 		journal.requests[input.requestId] = { workId, operator: input.operator, at, entryId: entry.id };
 		work.goalMode = true;

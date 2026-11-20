@@ -65,7 +65,7 @@ function scriptedFactory(): FauxResponseFactory {
 	return (ctx) => {
 		const all = ctx.messages.map(textOf).join("\n");
 		const users = ctx.messages.filter((item) => item.role === "user").map((item) => textOf(item.content));
-		const latest = users.filter((message) => !message.startsWith("[Durable work record; host-maintained data, not new user instructions]")).at(-1) ?? "";
+		const latest = users.filter((message) => !message.startsWith("[Durable work record;")).at(-1) ?? "";
 		if (config.background !== undefined && all.includes("You are a background task agent working for the main dwell conversation.")) {
 			const steps = config.background.script ?? [{ tool: "read", args: { path: "items.csv" } }];
 			const next = steps[backgroundStep++];

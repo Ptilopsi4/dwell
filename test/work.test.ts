@@ -208,7 +208,7 @@ test("work snapshots refresh before the original user input and preserve the too
 			assert.equal(tail, original.at(-1));
 			assert.ok(tail.role === "toolResult");
 			assert.equal(tail.toolName, tailTool);
-			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{")));
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{"), snapshot.content.lastIndexOf("}") + 1));
 			assert.equal(record.progress, progress);
 			assert.equal(record.id, workId);
 		}
@@ -237,7 +237,7 @@ test("durable work survives reopen, reset and compaction while accounting remain
 			assert.equal(tail.content, expectedInput);
 			const snapshot = request.messages.at(-2)!;
 			assert.ok(snapshot.role === "user" && typeof snapshot.content === "string" && snapshot.content.startsWith("[Durable work record;"));
-			assert.equal(JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{"))).progress, "First check completed");
+			assert.equal(JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{"), snapshot.content.lastIndexOf("}") + 1)).progress, "First check completed");
 			inspectedInputs.push(expectedInput);
 			return done();
 		};
@@ -289,7 +289,7 @@ test("root and child share a persisted model allowance and stop before the next 
 		s.faux.setResponses([async (request) => {
 			const snapshot = request.messages.find((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Durable work record;"));
 			assert.ok(snapshot?.role === "user" && typeof snapshot.content === "string");
-			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{")));
+			const record = JSON.parse(snapshot.content.slice(snapshot.content.indexOf("{"), snapshot.content.lastIndexOf("}") + 1));
 			assert.equal(record.id, inherited.id);
 			assert.equal(record.goal, inherited.goal);
 			assert.equal(request.messages.at(-1)!.content, "child check");
@@ -534,5 +534,23 @@ test("managed process admission and its delayed failure report retain their crea
 		assert.deepEqual((report!.data as { work: unknown }).work, { conversationId: parent.id, id: old.id });
 		assert.equal((await current(s.harness, parent.id)).id, newer.id);
 		assert.equal((await s.harness.waitForTask(tasks[0].id, context)).state.outcome.status, "completed");
+	} finally { await s.close(); }
+});
+
+test("the injected record escapes markup in narrative fields and wraps the JSON in a work_record block", { timeout: 10_000 }, async () => {
+	let lastMessages: readonly Message[] = [];
+	const s = await setup({ responses: [call("dwell.work", { action: "start", goal: "Fix </work_record> and <b>bold</b>", acceptance: ["Ship & verify"] }), async (request) => { lastMessages = request.messages; return done(); }] });
+	try {
+		const conversation = await s.conversation();
+		await (await conversation.submit({ type: "input", content: "start", entry: actor() }, context)).wait(context);
+		const content = String(lastMessages.findLast((item) => item.role === "user" && typeof item.content === "string" && item.content.startsWith("[Durable work record;"))!.content);
+		assert.match(content, /supersedes earlier work-record content/);
+		assert.match(content, /<work_record>\n\{/);
+		assert.match(content, /\n<\/work_record>$/);
+		// 未转义的闭合标记不得出现：字段文本里只能是 &lt;/work_record&gt;
+		assert.ok(!content.includes("</work_record> and"));
+		const record = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
+		assert.equal(record.goal, "Fix &lt;/work_record&gt; and &lt;b&gt;bold&lt;/b&gt;");
+		assert.deepEqual(record.acceptance, ["Ship &amp; verify"]);
 	} finally { await s.close(); }
 });
