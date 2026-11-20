@@ -141,7 +141,8 @@ test("main Telegram ask text, directed group replies and attachment-only asks st
 		assert.match(JSON.stringify(requests[4].body.input), /uploads\/[^"\s]*image-1\.bin/);
 		assert.equal(f.requests("checkpoint", "media.downloaded").length, 2);
 		assert.equal(f.requests("unexpected").length, 0);
-		assert.ok(f.requests("telegram", "sendMessage").every((event) => event.body.text === "正在处理…"));
+		// 文本输入占位「正在处理…」，附件输入（103/104）占位「正在接收附件…」后由同一占位承接答案
+		assert.ok(f.requests("telegram", "sendMessage").every((event) => event.body.text === "正在处理…" || event.body.text === "正在接收附件…"));
 		await f.stop();
 		const { inbox, submissions } = await f.snapshot();
 		assert.equal(submissions.filter((submission) => submission.type === "input").length, 5);
