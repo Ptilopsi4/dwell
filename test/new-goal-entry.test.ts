@@ -245,3 +245,23 @@ test("main Telegram goal enforces owner and admin authority without model calls 
 		passed = true;
 	} finally { await f.close(passed); }
 });
+
+test("main Telegram /goal with an objective establishes the work record directly", { ...posixOnly, timeout: 60_000 }, async (t) => {
+	const start = { tool: "dwell.work", arguments: { action: "start", goal: "Direct objective from the command", acceptance: ["The record exists"] } };
+	const f = await mainFixture(t, [start as never, { text: "Record established." }]);
+	let passed = false;
+	try {
+		await f.until((event) => event.method === "getUpdates");
+		f.updates([message(320, "/goal@AcceptanceBot Direct objective from the command")]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，正在建立目标…");
+		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith("Record established."));
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-goal:tg-update:100:320" && event.body.state === "done");
+		await f.stop();
+		const snapshot = await f.snapshot();
+		const conversationId = snapshot.inbox.inputs["tg-goal:tg-update:100:320"].conversationId;
+		const work = (await stoppedState(f.directory, conversationId)).work;
+		assert.ok(work.current);
+		assert.equal(work.records[work.current].goal, "Direct objective from the command");
+		passed = true;
+	} finally { await f.close(passed); }
+});
