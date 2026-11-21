@@ -123,7 +123,7 @@ test("ready ends the run at its own correlated receipt without another provider 
 		const settled = await (await conversation.submit({ type: "input", content: "review", entry: actor() }, context)).wait(context);
 		assert.ok(settled.type === "input" && settled.status === "done");
 		assert.equal(s.faux.state.callCount, calls + 1);
-		const summary = "目标（工作声明）：Repair the example\n\n验证：未声明验证契约；已记录 1 条成功工具结果。\n\n评审说明（代理声明）：The probe completed successfully";
+		const summary = "目标：Repair the example\n\n未声明自动检查，请直接验收产物。\n\n交付说明：The probe completed successfully";
 		assert.deepEqual(await workReadyAnswer(s.harness, conversation.id, settled.answer), { workId: before.id, verified: false, summary });
 		assert.equal(await workReadyAnswer(s.harness, conversation.id + 1, settled.answer), undefined);
 		const record = await current(s.harness, conversation.id);

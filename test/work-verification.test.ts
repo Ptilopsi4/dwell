@@ -308,15 +308,15 @@ test("a failed inline check can be corrected without replacing the work, scope, 
 		assert.equal(result.nextCall.name, "dwell.work");
 		assert.deepEqual(Object.keys(result.nextCall.arguments).sort(), ["action", "review"]);
 		assert.equal(result.nextCall.arguments.action, "ready");
-		assert.match(result.nextCall.arguments.review, /native inline check \(exit 0\)/);
+		assert.match(result.nextCall.arguments.review, /declared check passed|in their language/);
 		await submit(s, resumed, [operation("ready", { evidence: [999999], review: result.nextCall.arguments.review })]);
 		assert.equal((await current(s, conversation.id)).status, "active", "a verified receipt does not excuse invalid supplementary evidence");
 		const calls = s.faux.state.callCount;
 		const settled = await submit(s, resumed, [call(result.nextCall.name, result.nextCall.arguments)]);
 		assert.ok(settled.type === "input" && settled.status === "done");
 		assert.equal(s.faux.state.callCount, calls + 1);
-		// 修订过一次（失败后修正）：交付卡带出当前命令与修订次数，防"换成空检查再验"在卡片侧被当成有效验证
-		const summary = `目标（工作声明）：${original.goal}\n\n交付范围（声明的相对路径）：\n• job\n• job/result.txt\n\n声明检查已修订 1 次，当前命令（与初次声明可能不同）：\n• native inline check：${corrected.length <= 100 ? corrected : `${corrected.slice(0, 99)}…`}\n\n声明检查的执行结果：\n• native inline check：退出码 0\n\n评审说明（代理声明）：${result.nextCall.arguments.review}`;
+		// 修订过一次（失败后修正）：卡片摘要只报结论，命令与修订史留在面板工作记录
+		const summary = `目标：${original.goal}\n\n交付文件：\n• job\n• job/result.txt\n\n已通过 1 项自动检查；命令与明细见面板「工作记录与验收」。\n\n交付说明：${result.nextCall.arguments.review}`;
 		assert.deepEqual(await workReadyAnswer(s.harness, conversation.id, settled.answer), { workId: original.id, verified: true, summary });
 		assert.equal((await current(s, conversation.id)).status, "ready_for_review");
 		await submit(s, resumed, [operation("revise", { checks: [{ name: "native inline check", command: corrected }], reason: "Retain the previous successful receipt in the revision audit" })]);

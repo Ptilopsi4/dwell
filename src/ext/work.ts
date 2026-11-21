@@ -209,7 +209,8 @@ const summary = (record: WorkRecord) => ({
 
 function reviewNote(record: WorkRecord): string {
 	const receipt = record.verification?.receipt;
-	return receipt === undefined ? "Review the supplied evidence; no verification contract was declared." : `Declared checks passed: ${receipt.checks.map((check) => `${check.name} (exit ${check.exitCode})`).join("; ")}. Artifact snapshot: ${receipt.manifest.files} files, ${receipt.manifest.bytes} bytes. These results cover the declared checks and file versions; operator review is still required.`;
+	return receipt === undefined ? "Summarize for the user, in their language, what you delivered and which successful results support it."
+		: `Summarize for the user, in their language: what was delivered, where to find it, and that ${receipt.checks.length} declared check${receipt.checks.length === 1 ? "" : "s"} passed. Do not copy this sentence; write your own short summary.`;
 }
 
 function verificationFailure(name: string, exitCode: number | null, result: NestedToolExecutionResult): string {
@@ -235,16 +236,13 @@ function readySummary(record: WorkRecord): string {
 	};
 	const list = (values: readonly string[], limit: number) => [...values.slice(0, 8).map((value) => `• ${clip(value, limit)}`), ...(values.length > 8 ? [`• 另 ${values.length - 8} 项，请在面板查看完整记录。`] : [])].join("\n");
 	const verification = record.verification;
-	const parts = [`目标（工作声明）：${clip(record.goal, 240)}`];
+	// 用户面的轻量交付摘要：目标 + 产物 + 一句检查结论；命令/退出码/修订史等审计明细只在面板的工作记录里呈现
+	const parts = [`目标：${clip(record.goal, 240)}`];
 	if (verification !== undefined) {
-		parts.push(`交付范围（声明的相对路径）：\n${list(verification.contract.artifacts, 120)}`);
-		// 检查命令可被 revise 替换：修订过的交付必须带出当前命令与修订次数，防止"换成空检查再 verify"在卡片侧被当成有效验证；
-		// 未修订的交付不复制命令（保持 bounded，完整契约在面板）
-		const revisions = (verification.revisionHistory ?? []).length;
-		if (revisions > 0) parts.push(`声明检查已修订 ${revisions} 次，当前命令（与初次声明可能不同）：\n${list(verification.contract.checks.map((check) => `${clip(check.name, 60)}：${clip(check.command, 100)}`), 140)}`);
-		parts.push(`声明检查的执行结果：\n${list(verification.receipt!.checks.map((check) => `${clip(check.name, 80)}：退出码 ${check.exitCode}`), 100)}`);
-	} else parts.push(`验证：未声明验证契约；已记录 ${record.evidence.length} 条成功工具结果。`);
-	parts.push(`评审说明（代理声明）：${clip(record.review, 720)}`);
+		parts.push(`交付文件：\n${list(verification.contract.artifacts, 120)}`);
+		parts.push(verification.receipt === undefined ? "自动检查未通过，未生成验证回执。" : `已通过 ${verification.receipt.checks.length} 项自动检查；命令与明细见面板「工作记录与验收」。`);
+	} else parts.push("未声明自动检查，请直接验收产物。");
+	if (record.review.trim() !== "") parts.push(`交付说明：${clip(record.review, 720)}`);
 	return parts.join("\n\n");
 }
 
