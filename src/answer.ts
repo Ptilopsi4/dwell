@@ -6,7 +6,7 @@ import { workReadyAnswer } from "./ext/work.ts";
 export const BACKGROUND_WAIT_NOTICE = "后台任务处理中，完成后会继续。";
 export const WORK_READY_NOTICE = "已完成声明的验证，等待你验收。";
 export const WORK_READY_UNVERIFIED_NOTICE = "工作已提交，等待你验收（未声明验证契约）。";
-export const WORK_READY_NEXT_STEP = "下一步：请在面板的“工作记录与验收”中查看并确认验收；如需修改，可直接继续发送要求。";
+export const WORK_READY_NEXT_STEP = "下一步：确认无误可回复 /accept 验收；如需修改，直接发送要求。";
 export const workReadyNotice = (verified: boolean, summary?: string): string => [verified ? WORK_READY_NOTICE : WORK_READY_UNVERIFIED_NOTICE, ...(summary === undefined ? [] : [summary, WORK_READY_NEXT_STEP])].join("\n\n");
 
 /** Host notices require the settled answer's own acknowledged tool result. */

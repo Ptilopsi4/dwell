@@ -12,6 +12,7 @@ Bot commands require user authorization. Telegram `/whoami` also works before au
 |---|---|---|
 | `/new` | Open a new default task thread while retaining the old thread and history | Thread owner, admins |
 | `/goal [objective]` | Enable goal mode and detach the current goal; with an objective, establish it directly. History and old records are retained | Thread owner, admins |
+| `/accept` | Accept the work record awaiting review | Thread owner, admins |
 | `/cancel` | Abort the current task | Thread owner, admins |
 | `/status` | List running tasks | Admins |
 | `/approve [minutes]` | Open your approval window for dangerous commands; resume a waiting command | Explicitly authorized users; group-only users require an admin |
