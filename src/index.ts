@@ -12,7 +12,7 @@ import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } f
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { beginNewGoal, NewGoalDoc } from "./new-goal.ts";
-import { getWork, workBudgetStopReason } from "./ext/work.ts";
+import { acceptWork, getWork, workBudgetStopReason } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
@@ -1292,6 +1292,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					`群聊：使用 /ask${bot} 内容，或回复 ${bot} 的消息继续；群聊需先获准使用。`,
 					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
 					"/goal [描述]：开启目标模式并解绑旧目标；带描述时直接建立该目标（线主/管理员）",
+				"/accept：验收当前待验收的工作目标（线主/管理员）",
 					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
 					users.isAllowed(msg.senderId) ? "/approve [分钟]：开启危险命令批准窗口，默认 10 分钟" : "危险操作：需 dwell 管理员点击审批卡批准，群成员不能自行 /approve",
 					"/deny：关闭批准窗口并取消待审请求",
@@ -1416,6 +1417,28 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			} else await conversation.abort(context);
 			await replyTo(target, "已中止当前任务。");
 			break;
+		case "/accept": {
+			if (!isOwner && !admin) {
+				await replyTo(target, "这是他人的任务线，仅线主或管理员可验收。");
+				return;
+			}
+			const current = await getWork(harness, convId);
+			if (current.current === undefined) { await replyTo(target, "当前没有待验收的工作目标。"); return; }
+			const messages: Record<string, string> = {
+				"Work must be ready for review before acceptance": "工作尚未提交验收（模型需先完成并提交评审），当前状态无法验收。",
+				"Run verify successfully before requesting review or accepting this work": "缺少有效的验证回执，请让 Agent 完成验证后重新提交。",
+				"Verified artifacts changed; run verify again before review or acceptance": "验证后的产物已变化，请让 Agent 重新验证。",
+				"Work verification changed during acceptance": "验收期间验证记录已更新，请重试。",
+			};
+			try {
+				const record = await acceptWork(harness, convId, current.current, msg.senderId);
+				await replyTo(target, `已验收（${record.goal.slice(0, 120)}）。`, conversation);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : "";
+				await replyTo(target, messages[message] ?? `验收未通过：${message}`);
+			}
+			break;
+		}
 		case "/approve": {
 			if (!users.isAllowed(msg.senderId)) {
 				await replyTo(target, "群成员任务的危险操作需 dwell 管理员点击审批卡批准；你可以用 /deny 拒绝自己的请求。");
@@ -1523,6 +1546,7 @@ function helpCard(): Record<string, unknown> {
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
 				cmd("/goal", "开启目标模式并解绑旧目标，保留聊天历史与旧记录；命令后可直接跟目标描述（线主/管理员）"),
+				cmd("/accept", "验收当前待验收的工作目标（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),
