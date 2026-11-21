@@ -34,9 +34,9 @@ const ready = (evidence: number[] = [], text = "") => fauxAssistantMessage([
 ], { stopReason: "toolUse" });
 const actor = { kind: "chat.message", data: { sender: "owner", via: "panel" } };
 const expectedSummary = (verified: boolean) => [
-	"目标（工作声明）：Prepare the review output",
-	...(verified ? ["交付范围（声明的相对路径）：\n• result.txt", "声明检查的执行结果：\n• Native check：退出码 0"] : ["验证：未声明验证契约；已记录 1 条成功工具结果。"]),
-	"评审说明（代理声明）：Inspect the declared output and the recorded checks",
+	"目标：Prepare the review output",
+	...(verified ? ["交付文件：\n• result.txt", "已通过 1 项自动检查；命令与明细见面板「工作记录与验收」。"] : ["未声明自动检查，请直接验收产物。"]),
+	"交付说明：Inspect the declared output and the recorded checks",
 ].join("\n\n");
 
 async function setup(options: { compaction?: boolean } = {}) {
@@ -98,8 +98,8 @@ for (const verified of [true, false]) test(`ready presents ${verified ? "declare
 		const notice = workReadyNotice(verified, summary);
 		assert.deepEqual(await workReadyAnswer(s.harness, conversation.id, settled.answer), { workId: record.id, verified, summary });
 		assert.deepEqual(await presentAnswer(s.harness, conversation.id, settled.answer), { text: [text, notice].filter(Boolean).join("\n\n"), waiting: false, ready: true });
-		assert.match(notice, /目标（工作声明）/);
-		assert.match(notice, /评审说明（代理声明）/);
+		assert.match(notice, /目标：/);
+		assert.match(notice, /交付说明：/);
 		assert.ok(notice.endsWith(WORK_READY_NEXT_STEP));
 		assert.doesNotMatch(notice, /node -e|process\.exit|s\.sqlite/);
 		assert.ok(!notice.includes(s.directory), "Host summaries must not expose the workspace's absolute path");
@@ -142,7 +142,7 @@ test("ready after a revision surfaces the revised command and count in the hando
 	const s = await setup({ compaction: false });
 	try {
 		const conversation = await s.conversation();
-		// 首次验证失败（退出码 1）→ revise 换检查 → 再验通过 → ready：交付卡必须带出修订次数与当前命令，旧命令不出现
+		// 首次验证失败（退出码 1）→ revise 换检查 → 再验通过 → ready：聊天卡只报结论（不带命令）；修订史与当前命令留在面板数据源（getWork）
 		const { settled } = await submit(s, conversation, [
 			start({ checks: [{ name: "Original check", command: 'node -e "process.exit(1)"' }], artifacts: ["result.txt"] }),
 			call("dwell.work", { action: "verify" }),
@@ -151,9 +151,13 @@ test("ready after a revision surfaces the revised command and count in the hando
 			ready(),
 		]);
 		const text = (await presentAnswer(s.harness, conversation.id, settled.answer)).text;
-		assert.match(text, /已修订 1 次/);
-		assert.match(text, /Replacement check：node -e "process\.exit\(0\)"/);
-		assert.doesNotMatch(text, /Original check/);
+		assert.match(text, /已通过 1 项自动检查/);
+		assert.doesNotMatch(text, /Original check|Replacement check|node -e/);
+		const doc = await getWork(s.harness, conversation.id);
+		const record = doc.records[doc.current!]!;
+		assert.equal(record.verification!.revisionHistory!.length, 1);
+		assert.equal(record.verification!.contract.checks[0]!.name, "Replacement check");
+		assert.equal(record.status, "ready_for_review");
 		assert.equal(s.faux.state.callCount, 5);
 	} finally { await s.close(); }
 });
@@ -173,9 +177,10 @@ test("ready handoffs bound long declarations and lists without copying commands 
 		assert.ok(result?.role === "toolResult" && typeof result.details === "object" && result.details !== null && "summary" in result.details && typeof result.details.summary === "string");
 		const summary = result.details.summary;
 		assert.ok(summary.length < 3200);
-		assert.equal(summary.match(/另 1 项/g)?.length, 2);
-		assert.match(summary, /output-7\.txt/); assert.match(summary, /check-7/);
-		assert.doesNotMatch(summary, /output-8|check-8|node -e|process\.exit/);
+		// artifacts 列表截 8 项；检查命令与名字不再进卡片摘要
+		assert.equal(summary.match(/另 1 项/g)?.length, 1);
+		assert.match(summary, /output-7\.txt/);
+		assert.doesNotMatch(summary, /output-8|check-7|check-8|node -e|process\.exit/);
 		assert.ok(!summary.includes(s.directory));
 		assert.equal(s.faux.state.callCount, 3);
 	} finally { await s.close(); }
@@ -313,10 +318,10 @@ test("main Telegram delivers a ready host notice in its original topic without a
 		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302);
 		f.updates([message(302, "/ask@AcceptanceBot Prepare topic review output", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
-		const ready = await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(`${WORK_READY_NOTICE}\n\n目标（工作声明）：`) && String(event.body.text).includes(WORK_READY_NEXT_STEP));
+		const ready = await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(`${WORK_READY_NOTICE}\n\n目标：`) && String(event.body.text).includes(WORK_READY_NEXT_STEP));
 		assert.match(String(ready.body.text), /Prepare the topic review output/);
 		assert.match(String(ready.body.text), /result\.txt/);
-		assert.match(String(ready.body.text), /Native check：退出码 0/);
+		assert.match(String(ready.body.text), /已通过 1 项自动检查/);
 		assert.match(String(ready.body.text), /Inspect the output and the declared native check/);
 		assert.doesNotMatch(String(ready.body.text), /process\.exit|node -e/);
 		assert.match(String(ready.body.text), /dwell.work.*提交验收.*已完成/);
