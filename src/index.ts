@@ -1291,7 +1291,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					`私聊：直接发送文字、图片或文件，也可使用 /ask 内容。`,
 					`群聊：使用 /ask${bot} 内容，或回复 ${bot} 的消息继续；群聊需先获准使用。`,
 					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
-					"/goal：开启目标模式并解绑旧目标，保留聊天历史与旧记录（线主/管理员）",
+					"/goal [描述]：开启目标模式并解绑旧目标；带描述时直接建立该目标（线主/管理员）",
 					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
 					users.isAllowed(msg.senderId) ? "/approve [分钟]：开启危险命令批准窗口，默认 10 分钟" : "危险操作：需 dwell 管理员点击审批卡批准，群成员不能自行 /approve",
 					"/deny：关闭批准窗口并取消待审请求",
@@ -1320,7 +1320,21 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			let result;
 			try { result = await beginNewGoal(harness, { conversationId: convId, expectedWorkId, operator: msg.senderId, requestId }); }
 			catch (error) { await replyTo(target, (error as Error).message); return; }
-			await replyTo(target, result.changed ? "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。" : "已开启目标模式，请发送你的目标。", conversation);
+			const objective = parts.slice(1).join(" ").trim();
+			await replyTo(target, result.changed
+				? objective === "" ? "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。" : "已开启目标模式，并解绑旧目标。正在建立新目标…"
+				: objective === "" ? "已开启目标模式，请发送你的目标。" : "已开启目标模式，正在建立目标…", conversation);
+			if (objective === "") break;
+			// 带描述时直接走普通输入管线（与手发消息同路）：模型据此调 dwell.work start 落记录
+			if (msg.platform === "telegram") {
+				const id = `tg-goal:${msg.requestId ?? msg.messageId}`;
+			await telegramInbox.enqueue(id, { conversationId: convId, sender: msg.senderId, authorityVia: "telegram", destination: target.destination as never, replyTo: msg.messageId, requestId: id, raw: { ...msg, content: objective, resources: [], replyToMessageId: undefined } });
+				telegramWorkers.wake();
+			} else {
+				const submission = await submitInput(conversation, objective, msg);
+				const record = await submission.status(BACKGROUND_CONTEXT);
+				if (record.status !== "queued") void submitAndReply(conversation, submission, target);
+			}
 			break;
 		}
 		case "/new":
@@ -1508,7 +1522,7 @@ function helpCard(): Record<string, unknown> {
 		body: { elements: [
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
-				cmd("/goal", "开启目标模式并解绑旧目标，保留聊天历史与旧记录（线主/管理员）"),
+				cmd("/goal", "开启目标模式并解绑旧目标，保留聊天历史与旧记录；命令后可直接跟目标描述（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),
