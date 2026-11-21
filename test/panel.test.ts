@@ -5,7 +5,16 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload, isLocalSource, localAddresses, resolveDownload } from "../src/web/server.ts";
+import { once } from "node:events";
+import { checkPanelRequest, downloadHeaders, healthOf, hostNameOf, ingestUpload as upload, isLocalSource, localAddresses, resolveDownload, startPanel } from "../src/web/server.ts";
+import { Uploads } from "../src/uploads.ts";
+import { conversationScope } from "../src/ext/approval.ts";
+
+const writer = await Uploads.open(tmpdir(), () => ({ enabled: false }));
+async function ingestUpload(cwd: string | undefined, name: unknown, data: unknown, describer: Parameters<typeof upload>[3]) {
+	if (cwd !== undefined) await writer.register(cwd);
+	return upload(cwd, name, data, describer, writer.save);
+}
 
 const HOSTS = new Set(["localhost", "10.0.0.5"]);
 
@@ -54,6 +63,95 @@ test("healthOf：feishu failed → 503 ok=false，其余（含 off/reconnecting�
 	assert.deepEqual(healthOf("off", 0, false), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false } });
 });
 
+test("healthOf exposes optional Telegram health and fails when either configured channel fails", () => {
+	assert.deepEqual(healthOf("off", 42, true, "failed"), { code: 503, body: { ok: false, uptimeSec: 42, feishu: "off", sandbox: true, telegram: "failed" } });
+	assert.equal(healthOf("failed", 0, false, "polling").code, 503);
+	for (const telegram of ["off", "ready", "polling"]) {
+		assert.deepEqual(healthOf("off", 0, false, telegram), { code: 200, body: { ok: true, uptimeSec: 0, feishu: "off", sandbox: false, telegram } });
+	}
+});
+
+type PanelOptions = Parameters<typeof startPanel>[0];
+type ConvRow = ReturnType<PanelOptions["sessions"]["listConversations"]>[number];
+
+async function testPanel(t: import("node:test").TestContext, options: Partial<PanelOptions>): Promise<string> {
+	const previous = { only: process.env.DWELL_PANEL_ONLY, host: process.env.DWELL_PANEL_HOST };
+	process.env.DWELL_PANEL_ONLY = "1";
+	process.env.DWELL_PANEL_HOST = "127.0.0.1";
+	let server: ReturnType<typeof startPanel>;
+	try {
+		server = startPanel({
+			harness: {} as PanelOptions["harness"], sessions: {} as PanelOptions["sessions"],
+			users: {} as PanelOptions["users"], directory: {} as PanelOptions["directory"],
+			feishu: { operator: () => "tg:7", status: () => "off", relay: async () => {}, notice: async () => {}, notifyPanel: async () => {}, decide: async () => ({ ok: true }) },
+			port: 0, describer: () => null, sandbox: () => false, saveUpload: writer.save, ...options,
+		});
+	} finally {
+		if (previous.only === undefined) delete process.env.DWELL_PANEL_ONLY; else process.env.DWELL_PANEL_ONLY = previous.only;
+		if (previous.host === undefined) delete process.env.DWELL_PANEL_HOST; else process.env.DWELL_PANEL_HOST = previous.host;
+	}
+	t.after(async () => { await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); });
+	await once(server, "listening");
+	const address = server.address();
+	assert.ok(address !== null && typeof address !== "string");
+	return `http://127.0.0.1:${address.port}`;
+}
+
+test("panel Telegram send requires the visible channel relay and preserves its platform result", async (t) => {
+	for (const failRelay of [false, true]) await t.test(failRelay ? "relay failure blocks hidden model input" : "relay succeeds", async (t) => {
+		const calls: string[] = [];
+		const conversation = { id: 71, submit: async () => { assert.fail("channel input must be submitted by its visible relay"); } };
+		const base = await testPanel(t, {
+			harness: { conversation: async () => conversation } as unknown as PanelOptions["harness"],
+			sessions: { destinationOf: () => ({ kind: "telegram", botId: "90", chatId: "-100", threadId: "5" }), touchActivity: () => {} } as unknown as PanelOptions["sessions"],
+			feishu: {
+				operator: () => "tg:7", status: () => "off", notice: async () => {}, notifyPanel: async () => {}, decide: async () => ({ ok: true }),
+				relay: async (target, text, attachments) => {
+					assert.equal(target, conversation);
+					assert.equal(text, "hello from panel");
+					assert.deepEqual(attachments, []);
+					calls.push("relay");
+					if (failRelay) throw new Error("Telegram relay unavailable");
+				},
+			},
+		});
+		const result = await fetch(`${base}/api/send`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ conv: 71, content: "hello from panel" }) });
+		assert.equal(result.status, failRelay ? 500 : 200);
+		assert.deepEqual(await result.json(), failRelay ? { error: "Telegram relay unavailable" } : { ok: true, via: "telegram" });
+		assert.deepEqual(calls, ["relay"]);
+	});
+});
+
+test("panel Telegram rows and users never query the Feishu directory", async (t) => {
+	const parent = 420001, child = 420002;
+	const row = (id: number, key: string, owner: string, type: string, chatId: string, name = key): ConvRow => ({ id, key, owner, name, type, chatId, platform: "telegram", archived: false, lastTs: 0, notify: false, emoji: null });
+	const rows = [row(parent, "tg:90:-100#t:5", "tg:7", "thread", "tg:90:-100"), row(420003, "tg:90:7", "tg:7", "direct", "tg:90:7"), row(420004, "tg:90:-200#s:7", "tg:7", "group", "tg:90:-200", "Team task")];
+	const directoryCalls: string[][] = [];
+	conversationScope.set(child, parent);
+	t.after(() => { conversationScope.delete(child); });
+	const base = await testPanel(t, {
+		harness: { snapshot: async (_doc: unknown, id: number) => id === parent ? { agents: { summarize: { conversationId: child } } } : {} } as unknown as PanelOptions["harness"],
+		sessions: { listConversations: () => rows, destinationOf: (id: number) => ({ kind: "telegram", botId: "90", chatId: id === parent ? "-100" : "7", ...(id === parent ? { threadId: "5" } : {}) }) } as unknown as PanelOptions["sessions"],
+		users: { list: () => [{ id: "tg:7", role: "admin" }, { id: "ou_member", role: "member" }] } as unknown as PanelOptions["users"],
+		directory: {
+			userName: async () => { assert.fail("Telegram user is not a Feishu directory identity"); },
+			chatName: async () => { assert.fail("Telegram chat is not a Feishu directory identity"); },
+			userNames: async (ids: string[]) => { directoryCalls.push(ids); return { ou_member: "Member" }; },
+		} as unknown as PanelOptions["directory"],
+	});
+	const conversations = await fetch(`${base}/api/conversations`).then((r) => r.json());
+	assert.equal(conversations[0].title, "Telegram 群 -100 · 话题 5");
+	assert.equal(conversations[0].chatName, "Telegram 群 -100");
+	assert.equal(conversations[1].title, "Telegram · 用户 7");
+	assert.equal(conversations[2].title, "Team task");
+	assert.equal(conversations[3].platform, "telegram");
+	assert.equal(conversations[3].type, "task");
+	assert.equal(conversations[3].title, "🧵 summarize");
+	const users = await fetch(`${base}/api/users`).then((r) => r.json());
+	assert.deepEqual(users, [{ id: "tg:7", role: "admin", name: null }, { id: "ou_member", role: "member", name: "Member" }]);
+	assert.deepEqual(directoryCalls, [["ou_member"]]);
+});
+
 // ── 本机来源拒绝：bash 与 panel 同机，本机源地址 = agent 自己发的请求 ──
 
 test("isLocalSource：回环、接口地址（含映射/scope 形态）、缺失地址均算本机；peer 地址放行", () => {
@@ -81,14 +179,14 @@ async function tempCwd(t: import("node:test").TestContext): Promise<string> {
 	return cwd;
 }
 
-test("resolveDownload：cwd 内文件 200（real/name/size）", async (t) => {
+test("resolveDownload：cwd 内文件 200（real/name/size）", { skip: process.platform === "win32" ? "POSIX file boundary; Windows fails closed" : false }, async (t) => {
 	const cwd = await tempCwd(t);
 	await writeFile(join(cwd, "a.txt"), "hello");
 	// 期望值走 realpath：macOS 的 /var 是 /private/var 软链
-	assert.deepEqual(await resolveDownload(cwd, "a.txt"), { status: 200, real: await realpath(join(cwd, "a.txt")), size: 5, name: "a.txt" });
+	assert.deepEqual(await resolveDownload(cwd, "a.txt"), { status: 200, real: await realpath(join(cwd, "a.txt")), size: 5, name: "a.txt", buffer: Buffer.from("hello") });
 });
 
-test("resolveDownload：无 cwd 404 / 空 path 400 / 越界 403 / 目录与不存在 404", async (t) => {
+test("resolveDownload：无 cwd 404 / 空 path 400 / 越界 403 / 目录与不存在 404", { skip: process.platform === "win32" ? "POSIX file boundary; Windows fails closed" : false }, async (t) => {
 	const cwd = await tempCwd(t);
 	await mkdir(join(cwd, "sub"));
 	assert.deepEqual(await resolveDownload(undefined, "a.txt"), { status: 404, error: "该会话没有工作目录" });
@@ -127,7 +225,7 @@ test("ingestUpload：缺 name/data 400、空数据 400、超 10MB 413", async (t
 	assert.equal((await ingestUpload(cwd, "big.bin", Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"), null)).status, 413);
 });
 
-test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describer）", async (t) => {
+test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describer）", { skip: process.platform === "win32" }, async (t) => {
 	const cwd = await tempCwd(t);
 	const seen: string[] = [];
 	const result = await ingestUpload(cwd, "shot.png", PNG_BYTES.toString("base64"), async (base64, mime) => {
@@ -138,7 +236,7 @@ test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describ
 	if (result.status !== 200) return;
 	assert.equal(result.kind, "image");
 	assert.equal(result.size, PNG_BYTES.length);
-	assert.match(result.path, /^uploads\/[0-9a-f]{8}-shot\.png$/);
+	assert.match(result.path, /^uploads\/[0-9a-f]{32}-shot\.png$/);
 	assert.equal(result.part, `[图片1 ${result.path}]\n一张绿色按钮截图`);
 	assert.deepEqual(seen, [`image/png:${PNG_BYTES.toString("base64")}`]);
 	// 落盘文件确实存在且内容一致
@@ -147,14 +245,14 @@ test("ingestUpload：PNG 魔数 → kind image，part 含描述（注入 describ
 	assert.ok(PNG_BYTES.equals(await readFile(join(cwd, "uploads", files[0]), null)));
 });
 
-test("ingestUpload：文本 → kind file，文件落在 cwd/uploads", async (t) => {
+test("ingestUpload：文本 → kind file，文件落在 cwd/uploads", { skip: process.platform === "win32" }, async (t) => {
 	const cwd = await tempCwd(t);
 	const result = await ingestUpload(cwd, "notes.txt", Buffer.from("hello dwell").toString("base64"), null);
 	assert.equal(result.status, 200);
 	if (result.status !== 200) return;
 	assert.equal(result.kind, "file");
 	assert.equal(result.size, 11);
-	assert.match(result.path, /^uploads\/[0-9a-f]{8}-notes\.txt$/);
-	assert.match(result.part, /^\[文件1\] [0-9a-f]{8}-notes\.txt（0\.0KB）已保存到 uploads\/[0-9a-f]{8}-notes\.txt，可用 read 工具读取。$/);
+	assert.match(result.path, /^uploads\/[0-9a-f]{32}-notes\.txt$/);
+	assert.match(result.part, /^\[文件1\] [0-9a-f]{32}-notes\.txt（0\.0KB）已保存到 uploads\/[0-9a-f]{32}-notes\.txt，可用 read 工具读取。$/);
 	assert.equal(await readFile(join(cwd, "uploads", result.path.slice("uploads/".length)), "utf8"), "hello dwell");
 });

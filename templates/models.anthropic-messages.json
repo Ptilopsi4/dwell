@@ -1,0 +1,45 @@
+{
+  "main": {
+    "name": "Claude Sonnet 4.6",
+    "api": "anthropic-messages",
+    "baseUrl": "https://api.anthropic.com",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75
+    },
+    "contextWindow": 1000000,
+    "maxTokens": 128000,
+    "thinkingLevelMap": {
+      "max": "max"
+    },
+    "compat": {
+      "forceAdaptiveThinking": true,
+      "supportsStrictTools": true
+    },
+    "promptCache": {
+      "short": 300,
+      "long": 3600
+    },
+    "inputLimits": {
+      "maxRequestBytes": 33554432,
+      "images": {
+        "maxPerRequest": 600,
+        "resize": {
+          "maxWidth": 2000,
+          "maxHeight": 2000,
+          "maxBytes": 4718592,
+          "jpegQuality": 80
+        }
+      }
+    },
+    "model": "claude-sonnet-4-6",
+    "apiKeyEnv": "ANTHROPIC_API_KEY"
+  }
+}

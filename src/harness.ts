@@ -1,44 +1,52 @@
-// dwell harness 装配：SQLite storage + 模型 provider（zai-coding-cn 或 deepseek）+ CodingTools + dwell 系统提示。
-// 全部配置来自环境变量，见 README。
-import { mkdir, open as openFile, readFile } from "node:fs/promises";
+// Runtime assembly; model connections are shared with vision and evaluations.
+import { mkdir, open as openFile, readFile, realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { normalizeContext } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
-import { zaiCodingCnProvider } from "@earendil-works/pi-ai/providers/zai-coding-cn";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import type { Models } from "@earendil-works/pi-ai/models";
+import { GuardedExecutionEnv } from "./guarded-env.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createRegistry, defineExtension, Harness, section, type Extension, type ReportInfo, type TaskGraph } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord/context";
+import { AgentDoc, createRegistry, defineExtension, Harness, hook, section, ToolTask, type ConversationId, type Cursor, type Extension, type HookApi, type ReportInfo, type TaskGraph, type ToolExecutionResult, type ToolHookCall } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { makeApprovalExtension } from "./ext/approval.ts";
+import { approvalDecisions, pendingApprovals, makeApprovalExtension, setApprovalBudgetGetter, setModelConfigGuard, type CanSelfApprove } from "./ext/approval.ts";
+import { makeBudgetController, type BudgetLimits } from "./ext/budget.ts";
+import { makeWorkController } from "./ext/work.ts";
 import { makeWebExtension } from "./ext/web.ts";
-import type { SandboxState } from "./sandbox.ts";
-import { DATA_DIR, DEFAULT_CWD, DWELL_TZ } from "./state.ts";
+import { scanLiveTasks } from "./ext/schedule.ts";
+import { makeWorkspaceExtension, registerLegacyWorkspaces, setWorkspaceApprovalGetter } from "./workspace.ts";
+import { npmCacheEnv, type SandboxState } from "./sandbox.ts";
+import { APP_ROOT, DATA_DIR, DEFAULT_CWD, DWELL_TZ, STATE_DIR } from "./state.ts";
+import { configuredSecretEnv, createModelClient, loadModelsConfig, type ResolvedModelConnection } from "./models.ts";
+import { RuntimeTelemetry } from "./telemetry.ts";
+
+export const MODEL_CONFIG = loadModelsConfig();
 
 /** 敏感 env：启动读取后即从 process.env 移除（bash 工具继承完整环境，printenv 即可窃取）。 */
-const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "DWELL_ALLOW", "DWELL_ADMINS"];
+const SECRET_ENV = ["ZAI_CODING_CN_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_MODEL_API_KEY", "OPENCODE_GO_API_KEY", "DWELL_MODEL_API_KEY", "DWELL_VISION_API_KEY", "LARK_APP_ID", "LARK_APP_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_PROXY", "DWELL_TELEGRAM_CHATS", "DWELL_ALLOW", "DWELL_ADMINS"];
 
 export async function scrubSecretEnv(): Promise<void> {
 	const values: string[] = [];
-	for (const name of SECRET_ENV) {
+	const names = [...new Set([...SECRET_ENV, ...configuredSecretEnv(MODEL_CONFIG)])];
+	for (const name of names) {
 		const value = process.env[name];
 		if (value !== undefined && value !== "") values.push(value);
 		delete process.env[name];
 	}
 	if (process.platform !== "linux" || values.length === 0) return;
 	try {
-		await wipeEnvironValues(values);
+		await wipeEnvironValues(names);
 	} catch (err) {
 		throw new Error(`密钥擦除失败，拒绝继续启动：${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 
-/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检密钥值不复存在（fail closed）。
+/** 在 /proc/self/environ 的原始块中定位 SECRET_ENV 条目，把值区覆写为 0，再自检名单内条目值已清零（fail closed）。
  *  /proc/self/mem 按虚拟地址寻址，environ 文件内的偏移不能直接当地址用——环境块的基地址是
  *  /proc/self/stat 的 env_start（第 50 字段），偏移须加上它（实测：不加会写进未映射低地址报 EIO，启动必败）。 */
-async function wipeEnvironValues(values: string[]): Promise<void> {
+async function wipeEnvironValues(names: readonly string[]): Promise<void> {
 	const environ = await readFile("/proc/self/environ");
 	const spans: { start: number; end: number }[] = [];
 	for (let i = 0; i < environ.length; ) {
@@ -46,7 +54,7 @@ async function wipeEnvironValues(values: string[]): Promise<void> {
 		const entryEnd = zero === -1 ? environ.length : zero;
 		const entry = environ.subarray(i, entryEnd);
 		const eq = entry.indexOf(61); // '='
-		if (eq > 0 && SECRET_ENV.includes(entry.subarray(0, eq).toString("latin1"))) {
+		if (eq > 0 && names.includes(entry.subarray(0, eq).toString("latin1"))) {
 			spans.push({ start: i + eq + 1, end: i + entry.length }); // 值区，不含结尾 NUL
 		}
 		if (zero === -1) break;
@@ -70,9 +78,19 @@ async function wipeEnvironValues(values: string[]): Promise<void> {
 	} finally {
 		await handle.close();
 	}
-	const after = (await readFile("/proc/self/environ")).toString("latin1");
-	for (const value of values) {
-		if (after.includes(value)) throw new Error("自检失败：密钥值仍可从 /proc/self/environ 读出");
+	// 自检按条目级判定：名单内的名字不得再持有非空值。裸子串匹配会把「同值的其他变量」
+	// （如 DWELL_PANEL_USER 默认取第一个 admin，与 DWELL_ADMINS 同值）误判为残留，fail-closed 变成启动拒绝。
+	const after = await readFile("/proc/self/environ");
+	for (let i = 0; i < after.length; ) {
+		const zero = after.indexOf(0, i);
+		const entryEnd = zero === -1 ? after.length : zero;
+		const entry = after.subarray(i, entryEnd);
+		const eq = entry.indexOf(61); // '='
+		if (eq > 0 && entry.length > eq + 1 && names.includes(entry.subarray(0, eq).toString("latin1"))) {
+			throw new Error(`自检失败：${entry.subarray(0, eq).toString("latin1")} 的值仍可从 /proc/self/environ 读出`);
+		}
+		if (zero === -1) break;
+		i = zero + 1;
 	}
 }
 
@@ -83,19 +101,11 @@ export function setSandboxState(s: SandboxState): void {
 	sandboxState = s;
 }
 
-/** DWELL_PROVIDER 选择模型来源；每个 provider 的凭证 env 与默认模型。 */
-const PROVIDERS = {
-	"zai-coding-cn": { keyEnv: "ZAI_CODING_CN_API_KEY", defaultModel: "glm-5.3", make: zaiCodingCnProvider },
-	deepseek: { keyEnv: "DEEPSEEK_API_KEY", defaultModel: "deepseek-v4-pro", make: deepseekProvider },
-} as const;
-type ProviderId = keyof typeof PROVIDERS;
-const providerId = (process.env.DWELL_PROVIDER ?? "zai-coding-cn") as ProviderId;
-if (!(providerId in PROVIDERS)) throw new Error(`DWELL_PROVIDER=${providerId} 不支持（可选：${Object.keys(PROVIDERS).join(" / ")}）`);
-export const MODEL: { readonly provider: string; readonly modelId: string } = { provider: providerId, modelId: process.env.DWELL_MODEL ?? PROVIDERS[providerId].defaultModel };
+export const MODEL: { readonly provider: string; readonly modelId: string } = { provider: MODEL_CONFIG.main.providerId, modelId: MODEL_CONFIG.main.model };
 /** 当前 provider 的凭证 env 名（smoke 判断是否走真实链路）。 */
-export const MODEL_KEY_ENV = PROVIDERS[providerId].keyEnv;
+export const MODEL_KEY_ENV = MODEL_CONFIG.main.apiKeyEnv;
 
-const PREAMBLE = `You are dwell, a general-purpose assistant running on a server. People reach you through Feishu chats and a web panel.
+const PREAMBLE = `You are dwell, a general-purpose assistant running on a server. People reach you through Feishu, Telegram, and a web panel.
 - Reply in the language the user writes in; keep technical terms in their original form
 - Lead with the answer or the content; no pleasantries or preamble
 - Keep each reply short (a few sentences); for long material give the key points and expand when asked
@@ -170,10 +180,35 @@ export async function checkGithubToken(token: string, now: Date = new Date()): P
 	return warnings;
 }
 
+/** read 工具的图片输出经视觉模型转描述：主模型无视觉时 read 图片文件不再只是占位符；describer 缺位或失败时保持原行为。 */
+export function makeReadVisionExtension(getDescriber: () => ImageDescriber | null): Extension {
+	return defineExtension({
+		name: "dwell-read-vision",
+		hooks: [
+			hook(ToolTask, {
+				afterTool: async (call: ToolHookCall, result: ToolExecutionResult, _api: HookApi, context: Context) => {
+					if (call.name !== "read" || result.isError || result.output === undefined) return undefined;
+					const image = result.output.find((part) => part.type === "image");
+					if (image === undefined || image.type !== "image") return undefined;
+					const describer = getDescriber();
+					if (describer === null) return undefined;
+					try {
+						const description = await describer(image.data, image.mimeType, context.abortSignal);
+						return { ...result, output: [{ type: "text" as const, text: `Read image file [${image.mimeType}]. Vision description:\n${description}` }] };
+					} catch {
+						return undefined; // 视觉失败回退占位符路径，不阻断 read
+					}
+				},
+			}),
+		],
+	});
+}
+
 const DwellExtension = defineExtension({
 	name: "dwell",
 	sections: [
 		section("preamble", preambleText, { tag: false }),
+		section("runtime", () => `The host runs Node ${process.versions.node}. Prefer the project's existing runtime and validation commands before installing another toolchain. Node can run erasable TypeScript directly with node file.ts; local ESM imports need file extensions, and JSON imports need with { type: "json" }. Verify the final files with the runtime the user will run. Respect the requested output boundary, including files and caches created by validation commands.`, { tag: false }),
 		// 时间感知：粒度到天，一天只变一次，避免每轮重写 pi.system 打掉 prompt cache；相对时间交给 dwell.schedule 的 delayMinutes
 		section("date", () => `Current date: ${currentDateLine(DWELL_TZ)}.`, { tag: false }),
 	],
@@ -192,51 +227,168 @@ export function currentDateLine(tz: string, at: Date = new Date()): string {
 }
 
 function providerModels() {
-	const { keyEnv, make } = PROVIDERS[providerId];
-	const key = process.env[keyEnv];
-	if (key === undefined || key === "") throw new Error(`${keyEnv} 未设置（DWELL_PROVIDER=${providerId} 需要该凭证）`);
-	// key 预置进 credential store（优先于 env 解析），随后 process.env 可清理
-	const credential = { type: "api_key" as const, key };
-	const models = createModels({
-		credentials: {
-			read: async (id: string) => (id === providerId ? credential : undefined),
-			list: async () => [],
-			modify: async (_id: string, fn: (current: typeof credential | undefined) => Promise<typeof credential | undefined>) => await fn(credential),
-			delete: async () => {},
-		},
-	});
-	models.setProvider(make());
-	return models;
+	return createModelClient(MODEL_CONFIG.main, process.env[MODEL_KEY_ENV] ?? "").models;
 }
 
-export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void): Promise<Harness> {
+const budgetsByHarness = new WeakMap<Harness, ReturnType<typeof makeBudgetController>>();
+export const runtimeBudgets = (harness: Harness): ReturnType<typeof makeBudgetController> | undefined => budgetsByHarness.get(harness);
+const telemetryByHarness = new WeakMap<Harness, RuntimeTelemetry>();
+export const runtimeTelemetry = (harness: Harness): RuntimeTelemetry | undefined => telemetryByHarness.get(harness);
+
+function runBudgetLimits(): Partial<BudgetLimits> {
+	const limits: Partial<BudgetLimits> = {};
+	for (const [name, key, scale] of [
+		["DWELL_RUN_MODEL_LIMIT", "modelAdmissions", 1],
+		["DWELL_RUN_TOOL_LIMIT", "toolAdmissions", 1],
+		["DWELL_RUN_TIMEOUT_MINUTES", "executionMs", 60_000],
+	] as const) {
+		const raw = process.env[name];
+		if (raw === undefined) continue;
+		const value = Number(raw);
+		if (!Number.isSafeInteger(value) || value <= 0 || !Number.isSafeInteger(value * scale)) throw new Error(`${name} 必须为正整数`);
+		limits[key] = value * scale;
+	}
+	return limits;
+}
+
+/** A writable endpoint configuration could redirect captured credentials after a restart. */
+export async function checkModelConfigBoundary(path: string, writableRoots: readonly string[] = [DATA_DIR]): Promise<void> {
+	const target = await realpath(path);
+	for (const root of [...writableRoots, tmpdir(), "/tmp", "/var/tmp"]) {
+		let base: string;
+		try { base = await realpath(root); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			base = resolve(root);
+		}
+		if ([resolve(path), target].some((file) => [resolve(root), base].some((dir) => file === dir || file.startsWith(dir + sep)))) throw new Error("模型配置不能放在 agent 可写目录；请使用应用目录、私有状态目录或只读配置目录");
+	}
+}
+
+/** Request checkpoints keep their original model reference even when AgentDoc changes. */
+export async function checkResumableModels(harness: Pick<Harness, "commit">, models: Models): Promise<void> {
+	const references = await harness.commit(async (tx) => {
+		const out: { conversationId: number; taskId: number; provider: string; modelId: string }[] = [];
+		for (const kind of ["pi.generation", "pi.compaction"]) {
+			for (const task of await scanLiveTasks(tx, { kind }, Number.MAX_SAFE_INTEGER)) {
+				if (!("checkpoint" in task.state)) continue;
+				const checkpoint = task.state.checkpoint;
+				if (typeof checkpoint !== "object" || checkpoint === null || Array.isArray(checkpoint)) continue;
+				const model = checkpoint.model;
+				if (typeof model === "object" && model !== null && !Array.isArray(model) && typeof model.provider === "string" && typeof model.modelId === "string") out.push({ conversationId: task.conversationId, taskId: task.id, provider: model.provider, modelId: model.modelId });
+			}
+		}
+		return out;
+	}, BACKGROUND_CONTEXT);
+	for (const reference of references) {
+		if (models.getModel(reference.provider, reference.modelId) === undefined) throw new Error(`会话 ${reference.conversationId} 的任务 ${reference.taskId} 仍引用 ${reference.provider}/${reference.modelId}，当前连接无法恢复；请恢复原模型配置，完成或取消原请求后再切换连接`);
+	}
+}
+
+export async function openDwell(models = providerModels(), extraExtensions: Extension[] = [], onReport?: (error: unknown, info: ReportInfo) => void, canSelfApprove?: CanSelfApprove, restrictFiles?: (conversationId: number) => boolean): Promise<Harness> {
 	const context = BACKGROUND_CONTEXT;
 	await mkdir(DATA_DIR, { recursive: true });
+	await mkdir(DEFAULT_CWD, { recursive: true });
+	await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+	if (MODEL_CONFIG.path !== undefined) await checkModelConfigBoundary(MODEL_CONFIG.path);
+	setModelConfigGuard(MODEL_CONFIG.path);
+	const limits = runBudgetLimits();
 	const storage = await openNodeSqliteStorage(join(DATA_DIR, "dwell.sqlite"));
+	let harness: Harness | undefined;
+	let env: (options: { conversationId?: number; cwd?: string; readScope?: string }) => ReturnType<typeof GuardedExecutionEnv.create>;
+	const budgets = makeBudgetController({
+		limits,
+		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
+	});
+	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown, verificationEnv: async (conversationId, context) => {
+		const agent = await harness!.snapshot(AgentDoc, conversationId as ConversationId, context);
+		if (agent === undefined) throw new Error("Verification conversation is unavailable");
+		const cwd = resolve(agent.cwd ?? DEFAULT_CWD);
+		return env({ cwd, readScope: cwd });
+	} });
+	setApprovalBudgetGetter((conversationId) => budgets.captureApproval(conversationId));
+	setWorkspaceApprovalGetter((conversationId) =>
+		[...pendingApprovals.values()].some((pending) => pending.targets?.includes(conversationId)) ||
+		[...approvalDecisions.values()].some((decision) => decision.deliveryTargets.some((target) => target.conversationId === conversationId && target.status === "pending")),
+	);
 
-	const registry = createRegistry();
-	registry.install(CodingTools);
-	registry.install(DwellExtension);
-	registry.install(makeApprovalExtension());
-	for (const extension of extraExtensions) registry.install(extension);
-	// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
-	const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
-	if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
+	const telemetry = new RuntimeTelemetry();
+	try {
+		const registry = createRegistry();
+		registry.install(CodingTools);
+		registry.install(DwellExtension);
+		registry.install(budgets.extension);
+		registry.install(makeWorkspaceExtension(() => harness));
+		registry.install(makeApprovalExtension(() => harness, canSelfApprove));
+		registry.install(work.extension);
+		for (const extension of extraExtensions) registry.install(extension);
+		// web 工具与主模型 provider 解耦：只要有智谱 key 就注册（计入 GLM Coding Plan 套餐）
+		const webApiKey = process.env.ZAI_CODING_CN_API_KEY;
+		if (webApiKey !== undefined && webApiKey !== "") registry.install(makeWebExtension(webApiKey));
 
-	// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
-	// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
-	const env = async ({ cwd }: { cwd?: string }) => {
-		if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
-		return new NodeExecutionEnv({
-			cwd: resolve(cwd ?? DEFAULT_CWD),
-			...(process.env.DWELL_TOOL_PATH ? { shellEnv: { PATH: process.env.DWELL_TOOL_PATH } } : {}),
-			// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
-			...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
-		});
-	};
-	const harness = await Harness.open(storage, { models, registry, env, onReport }, context);
-	// 不在这里 resume：调用方先把凭证读进闭包并 await scrubSecretEnv() 后再 resume，续跑任务的 bash 才读不到密钥
-	return harness;
+		// DWELL_TOOL_PATH：设置后收窄 bash 工具 shell 的 PATH（如 /usr/bin:/bin），让模型看不到服务器上带凭证的程序；
+		// dwell 自身的飞书收发走进程内 SDK，不受影响。本机开发不设。
+		env = async ({ conversationId, cwd, readScope }) => {
+			if (cwd === undefined) await mkdir(DEFAULT_CWD, { recursive: true });
+			const workspace = resolve(cwd ?? DEFAULT_CWD);
+			const scope = readScope ?? (conversationId !== undefined && restrictFiles?.(conversationId) === true ? workspace : undefined);
+			return GuardedExecutionEnv.create({
+				cwd: workspace,
+				shellEnv: { ...npmCacheEnv(), ...(process.env.DWELL_TOOL_PATH ? { PATH: process.env.DWELL_TOOL_PATH } : {}) },
+				// bash 沙箱：shellPath 指向 bwrap wrapper；shellEnv 的 PATH 经 wrapper 的 --setenv 传进沙箱
+				...(sandboxState.enabled && sandboxState.wrapperPath !== undefined ? { shellPath: sandboxState.wrapperPath } : {}),
+			}, { cwd: workspace, tmp: tmpdir(), state: resolve(STATE_DIR), appRoot: APP_ROOT,
+				data: resolve(DATA_DIR), sqlite: resolve(DATA_DIR, "dwell.sqlite"), ...(scope === undefined ? {} : { readScope: scope }), ...(MODEL_CONFIG.path === undefined ? {} : { modelConfig: MODEL_CONFIG.path }) });
+		};
+		await telemetry.start();
+		harness = await Harness.open(storage, { models, registry, env, onReport, telemetry: telemetry.context, settings: { stream: { maxRetries: 0, deferred: false } },
+			// goal 从常驻提示词摘除：新会话默认隐藏 dwell.work，用户 /goal 后才恢复（存量会话靠 execute 守卫兑底）
+			conversationCreated: async (tx, conversation) => {
+				const agent = await tx.doc(AgentDoc, conversation.id);
+				agent.tools = { remove: ["dwell.work"] };
+			},
+		}, context);
+		telemetryByHarness.set(harness, telemetry);
+		// SDK close listeners run synchronously at shutdown admission and do not await cleanup.
+		harness.subscribeClose(() => telemetry.stop());
+		const telemetryClosed = harness.closed.then(() => telemetry.close());
+		void telemetryClosed.catch(() => {});
+		const closeHarness = harness.close.bind(harness);
+		harness.close = async (closeContext) => {
+			const results = await Promise.allSettled([closeHarness(closeContext), telemetryClosed]);
+			const failure = results.find((result) => result.status === "rejected");
+			if (failure?.status === "rejected") throw failure.reason;
+		};
+		harness.subscribeClose(() => { void work.close(); });
+		budgetsByHarness.set(harness, budgets);
+		await checkResumableModels(harness, models);
+		if (MODEL_CONFIG.path !== undefined) {
+			const roots = await harness.commit(async (tx) => {
+				const out: string[] = [];
+				let cursor: Cursor | undefined;
+				do {
+					const page = await tx.scanConversations({}, 200, cursor);
+					for (const conversation of page.items) {
+						const agent = await tx.doc(AgentDoc, conversation.id);
+						if (agent.cwd !== undefined) out.push(agent.cwd);
+					}
+					cursor = page.next;
+				} while (cursor !== undefined);
+				return out;
+			}, context);
+			await checkModelConfigBoundary(MODEL_CONFIG.path, roots);
+		}
+		await budgets.attach(harness);
+		await work.attach(harness);
+		await registerLegacyWorkspaces(harness);
+		// The caller captures credentials and scrubs the environment before resuming tasks.
+		return harness;
+	} catch (error) {
+		await Promise.allSettled([budgets.close(), work.close()]);
+		await (harness === undefined ? storage.close(context) : harness.close(context)).catch(() => {});
+		await telemetry.close().catch(() => {});
+		throw error;
+	}
 }
 
 /** taskGraph 中有活跃前台任务的会话集合。节点状态在 state.status（不是 status——两个已上线修复曾因读错字段静默失效），用官方类型防再错。
@@ -263,19 +415,17 @@ export function runConversations(graph: TaskGraph | undefined): Set<number> {
 	return running;
 }
 
-/** 图片理解 subagent：glm-5.3 无视觉，图片交 flash 单发单答，描述文本进主上下文（不进 checkpoint）。 */
-export const VISION_MODEL_ID = process.env.DWELL_VISION_MODEL ?? "glm-5.3-flash";
+export const VISION_MODEL_ID = MODEL_CONFIG.vision?.model;
 
-export type ImageDescriber = (base64: string, mimeType: string) => Promise<string>;
+export type ImageDescriber = (base64: string, mimeType: string, signal?: AbortSignal) => Promise<string>;
 
-/** 有 ZAI key 且 catalog 有该模型时返回描述函数；否则 null（图片降级为落盘+提示）。 */
-export function makeImageDescriber(): ImageDescriber | null {
-	const key = process.env.ZAI_CODING_CN_API_KEY;
-	if (key === undefined || key === "") return null;
-	const models = providerModels();
-	const model = models.getModel("zai-coding-cn", VISION_MODEL_ID);
-	if (model === undefined) return null;
-	return async (base64, mimeType) => {
+/** A missing key disables vision; an explicitly configured unusable model fails startup. */
+export function makeImageDescriber(connection: ResolvedModelConnection | undefined = MODEL_CONFIG.vision, key = connection === undefined ? undefined : process.env[connection.apiKeyEnv]): ImageDescriber | null {
+	if (connection === undefined || key === undefined || key === "") return null;
+	if (!connection.metadata.input.includes("image")) throw new Error(`视觉模型 ${connection.model} 不支持图片输入；请配置支持图片的连接`);
+	const { models, model } = createModelClient(connection, key);
+	return async (base64, mimeType, signal) => {
+		signal?.throwIfAborted();
 		const context = normalizeContext({
 			messages: [
 				{
@@ -288,7 +438,9 @@ export function makeImageDescriber(): ImageDescriber | null {
 				},
 			],
 		});
-		const answer = await models.completeSimple(model, context, { maxTokens: 1024 });
+		// Each description is an independent one-shot conversation, including any provider retries.
+		const answer = await models.completeSimple(model, context, { sessionId: randomUUID(), maxTokens: 1024, signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal === undefined ? [] : [signal])]) });
+		signal?.throwIfAborted();
 		if (answer.errorMessage !== undefined) throw new Error(answer.errorMessage);
 		const text = answer.content.filter((part) => part.type === "text").map((part) => part.text).join("");
 		return text.trim() !== "" ? text : "(the model returned no description)";

@@ -117,6 +117,24 @@ test("panel 会话（无对应 chat）给明确提示", async () => {
 	assert.match(out(r as never), /panel task.*no Feishu chat/);
 });
 
+test("Telegram conversations cannot read Feishu history even as an administrator", async () => {
+	let clientAccesses = 0;
+	const deps: LarkDeps = {
+		getClient: () => { clientAccesses++; throw new Error("must not access Feishu"); },
+		getDirectory: () => undefined,
+		chatOf: () => undefined,
+		destinationOf: () => ({ kind: "telegram", botId: "1", chatId: "2" }),
+		senderOf: () => "tg:123",
+		isAdmin: () => true,
+	};
+	for (const args of [{}, { chat: "oc_other" }, { around: "om_other" }]) {
+		const r = await toolOf(deps).execute(args, api, context);
+		assert.equal((r as { isError?: boolean }).isError, true);
+		assert.match(out(r as never), /Feishu chat history is unavailable in Telegram/);
+	}
+	assert.equal(clientAccesses, 0);
+});
+
 test("API 错误返回 isError", async () => {
 	const deps = {
 		getClient: () => ({
@@ -234,124 +252,20 @@ test("image：表情包/非图片/无描述器/消息不存在各给诚实提示
 	await run(undefined, async () => "", /does not exist or the bot cannot read it/);
 });
 
-// ── dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话 ──
-
-function sendDeps(noChat = false) {
-	const inputs: { id: number; input: SendInput }[] = [];
-	return {
-		inputs,
-		deps: {
-			getClient: () => undefined,
-			getDirectory: () => undefined,
-			chatOf: () => "oc_current",
-			sendToChat: async (id: number, input: SendInput) => {
-				inputs.push({ id, input });
-				return noChat ? undefined : { messageId: "om_new" };
-			},
-		} as LarkDeps,
-	};
-}
-
-function sendToolOf(deps: LarkDeps) {
-	const tool = makeLarkExtension(deps).tools?.find((t) => t.name === "dwell.lark.send");
-	if (tool === undefined) throw new Error("工具未注册");
-	return tool;
-}
-
-const sendApi = (cwd: string) => ({ conversationId: 42, env: { cwd } }) as never;
-
-async function tempCwd(t: import("node:test").TestContext): Promise<string> {
-	const cwd = await mkdtemp(join(tmpdir(), "dwell-lark-send-"));
-	t.after(async () => {
-		await rm(cwd, { recursive: true, force: true });
+test("Telegram conversations cannot look up Feishu images even as an administrator", async () => {
+	let clientAccesses = 0;
+	const extension = makeLarkExtension({
+		getClient: () => { clientAccesses++; throw new Error("must not access Feishu"); },
+		getDirectory: () => undefined,
+		chatOf: () => undefined,
+		destinationOf: () => ({ kind: "telegram", botId: "1", chatId: "2" }),
+		senderOf: () => "tg:123",
+		isAdmin: () => true,
 	});
-	return cwd;
-}
-
-test("send：PNG 魔数走图片消息", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "chart.png"), PNG);
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: "chart.png" }, sendApi(cwd), context);
-	assert.match(out(r as never), /Sent image chart\.png/);
-	assert.equal(inputs.length, 1);
-	assert.equal(inputs[0].id, 42);
-	assert.ok("image" in inputs[0].input && Buffer.isBuffer(inputs[0].input.image.source));
-});
-
-test("send：普通文本走文件消息且 fileName 正确（绝对路径入参）", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "report.md"), "# 报告");
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: join(cwd, "report.md") }, sendApi(cwd), context);
-	assert.match(out(r as never), /Sent file report\.md/);
-	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "report.md" && Buffer.isBuffer(inputs[0].input.file.source));
-});
-
-test("send：空文件拒", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "empty.bin"), "");
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: "empty.bin" }, sendApi(cwd), context);
-	assert.match(out(r as never), /does not allow sending empty files/);
-	assert.equal(inputs.length, 0);
-});
-
-test("send：越界路径拒且不调 sendToChat", async (t) => {
-	const cwd = await tempCwd(t);
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: "../outside.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /denied:/);
-	assert.equal(inputs.length, 0);
-});
-
-test("send：sendToChat 返回 undefined（飞书未连接）与缺 env.cwd 各给提示", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "a.txt"), "x");
-	let r = await sendToolOf(sendDeps(true).deps).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /Feishu is not connected; send failed/);
-	r = await sendToolOf(sendDeps().deps).execute({ path: "a.txt" }, { conversationId: 42 } as never, context);
-	assert.match(out(r as never), /has no working directory/);
-});
-
-test("send：超过 30MB 拒（稀疏文件，stat 阶段拦截不读入内存）", async (t) => {
-	const cwd = await tempCwd(t);
-	const big = join(cwd, "big.bin");
-	const handle = await open(big, "w");
-	await handle.truncate(31 * 1024 * 1024);
-	await handle.close();
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: "big.bin" }, sendApi(cwd), context);
-	assert.match(out(r as never), /exceeds the 30MB limit/);
-	assert.equal(inputs.length, 0);
-});
-
-test("send：超过 10MB 的图片改走文件消息", async (t) => {
-	const cwd = await tempCwd(t);
-	const big = join(cwd, "huge.png");
-	await writeFile(big, PNG);
-	const handle = await open(big, "r+");
-	await handle.truncate(11 * 1024 * 1024);
-	await handle.close();
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf(deps).execute({ path: "huge.png" }, sendApi(cwd), context);
-	assert.match(out(r as never), /Sent file huge\.png/);
-	assert.ok("file" in inputs[0].input && inputs[0].input.file.fileName === "huge.png");
-});
-
-test("send：panel 任务返回 panel 下载提示且不调 sendToChat", async (t) => {
-	const cwd = await tempCwd(t);
-	await writeFile(join(cwd, "a.txt"), "x");
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "a.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /Offered as a download in the panel: a\.txt/);
-	assert.equal(inputs.length, 0);
-});
-
-test("send：panel 任务越界路径仍被拒", async (t) => {
-	const cwd = await tempCwd(t);
-	const { deps, inputs } = sendDeps();
-	const r = await sendToolOf({ ...deps, chatOf: () => undefined }).execute({ path: "../outside.txt" }, sendApi(cwd), context);
-	assert.match(out(r as never), /denied:/);
-	assert.equal(inputs.length, 0);
+	const tool = extension.tools?.find((tool) => tool.name === "dwell.lark.image");
+	assert.ok(tool);
+	const r = await tool.execute({ message: "om_other" }, api, context);
+	assert.equal((r as { isError?: boolean }).isError, true);
+	assert.match(out(r as never), /Feishu image lookup applies to Feishu messages only/);
+	assert.equal(clientAccesses, 0);
 });

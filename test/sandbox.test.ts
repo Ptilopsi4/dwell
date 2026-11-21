@@ -3,7 +3,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { probeSandbox, selfTestScript, wrapperScript } from "../src/sandbox.ts";
+import { probeSandbox, requireSandbox, sandboxMode, selfTestScript, wrapperScript } from "../src/sandbox.ts";
+
+test("sandbox mode defaults to required in production and rejects unsupported policy", () => {
+	assert.equal(sandboxMode({ NODE_ENV: "production" }), "required");
+	assert.equal(sandboxMode({}), "auto");
+	for (const mode of ["required", "auto", "off"] as const) assert.equal(sandboxMode({ NODE_ENV: "production", DWELL_SANDBOX: mode }), mode);
+	assert.throws(() => sandboxMode({ DWELL_SANDBOX: "false" }), /DWELL_SANDBOX/);
+	assert.throws(() => requireSandbox("required", { enabled: false, reason: "probe failed" }), /拒绝启动.*probe failed/);
+	requireSandbox("required", { enabled: true, wrapperPath: "/synthetic/wrapper" });
+	requireSandbox("auto", { enabled: false });
+	requireSandbox("off", { enabled: false });
+});
 
 test("wrapperScript：exec 前缀与关键挂载参数", () => {
 	const script = wrapperScript("/usr/bin/bwrap", ["/etc", "/opt/node"]);

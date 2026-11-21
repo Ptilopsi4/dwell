@@ -5,7 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { AssistantEntry } from "@earendil-works/pi-durable";
-import { MODEL, MODEL_KEY_ENV, openDwell } from "./harness.ts";
+import { MODEL, MODEL_KEY_ENV, openDwell, scrubSecretEnv } from "./harness.ts";
 
 const prompt = process.argv[2] ?? "Introduce yourself in one sentence, then list the files in your current working directory.";
 
@@ -24,10 +24,12 @@ if (process.env[MODEL_KEY_ENV]) {
 }
 const context = BACKGROUND_CONTEXT;
 try {
-	// openDwell 不再内部 resume（凭证擦除时序，见 index.ts main）；冒烟直接开跑
+	// openDwell 不再内部 resume（凭证擦除时序，见 index.ts main）；冒烟直接开跑。
+	// 装配已把凭证读进闭包，resume 前擦除 shell 可读面的密钥——真模型路径的 bash 工具与生产同一安全基线
+	await scrubSecretEnv();
 	harness.resume();
 	const root = await harness.root(context, { agent: { model } });
-	const submission = await root.submit({ type: "input", content: prompt, requestId: `smoke-${Date.now()}` }, context);
+	const submission = await root.submit({ type: "input", content: prompt, requestId: `smoke-${Date.now()}`, entry: { kind: "chat.message", data: { sender: "smoke", via: "panel" } } }, context);
 	const settled = await submission.wait(context);
 	if (settled.status === "done" && settled.type === "input") {
 		const entry = await root.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);

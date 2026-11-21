@@ -1,0 +1,23 @@
+{
+  "main": {
+    "api": "openai-completions",
+    "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+    "model": "deepseek-v4.1-flash",
+    "apiKeyEnv": "OPENCODE_GO_API_KEY",
+    "name": "DeepSeek V4.1 Flash via OpenCode Go",
+    "reasoning": true,
+    "input": ["text", "image"],
+    "contextWindow": 1000000,
+    "maxTokens": 8192,
+    "compat": {
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "supportsStrictMode": true,
+      "maxTokensField": "max_tokens",
+      "requiresReasoningContentOnAssistantMessages": true,
+      "thinkingFormat": "deepseek"
+    },
+    "headers": { "User-Agent": "dwell/0.1.0" },
+    "cost": null
+  }
+}

@@ -1,23 +1,20 @@
-// 飞书会话工具（dwell.lark.read/image/send）：SDK Client 直调或复用 index 的发送链路，显式优于隐式。
+// 飞书会话工具（dwell.lark.read/image）：SDK Client 直调，显式优于隐式。
 // 依赖运行时对象（channel/directory/sessions 在 main 中后于 harness 装配），用 getter 延迟绑定。
-import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, resolve } from "node:path";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Directory } from "../feishu/directory.ts";
-import type { SendInput } from "../feishu/channel.ts";
 import type { ImageDescriber } from "../harness.ts";
 import { sniffImageMime } from "../media.ts";
-import { sendPathViolation } from "./approval.ts";
+import type { ConversationDestination } from "../pipeline.ts";
 
 /** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。
- *  chatOf/senderOf/sendToChat 的实现（index 装配）内部先经 scopeOf 归并到父线——
- *  否则后台子会话的 lark 工具会把自己当成 panel 任务（无 chat）：send 谎报已交付、read 拒读、跨会话门槛误拒。 */
+ *  chatOf/senderOf 的实现（index 装配）内部先经 scopeOf 归并到父线——
+ *  否则后台子会话的 lark 工具会把自己当成 panel 任务（无 chat）：read 拒读、跨会话门槛误拒。 */
 export type LarkDeps = {
 	getClient: () => { im: { v1: { message: unknown; messageResource?: unknown } } } | undefined;
 	getDirectory: () => Directory | undefined;
 	chatOf: (conversationId: number) => string | undefined;
-	/** 视觉描述器（harness 装配；无 ZAI key 时为 null，工具诚实提示） */
+	/** 视觉描述器（harness 装配；无视觉连接时为 null，工具诚实提示） */
 	getDescriber?: () => ImageDescriber | null;
 	/** 当前 run 发起者是否管理员：跨会话读取（chat/around 指向别的会话）仅管理员放行 */
 	isAdmin?: (openId: string) => boolean;
@@ -25,8 +22,7 @@ export type LarkDeps = {
 	senderOf?: (conversationId: number) => string | undefined;
 	/** 自家 app 的 app_id：app 发的消息 sender.id 即 app_id，用来区分自家回复卡与其他 bot 的卡 */
 	getSelfAppId?: () => string | undefined;
-	/** 发消息到会话所在 chat（复用 index 的锚点/话题规则）；返回 undefined = 当前会话没有飞书 chat（panel 任务） */
-	sendToChat?: (conversationId: number, input: SendInput) => Promise<{ messageId: string } | undefined>;
+	destinationOf?: (conversationId: number) => ConversationDestination;
 };
 
 /** message.list/get 返回条目的最小形状。 */
@@ -169,7 +165,7 @@ function makeReadTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.read",
 		description:
-			"Read Feishu chat history (the current chat by default). Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages from other bots are returned with their extracted text; dwell's own reply cards show only a placeholder (normally their content is in your context) unless you pass ownCards: true, e.g. after compaction or when the user asks what an earlier card said. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
+			"Read Feishu chat history (the current chat by default). Feishu conversations only — this tool is not applicable in Telegram chats. Use it when the user refers to something said earlier that is not in your context, to review a group chat, or to look at other task threads. Returns messages oldest first, with sender and message id. To expand the context around one message, call without arguments to get the list, then pass the returned om_ id as `around` (ids appear only in this tool's output; users cannot see them). Card messages from other bots are returned with their extracted text; dwell's own reply cards show only a placeholder (normally their content is in your context) unless you pass ownCards: true, e.g. after compaction or when the user asks what an earlier card said. Reading chats other than the current one (chat/around pointing elsewhere) is admin-only.",
 		parameters: Type.Object({
 			count: Type.Optional(Type.Number({ description: "Number of messages to read (default 20, max 50)" })),
 			around: Type.Optional(Type.String({ description: "Message id (starts with om_): read half before and half after it; take it from this tool's previous output" })),
@@ -180,6 +176,9 @@ function makeReadTool(deps: LarkDeps) {
 		replay: "safe",
 		executionMode: "sequential",
 		async execute(args, api) {
+			if (deps.destinationOf?.(api.conversationId as number).kind === "telegram") {
+				return { output: [{ type: "text", text: "Feishu chat history is unavailable in Telegram conversations." }], isError: true };
+			}
 			const count = Math.min(Math.max(Math.trunc(args.count ?? 20), 1), 50);
 			const current = deps.chatOf(api.conversationId as number);
 			// 跨会话读取门槛：bot 在内的任意会话都能列消息，但非本人所在的会话等于越权窥探，仅管理员放行
@@ -252,17 +251,18 @@ function makeImageTool(deps: LarkDeps) {
 	return defineTool({
 		name: "dwell.lark.image",
 		description:
-			"Understand the content of a Feishu image message. Input a message id (starts with om_, from dwell.lark.read output); the tool downloads the image and returns a description (subject, transcribed text, chart data). Typical case: the user asks what something is or how to solve it, but the image is not in your context. Call dwell.lark.read first, find the message id of the [image] placeholder, then call this tool. Only image messages are supported; stickers are not.",
+			"Understand the content of a Feishu image message. Feishu conversations only — not applicable in Telegram chats. Input a message id (starts with om_, from dwell.lark.read output); the tool downloads the image and returns a description (subject, transcribed text, chart data). Typical case: the user asks what something is or how to solve it, but the image is not in your context. Call dwell.lark.read first, find the message id of the [image] placeholder, then call this tool. Only image messages are supported; stickers are not.",
 		parameters: Type.Object({
 			message: Type.String({ description: "Image message id (starts with om_), from dwell.lark.read output" }),
 		}),
 		replay: "safe",
 		executionMode: "sequential",
 		async execute(args, api) {
+			if (deps.destinationOf?.(api.conversationId as number).kind === "telegram") return text("Feishu image lookup applies to Feishu messages only. An image the user sent directly already carries its visual description in your context.", true);
 			const client = deps.getClient();
 			if (client === undefined) return text("Feishu channel is not ready", true);
 			const describer = deps.getDescriber?.() ?? null;
-			if (describer === null) return text("No vision model is configured (ZAI_CODING_CN_API_KEY is required), so the image cannot be recognized.", true);
+			if (describer === null) return text("No vision model is configured, so the image cannot be recognized.", true);
 			try {
 				const message = client.im.v1.message as {
 					get: (payload: { params?: { with_sender_name?: boolean }; path: { message_id: string } }) => Promise<{ code?: number; msg?: string; data?: { items?: MessageItem[] } }>;
@@ -300,67 +300,15 @@ function makeImageTool(deps: LarkDeps) {
 	});
 }
 
-// 飞书上传接口限额：图片 10MB、文件 30MB、不允许空文件
-const SEND_IMAGE_MAX = 10 * 1024 * 1024;
-const SEND_FILE_MAX = 30 * 1024 * 1024;
-
-/** dwell.lark.send：把会话 cwd 内的文件/图片发回当前会话的飞书聊天（agent 生成物交给用户的唯一出口）。 */
-function makeSendTool(deps: LarkDeps) {
-	const text = (t: string, isError = false) => ({ output: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
-	return defineTool({
-		name: "dwell.lark.send",
-		description:
-			"Send a file from your working directory to the current Feishu chat. Typical case: the user wants a report, chart, data export, or anything else you saved to disk. Limits: only files inside this session's working directory (path checks block .. and symlink escapes); only to the current chat, never to other chats or outside contacts; images (png/jpeg/gif/webp) up to 10MB, other files up to 30MB, no empty files. In panel tasks the file is offered as a download in the panel. When the user wants a file you produced, send it with this tool instead of replying with a server path.",
-		parameters: Type.Object({
-			path: Type.String({ description: "Path of the file to send (relative to the working directory, or absolute)" }),
-		}),
-		executionMode: "sequential",
-		async execute(args, api) {
-			const cwd = api.env?.cwd;
-			if (cwd === undefined) return text("This conversation has no working directory, so the file cannot be located.", true);
-			const send = deps.sendToChat;
-			if (send === undefined) return text("The send path is not wired up, so the file cannot be sent.", true);
-			// panel 任务（无对应 chat）不发飞书，文件由 panel 工具行下载；与飞书发送共用同一套校验
-			const panelTask = deps.chatOf(api.conversationId as number) === undefined;
-			// 路径治理先于 stat：越界路径一律同一拒绝，不暴露 cwd 外文件是否存在
-			const violation = await sendPathViolation(args.path, cwd);
-			if (violation !== undefined) return text(violation, true);
-			const fileName = basename(resolve(cwd, args.path));
-			try {
-				// 读判定过的真实路径而非字面路径，缩小「判定后换软链」的窗口
-				const target = await realpath(resolve(cwd, args.path));
-				const st = await stat(target);
-				if (!st.isFile()) return text(`Not a regular file: ${args.path}`, true);
-				if (st.size === 0) return text(`File ${fileName} is empty (0 bytes); Feishu does not allow sending empty files.`, true);
-				if (st.size > SEND_FILE_MAX) return text(`File ${fileName} exceeds the 30MB limit (${(st.size / 1024 / 1024).toFixed(1)}MB) and cannot be sent.`, true);
-				if (panelTask) return text(`Offered as a download in the panel: ${fileName} (the user clicks download on the tool row)`);
-				const buffer = await readFile(target);
-				const isImage = sniffImageMime(buffer) !== null && buffer.length <= SEND_IMAGE_MAX;
-				const input: SendInput = isImage
-					? { image: { source: buffer } }
-					: { file: { source: buffer, fileName } };
-				const sent = await send(api.conversationId as number, input);
-				if (sent === undefined) return text("Feishu is not connected; send failed.", true);
-				return text(`Sent ${isImage ? "image" : "file"} ${fileName} to the current chat.`);
-			} catch (err) {
-				// axios 外壳只报 HTTP 状态，飞书真实 code/msg 在 response.data 里
-				const data = (err as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
-				if (data?.code !== undefined) return text(`Send failed: Feishu API ${data.code}: ${data.msg ?? ""}`, true);
-				return text(`Send failed: ${err instanceof Error ? err.message : String(err)}`, true);
-			}
-		},
-	});
-}
-
 /** 装配：deps 为运行时访问器（channel/directory/sessions 后于 harness 初始化）。 */
 export function makeLarkExtension(deps: LarkDeps) {
 	return defineExtension({
 		name: "dwell-lark",
-		tools: [makeReadTool(deps), makeImageTool(deps), makeSendTool(deps)],
+		tools: [makeReadTool(deps), makeImageTool(deps)],
 		sections: [
 			section(
 				"lark",
-				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. When the user wants a file you produced (report, chart, data export), send it with dwell.lark.send instead of replying with a server path.",
+				() => "When the user refers to earlier Feishu messages (\"above\", \"before\", \"what we discussed yesterday\") that are missing from your context, read the chat history with dwell.lark.read (the 20 most recent messages of the current chat by default; the output carries message ids you can pass as `around` to expand the context). [image] placeholders in the history can be expanded: when the user asks about an image that is not in your context, pass that message id to dwell.lark.image to get a description. dwell.lark.read and dwell.lark.image apply to Feishu messages only and do nothing in Telegram chats — an image a Telegram user sends you already arrives with its visual description in your context. Deliver files with dwell.send.",
 				{ tag: false },
 			),
 		],
