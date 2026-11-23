@@ -138,7 +138,7 @@ const readOnlyTools = new Set(["read", "dwell.web.search", "dwell.web.fetch", "d
 export const readOnlyWorkspaceTool = (name: string): boolean => readOnlyTools.has(name);
 
 function mutatesWorkspace(name: string, args: Record<string, unknown>): boolean {
-	return name === "write" || name === "edit" || name === "bash" || (name === "dwell.proc" && args.action === "start") || (name === "dwell.work" && args.action === "verify");
+	return name === "write" || name === "edit" || name === "bash" || (name === "dwell.proc" && args.action === "start");
 }
 
 export function makeWorkspaceExtension(getHarness: () => Harness | undefined): Extension {

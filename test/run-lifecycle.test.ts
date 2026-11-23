@@ -162,6 +162,26 @@ test("approval Reporter capacity failures remain pending and retry after capacit
 	} finally { await s.harness.close(context); }
 });
 
+test("a legacy child marked stopped only in the workspace doc is refused as an approval target instead of retrying forever", { timeout: 10_000 }, async () => {
+	const s = await setup("legacy-stopped", Array.from({ length: 4 }, done), false);
+	try {
+		const parent = await s.conversation();
+		const child = await parent.commit(async (tx) => {
+			const anchor = await tx.createTask(bg.BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
+			const conversation = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+			(await tx.doc(bg.BackgroundDoc, parent.id)).agents["legacy"] = { conversationId: conversation.id };
+			// 遗留隔离子会话：WorkspaceDoc 标 stopped，但从未经过 dwell.task stop（无 StopDoc 记录）
+			(await tx.doc(workspace.WorkspaceDoc)).children[String(conversation.id)] = { parent: parent.id, mode: "read", workspace: directory, stopped: true, stopComplete: true };
+			return conversation.id;
+		}, context);
+		approval.pendingApprovals.set(`${parent.id}:alice`, { command: "rm -rf output", match: "rm", trigger: "alice", via: "panel", targets: [child] });
+		const decision = (await approval.takeDecision(`${parent.id}:alice`, "approve", 10))!;
+		const deliverer = bg.makeBackgroundDeliverer(s.deps, () => s.harness);
+		const deliver = async () => await deliverer.deliver(parent.id, child, "approved", { deliveryId: decision.id, sender: "alice", via: "panel", action: "approve" }) ? "accepted" as const : "unavailable" as const;
+		assert.deepEqual(await approval.drainApprovalDecisions(deliver, decision.id), { pending: 0, unavailable: 1 });
+	} finally { await s.harness.close(context); }
+});
+
 test("restart after stop intent aborts old child work before any model request and finishes cleanup", { timeout: 10_000 }, async () => {
 	const s = await setup("stop-restart", [done(), done()], false);
 	try {
