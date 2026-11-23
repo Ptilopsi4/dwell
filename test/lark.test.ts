@@ -5,7 +5,7 @@ import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { makeLarkExtension, type LarkDeps } from "../src/ext/lark.ts";
-import type { SendInput } from "../src/feishu/channel.ts";
+import { downloadMessageResource, type LarkChannel, type SendInput } from "../src/feishu/channel.ts";
 
 type Item = { message_id: string; msg_type?: string; create_time?: string; chat_id?: string; deleted?: boolean; body?: { content?: string }; sender?: { id?: string; sender_type?: string }; senderName?: string };
 
@@ -239,6 +239,26 @@ test("image：下载图片并返回描述", async () => {
 	const r = await imageToolOf(deps).execute({ message: "om_img" }, api, context);
 	assert.match(out(r as never), /一张测试图/);
 	assert.ok(calls.includes("res:om_img:img_v2_k"), "走消息资源接口下载");
+});
+
+test("image：超过 10MB 的图在流式读取阶段即拒绝，不整图缓冲也不调用视觉", async () => {
+	const { deps } = imageDeps({ message_id: "om_big", msg_type: "image", body: { content: JSON.stringify({ image_key: "img_big" }) } });
+	let described = 0;
+	const base = deps.getClient()!;
+	const client = { ...base, im: { ...base.im, v1: { ...base.im.v1, messageResource: { get: async () => ({ getReadableStream: () => (async function* () { for (let i = 0; i < 12; i++) yield Buffer.alloc(1024 * 1024, 0x89); })() }) } } } } as unknown as typeof base;
+	const r = await imageToolOf({ ...deps, getClient: () => client, getDescriber: () => async () => { described++; return "x"; } }).execute({ message: "om_big" }, api, context);
+	assert.match(out(r as never), /larger than 10MB/);
+	assert.equal(described, 0);
+});
+
+test("downloadMessageResource：流式计数超过上限即停止读取并抛错，未超限完整返回", async () => {
+	const chunk = Buffer.alloc(1024 * 1024, 1);
+	let pulled = 0;
+	const stream = (count: number) => ({ getReadableStream: () => (async function* () { for (let i = 0; i < count; i++) { pulled++; yield chunk; } })() });
+	const channel = (count: number) => ({ rawClient: { im: { v1: { messageResource: { get: async () => stream(count) } } } } }) as unknown as LarkChannel;
+	await assert.rejects(downloadMessageResource(channel(30), "om_1", "file_1", "file", 5 * 1024 * 1024), /超过 5MB 上限/);
+	assert.ok(pulled <= 6, `reading must stop at the cap, pulled ${pulled}`);
+	assert.equal((await downloadMessageResource(channel(2), "om_1", "file_1", "file", 5 * 1024 * 1024)).length, 2 * 1024 * 1024);
 });
 
 test("image：表情包/非图片/无描述器/消息不存在各给诚实提示", async () => {
