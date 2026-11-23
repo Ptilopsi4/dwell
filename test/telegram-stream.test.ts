@@ -128,7 +128,7 @@ for (const name of ["dwell.work", "dwell.task.wait"]) test(`cold recovery includ
 	await presenter.stop();
 	const summary = presenter.summary({ docs: {}, entries: [
 		{ id: 50 },
-		{ id: 51, model: [{ role: "assistant", content: [{ type: "toolCall", id: "terminal", name, arguments: name === "dwell.work" ? { action: "ready" } : {} }] }] },
+		{ id: 51, model: [{ role: "assistant", content: [{ type: "toolCall", id: "terminal", name, arguments: name === "dwell.work" ? { progress: "Done" } : {} }] }] },
 		{ id: 52, model: [{ role: "user", content: "Queued input during the tool round" }] },
 		{ id: 53, model: [{ role: "toolResult", toolCallId: "terminal", toolName: name, isError: false, durationMs: 125 }] },
 		{ id: 54, model: [{ role: "assistant", content: [{ type: "toolCall", id: "terminal", name, arguments: { action: "status" } }] }] },
