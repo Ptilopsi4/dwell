@@ -39,7 +39,7 @@ test("main Telegram host guidance uses the real username and preserves admission
 			assert.match(text, /私聊：直接发送文字、图片或文件/);
 			assert.match(text, /\/ask@AcceptanceBot 内容，或回复 @AcceptanceBot 的消息/);
 			assert.match(text, /\/new：开启新任务线，原任务线与历史消息保留/);
-			assert.match(text, /\/goal \[描述\]：开启目标模式并解绑旧目标；带描述时直接建立该目标/);
+			assert.match(text, /\/goal <描述>：建立新目标并开始执行（旧目标解绑为历史；线主\/管理员）/);
 			assert.match(text, /\/cancel：中止当前任务，不会取消后台任务/);
 			assert.match(text, /\/approve \[分钟\]：开启危险命令批准窗口，默认 10 分钟/);
 			assert.match(text, /\/deny：关闭批准窗口并取消待审请求/);

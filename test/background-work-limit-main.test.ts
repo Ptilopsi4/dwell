@@ -11,7 +11,6 @@ import { mainFixture, message, posixOnly } from "./telegram-main-fixture.ts";
 
 for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram reports a persisted shared ${reason} after recovering a waiting child without another model request`, { ...posixOnly, timeout: 60_000 }, async (t) => {
 	const f = await mainFixture(t, [
-		{ tool: "dwell.work", arguments: { action: "start", goal: "Inspect isolated material", acceptance: ["Report the inspection"] }, match: "Work-limit delivery acceptance" },
 		{ tool: "dwell.task", arguments: { action: "start", name: "reader", message: "worker:work-limit-fixture" }, match: "Work-limit delivery acceptance" },
 		{ tool: "dwell.task.wait", arguments: {}, match: "Work-limit delivery acceptance" },
 		{ text: "The child was interrupted before completing.", wait: "work-limit-child", match: "worker:work-limit-fixture" },
@@ -19,16 +18,15 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
-		f.updates([message(900, "/goal@AcceptanceBot", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
+		f.updates([message(900, "/goal@AcceptanceBot Work-limit delivery acceptance", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "目标已建立，开始执行…");
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 901);
-		f.updates([message(901, "/ask@AcceptanceBot Work-limit delivery acceptance", { chat: { id: -300, type: "supergroup" }, message_thread_id: 9 })]);
 		await f.until((event) => event.method === "model.waiting" && event.body.token === "work-limit-child");
 		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith(BACKGROUND_WAIT_NOTICE));
-		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:901" && event.body.state === "done");
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-goal:tg-update:100:900" && event.body.state === "done");
 		await f.stop();
 		const saved = await f.snapshot();
-		const conversationId = saved.inbox.inputs["tg-update:100:901"]!.conversationId;
+		const conversationId = saved.inbox.inputs["tg-goal:tg-update:100:900"]!.conversationId;
 		// Seed only this stopped fixture's state; admission-limit behavior is covered separately with real controllers.
 		const fixture = await Harness.open(await openNodeSqliteStorage(join(f.directory, "data", "dwell.sqlite")), { models: createModels(), registry: createRegistry() }, context);
 		try {
@@ -50,7 +48,7 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`main Telegram
 		assert.equal(notice.body.message_thread_id, 9);
 		const completed = await f.until((event) => event.method === "telegram.output" && String(event.body.id).startsWith("tg-reply:") && event.body.state === "done", restart);
 		assert.equal(f.requests("model").length, providerCalls, "Neither the stopped child nor its parent report may call the provider again");
-		assert.equal(f.requests("telegram", "sendMessage").length, 3, "Goal-mode reply, the recovered waiting answer, and one terminal report");
+		assert.equal(f.requests("telegram", "sendMessage").length, 3, "Goal reply, the recovered waiting answer, and one terminal report");
 		assert.equal(f.requests("unexpected").length, 0);
 		await f.stop();
 		const terminal = await f.snapshot();

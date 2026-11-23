@@ -234,15 +234,13 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 			const fixture = Object.keys(c.fixtures).find((name) => !c.mutable?.includes(name))!;
 			assert.ok(gradeFiles(id, { ...files, [fixture]: "tampered" }).length > 0);
 			if (id === "policy-clarification") {
-					const clarified = observed.observations.findIndex((item) => item.event === "clarification");
-					const resolved = observed.observations.findIndex((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string; blockers?: string[] })?.action === "checkpoint" && (item.args as { blockers?: string[] }).blockers?.length === 0);
-					const readyCall = observed.observations.find((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready");
-					assert.ok(resolved > clarified, "the scripted actor explicitly resolves the clarification before review");
-					assert.deepEqual(Object.keys(readyCall!.args as object).sort(), ["action", "review"], "readyWork preserves the host recipe without silently clearing blockers");
+				const clarified = observed.observations.findIndex((item) => item.event === "clarification");
+				const resolved = observed.observations.findIndex((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { blockers?: string[] }).blockers?.length === 0);
+				assert.ok(resolved > clarified, "the scripted actor explicitly resolves the clarification before finishing");
 				const final = observed.observations.find((item) => item.event === "work_final")!;
 				const saved = JSON.parse(final.text!);
 				assert.equal(saved.records[saved.current].creator, "eval-user");
-				assert.equal(saved.records[saved.current].status, "ready_for_review");
+				assert.equal(saved.records[saved.current].status, "active");
 				saved.records[saved.current].blockers = ["Unresolved policy question"];
 				final.text = JSON.stringify(saved);
 				assert.ok(gradeBehavior(id, observed).some((error) => error.includes("resolved blockers")));
