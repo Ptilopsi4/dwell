@@ -38,6 +38,8 @@ export interface NormalizedMessage {
 	platform?: "feishu" | "telegram";
 	destination?: ConversationDestination;
 	requestId?: string;
+	/** 宿主钉定的 run 工作归属：/goal 起跑输入随 Telegram inbox 原样回放，只进 entry data，不进模型可见内容。 */
+	work?: { conversationId: number; id: string };
 }
 
 export function messageDestination(msg: NormalizedMessage): ConversationDestination {

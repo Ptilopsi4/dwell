@@ -511,7 +511,8 @@ async function handleMessage(msg: NormalizedMessage): Promise<void> {
 }
 
 /** 统一的输入提交（媒体/文本两条路径共用：transcript 记 sender，requestId 幂等，steer）。 */
-function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage, authorityVia?: RunVia) {
+/** 普通输入提交。work：宿主钉定的 run 工作归属（/goal 起跑输入首跑即绑新建记录，不随后续切目标漂移）。 */
+function submitInput(conversation: Conversation, content: string, msg: NormalizedMessage, authorityVia?: RunVia, work?: NormalizedMessage["work"]) {
 	const via = msg.platform ?? "feishu";
 	const authority = authorityVia ?? (sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : via);
 	if (!conversationActorAllowed(msg.senderId, conversation.id, authority)) throw new Error("输入提交前使用权限已撤销，未启动模型。");
@@ -520,24 +521,7 @@ function submitInput(conversation: Conversation, content: string, msg: Normalize
 			type: "input",
 			content,
 			// transcript 记录 sender（审计/分账基础；model 仍只看 content）
-			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }) } },
-			requestId: msg.requestId ?? msg.messageId,
-			whenBusy: conversationInputMode(conversation.id),
-		},
-		BACKGROUND_CONTEXT,
-	);
-}
-
-/** /goal 起跑输入：同 submitInput，但 entry data 钉 work 归属（首跑即绑新建记录，不随后续切目标漂移）。 */
-function submitGoalInput(conversation: Conversation, content: string, msg: NormalizedMessage, workId: string | undefined) {
-	const via = msg.platform ?? "feishu";
-	const authority = sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : via;
-	if (!conversationActorAllowed(msg.senderId, conversation.id, authority)) throw new Error("输入提交前使用权限已撤销，未启动模型。");
-	return conversation.submit(
-		{
-			type: "input",
-			content,
-			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }), ...(workId === undefined ? {} : { work: { conversationId: conversation.id as number, id: workId } }) } },
+			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }), ...(work === undefined ? {} : { work }) } },
 			requestId: msg.requestId ?? msg.messageId,
 			whenBusy: conversationInputMode(conversation.id),
 		},
@@ -1092,7 +1076,7 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 		const authorityVia = row.authorityVia ?? (sessions.destinationOf(row.conversationId).kind === "panel" ? "panel" : "telegram");
 		await setRunAttributionIfIdle(row.conversationId, row.sender, authorityVia);
 		if (!actorAllowed(row.sender, row.destination, authorityVia) || !conversationActorAllowed(row.sender, row.conversationId, authorityVia)) { await stopPlaceholder("输入未通过准入检查，已取消。"); await telegramInbox.output(id, "failed"); return; }
-		const submission = await submitInput(conversation, content, msg, authorityVia);
+		const submission = await submitInput(conversation, content, msg, authorityVia, msg.work);
 		await telegramInbox.admitted(id, submission.id as number);
 		void replyTelegram(id, conversation, submission);
 	});
@@ -1340,12 +1324,13 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			catch (error) { await replyTo(target, (error as Error).message); return; }
 			await replyTo(target, result.changed ? "已解绑旧目标，新目标已建立，开始执行…" : "目标已建立，开始执行…", conversation);
 			// 一发即忘：目标已由 host 落记录，描述作为普通输入起跑（entry data 钉 work 归属），完成后模型直接在本会话报告
+			const work = result.created === undefined ? undefined : { conversationId: convId, id: result.created };
 			if (msg.platform === "telegram") {
 				const id = `tg-goal:${msg.requestId ?? msg.messageId}`;
 			await telegramInbox.enqueue(id, { conversationId: convId, sender: msg.senderId, authorityVia: "telegram", destination: target.destination as never, replyTo: msg.messageId, requestId: id, raw: { ...msg, content: objective, resources: [], replyToMessageId: undefined, ...(result.created === undefined ? {} : { work: { conversationId: convId, id: result.created } }) } });
 				telegramWorkers.wake();
 			} else {
-				const submission = await submitGoalInput(conversation, objective, msg, result.created);
+				const submission = await submitInput(conversation, objective, msg, undefined, work);
 				const record = await submission.status(BACKGROUND_CONTEXT);
 				if (record.status !== "queued") void submitAndReply(conversation, submission, target);
 			}
