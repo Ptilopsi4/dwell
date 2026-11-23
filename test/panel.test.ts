@@ -122,6 +122,21 @@ test("panel Telegram send requires the visible channel relay and preserves its p
 	});
 });
 
+test("panel input to a member-isolated conversation is queued as a follow-up instead of steering the active run", async (t) => {
+	for (const scoped of [true, false]) await t.test(scoped ? "isolated line" : "ordinary line", async (t) => {
+		const modes: string[] = [];
+		const conversation = { id: 72, submit: async (input: { whenBusy?: string }) => { modes.push(input.whenBusy ?? ""); return { id: 900, wait: async () => {} }; } };
+		const base = await testPanel(t, {
+			harness: { conversation: async () => conversation, snapshot: async () => ({ run: { taskId: 1 } }) } as unknown as PanelOptions["harness"],
+			sessions: { destinationOf: () => ({ kind: "panel" }), touchActivity: () => {}, isActorScoped: () => scoped, notifyEnabled: () => false } as unknown as PanelOptions["sessions"],
+			feishu: { operator: () => "ou_panel", status: () => "off", notice: async () => {}, notifyPanel: async () => {}, decide: async () => ({ ok: true }), relay: async () => {} },
+		});
+		const result = await fetch(`${base}/api/send`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ conv: 72, content: "hello from panel" }) });
+		assert.equal(result.status, 200);
+		assert.deepEqual(modes, [scoped ? "followUp" : "steer"]);
+	});
+});
+
 test("panel Telegram rows and users never query the Feishu directory", async (t) => {
 	const parent = 420001, child = 420002;
 	const row = (id: number, key: string, owner: string, type: string, chatId: string, name = key): ConvRow => ({ id, key, owner, name, type, chatId, platform: "telegram", archived: false, lastTs: 0, notify: false, emoji: null });

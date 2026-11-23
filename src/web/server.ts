@@ -15,7 +15,7 @@ import { UploadError, type SaveUpload } from "../uploads.ts";
 import { FileError } from "@earendil-works/pi-durable/env";
 import { readWorkspaceFile } from "../guarded-env.ts";
 import { fileGuardBases } from "../ext/approval.ts";
-import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, sendPathViolation } from "../ext/approval.ts";
+import { clampMinutes, conversationScope, pendingApprovals, scopeOf, setRunAttribution, sendPathViolation } from "../ext/approval.ts";
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
@@ -691,8 +691,10 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			return;
 		}
 		if ((await harness.snapshot(PiLiveDoc, conversation.id, BACKGROUND_CONTEXT))?.run === undefined) await setRunAttribution(id, feishu.operator(), "panel");
+		// 后台子会话的 destinationOf 落 panel 兑底，composer 可直达：输入模式必须与 conversationInputMode 同口径，
+		// 否则成员隔离子线会被 steer 并入创建者的 run、按创建者归属回报
 		const submission = await conversation.submit(
-			{ type: "input", content: input, requestId: `panel-${Date.now()}-${randomBytes(4).toString("hex")}`, whenBusy: "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
+			{ type: "input", content: input, requestId: `panel-${Date.now()}-${randomBytes(4).toString("hex")}`, whenBusy: sessions.isActorScoped(scopeOf(id)) ? "followUp" : "steer", entry: { kind: "panel.message", data: { sender: feishu.operator(), via: "panel" } } },
 			BACKGROUND_CONTEXT,
 		);
 		void submission.wait(BACKGROUND_CONTEXT).catch(() => {});
