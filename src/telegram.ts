@@ -1,6 +1,7 @@
 // Bot API URLs contain credentials. Keep them inside this transport and never retain raw failures.
 import { chmod, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
 import type { NormalizedMessage, TelegramDestination } from "./pipeline.ts";
 import { stateFile, writeStateJson } from "./state.ts";
 import { formatTelegramText, type TelegramTextFormat } from "./telegram-format.ts";
@@ -123,7 +124,6 @@ type Timing = {
 	privateIntervalMs?: number;
 	groupIntervalMs?: number;
 };
-import { fetch as undiciFetch, ProxyAgent } from "undici";
 
 /** Telegram 出站代理：仅本传输使用（http/https/socks5），凭证可内嵌 URL，报错绝不回显 URL 本身。 */
 export function telegramFetch(proxyUrl: string | undefined): typeof fetch {
@@ -293,12 +293,12 @@ export class TelegramBot {
 			const retryAfter = typeof rawRetry === "number" && Number.isFinite(rawRetry) && rawRetry >= 0 ? rawRetry : undefined;
 			if (code === 429) {
 				this.#cooldown = Math.max(this.#cooldown, this.#now() + (retryAfter ?? 1) * 1000);
-					if (!activity && attempt < 2 && (retryAfter ?? 1) <= 60) continue;
+				if (!activity && attempt < 2 && (retryAfter ?? 1) <= 60) continue;
 			}
 			const error = new TelegramError(`Telegram API 请求失败（${code}）`, { code, retryAfter });
 			if (code === 400 && typeof payload.description === "string"
 				&& /\bentit(?:y|ies)\b|\bENTITY_BOUNDS_INVALID\b/i.test(payload.description)) this.#invalidEntityErrors.add(error);
-				if (!activity && (code === 401 || code === 409)) this.#fail(error);
+			if (!activity && (code === 401 || code === 409)) this.#fail(error);
 			throw error;
 		}
 	}
