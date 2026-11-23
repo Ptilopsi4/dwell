@@ -14,7 +14,7 @@ import { makeBudgetController } from "../src/ext/budget.ts";
 const directory = await mkdtemp(join(tmpdir(), "dwell-bg-work-limit-"));
 process.env.DWELL_STATE = join(directory, "state");
 const workModule = await import("../src/ext/work.ts");
-const { getWork, inheritWork, makeWorkController, workBudgetStopReason, workIdentity, WorkDoc } = workModule;
+const { createWorkRecord, getWork, inheritWork, makeWorkController, workBudgetStopReason, workIdentity, WorkDoc } = workModule;
 const { BackgroundAnchor, BackgroundDoc, makeBackgroundExtension, makeBackgroundReporter } = await import("../src/ext/background.ts");
 after(() => rm(directory, { recursive: true, force: true }));
 const done = () => fauxAssistantMessage(fauxText("done"));
@@ -46,8 +46,8 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`shared ${reas
 	await open(); await budget.attach(harness); await work.attach(harness);
 	try {
 		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
-		await harness.commit(async (tx) => { (await tx.doc(WorkDoc, parent.id)).goalMode = true; }, context); parentId = parent.id;
-		faux.setResponses([call("dwell.work", { action: "start", goal: "Inspect existing material", acceptance: ["Return an inspection"] }), done()]);
+		await harness.commit(async (tx) => { await createWorkRecord(tx, parent.id, "Inspect existing material", "actor"); }, context); parentId = parent.id;
+		faux.setResponses([call("dwell.work", { progress: "Inspection started" }), done()]);
 		await (await parent.submit({ type: "input", content: "start", entry: actor }, context)).wait(context);
 		const child = await parent.commit(async (tx) => {
 			const anchor = await tx.createTask(BackgroundAnchor, null, { ownership: { kind: "conversation" }, background: true });
@@ -67,10 +67,11 @@ for (const reason of ["model_limit", "tool_limit"] as const) test(`shared ${reas
 		const outcome = await (await harness.submission(fired[0]!, context))!.wait(context);
 		assert.ok(outcome.status === "unanswered" && outcome.reason === "aborted");
 		assert.equal(await workBudgetStopReason(harness, parent.id, `${parent.id}:${fired[0]}`), reason);
-		assert.equal(faux.state.callCount, reason === "model_limit" ? 3 : 4); assert.equal(probes, 0);
+		// host 直建记录后首个模型请求即记账：比旧模型中介 start 少一次不记账的请求
+		assert.equal(faux.state.callCount, reason === "model_limit" ? 2 : 3); assert.equal(probes, 0);
 		await harness.close(context); await open();
 		await harness.waitForTask(child.reporter, context);
-		assert.equal(fired.length, 1); assert.equal(faux.state.callCount, reason === "model_limit" ? 3 : 4);
+		assert.equal(fired.length, 1); assert.equal(faux.state.callCount, reason === "model_limit" ? 2 : 3);
 	} finally { release(); await budget.close(); await work.close(); await harness.close(context); }
 });
 
@@ -93,8 +94,8 @@ test("a work-limit report interrupted during onFired reuses its parent submissio
 	await open();
 	try {
 		const parent = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: "faux", modelId: "faux-1" } } }, context);
-		await harness.commit(async (tx) => { (await tx.doc(WorkDoc, parent.id)).goalMode = true; }, context);
-		faux.setResponses([call("dwell.work", { action: "start", goal: "Inspect material", acceptance: ["Return a result"] }), done()]);
+		await harness.commit(async (tx) => { await createWorkRecord(tx, parent.id, "Inspect material", "actor"); }, context);
+		faux.setResponses([call("dwell.work", { progress: "Inspection started" }), done()]);
 		await (await parent.submit({ type: "input", content: "start", entry: actor }, context)).wait(context);
 		const reporter = await parent.commit(async (tx) => {
 			const doc = await tx.doc(WorkDoc, parent.id); const record = doc.records[doc.current!]!;

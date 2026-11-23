@@ -10,8 +10,7 @@ import { createModelClient, loadModelsConfig } from "../src/models.ts";
 import { modelFailure } from "../src/model-failure.ts";
 import type { ScriptStep, TrialEvidence, TrialInput } from "./cases.ts";
 import { guardedProvider, RequestBudget } from "./budget.ts";
-import { getWork } from "../src/ext/work.ts";
-import { WorkDoc } from "../src/ext/work.ts";
+import { createWorkRecord, getWork } from "../src/ext/work.ts";
 import { configure } from "@earendil-works/pi-durable";
 
 const configPath = process.argv[2];
@@ -52,13 +51,6 @@ function scriptedFactory(): FauxResponseFactory {
 			const id = /Scheduled \(id ([^)]+)\)/.exec(toolText(ctx))?.[1];
 			if (id === undefined) throw new Error("Schedule creation lacks id");
 			return toolMessage("dwell.schedule", { action: "cancel", id });
-		}
-		if (next.dynamic === "readyWork") {
-			const result = ctx.messages.filter((item) => item.role === "toolResult" && item.toolName === "dwell.work").at(-1);
-			const state = JSON.parse(textOf(result?.content));
-			if (state.verification?.status !== "verified" || !state.verification.receipt?.checks?.length) throw new Error("No successful host verification receipt is available for review");
-			if (state.nextCall?.name !== "dwell.work" || state.nextCall.arguments?.action !== "ready") throw new Error("Successful verification did not provide a ready call");
-			return toolMessage(state.nextCall.name, state.nextCall.arguments);
 		}
 		throw new Error("Unsupported faux response step");
 	};
@@ -221,8 +213,8 @@ try {
 	harness = await open();
 	harness.resume();
 	let root = await harness.root(context, { agent: { model, cwd: process.cwd() } });
-	// 评测剧本以 dwell.work 开头：模拟用户已发 /goal（否则新会话默认隐藏该工具）
-	await harness.commit(async (tx) => { (await tx.doc(WorkDoc, root.id)).goalMode = true; await configure(tx, root.id, { tools: null }); }, context);
+	// 评测剧本模拟用户已发 /goal <task>（host 直建记录，否则新会话默认隐藏 dwell.work；普通输入起跑）
+	await harness.commit(async (tx) => { await createWorkRecord(tx, root.id, config.task, "eval-user"); await configure(tx, root.id, { tools: null }); }, context);
 	await attribute(root.id as number);
 	const submit = async (input: string, requestId: string): Promise<void> => {
 		const settled = await (await root.submit({ type: "input", content: input, requestId, entry: { kind: "chat.message", data: { sender: "eval-user", via: "panel" } } }, context)).wait(context);

@@ -211,7 +211,7 @@ sudo -u dwell env -i PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin DWELL_DATA=
 - 希望通知带面板链接，或用域名而不是 IP 打开面板时，设置 `DWELL_PANEL_URL`
 - 在服务器本机做健康检查只能访问 `/healthz`，其他路径在本机都返回 403
 
-请求策略同样适用于就绪、运行观测和工作验收 API。策略见[安全边界](security.zh-CN.md)，健康与观测接口见[运行告警](#运行告警)，验证与操作者验收见[代理运行机制](agent.zh-CN.md)，面板功能见[使用指南](usage.zh-CN.md#web-panel)。
+请求策略同样适用于就绪、运行观测和工作目标 API。策略见[安全边界](security.zh-CN.md)，健康与观测接口见[运行告警](#运行告警)，工作记录见[代理运行机制](agent.zh-CN.md)，面板功能见[使用指南](usage.zh-CN.md#web-panel)。
 
 同机反代或 `ssh -L` 隧道会让所有请求都显示为本机来源，面板会全部拒绝。`DWELL_PANEL_TRUST_LOCAL=1` 可以为这类部署关掉本机来源检查，代价是 bash 又能访问面板及其审批接口。优先选择浏览器从另一台机器直连的部署。
 

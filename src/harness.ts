@@ -300,12 +300,7 @@ export async function openDwell(models = providerModels(), extraExtensions: Exte
 		limits,
 		onStopped: (conversationId, _budgetId, reason) => console.error(`[dwell] 会话 ${conversationId} 达到运行预算：${reason}`),
 	});
-	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown, verificationEnv: async (conversationId, context) => {
-		const agent = await harness!.snapshot(AgentDoc, conversationId as ConversationId, context);
-		if (agent === undefined) throw new Error("Verification conversation is unavailable");
-		const cwd = resolve(agent.cwd ?? DEFAULT_CWD);
-		return env({ cwd, readScope: cwd });
-	} });
+	const work = makeWorkController({ pricingKnown: MODEL_CONFIG.main.pricingKnown });
 	setApprovalBudgetGetter((conversationId) => budgets.captureApproval(conversationId));
 	setWorkspaceApprovalGetter((conversationId) =>
 		[...pendingApprovals.values()].some((pending) => pending.targets?.includes(conversationId)) ||

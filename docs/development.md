@@ -37,7 +37,7 @@ The default faux mode is always `purpose: "evaluator_verification"`. To select a
 npm run eval -- --cases csv-reconciliation,node-bugfix --trials 1
 ```
 
-The four cases with hidden final-state checks use version 3 guidance with audited check revisions, actual verification receipts, and host-terminated review delivery. The release case also requires explicit background waiting. The v3 update preserves the v2 fixtures, hidden assertions, and final output rules. Manifests record `caseVersion` and `comparabilityNote`; guidance and execution contracts differ across versions, so scores across versions are not a controlled comparison.
+The four cases with hidden final-state checks use version 4 guidance for the fire-and-forget goal flow: goals are host-created, agents checkpoint progress and blockers with `dwell.work`, verify with their own commands, and report the result in chat. The release case also requires explicit background waiting. The v4 update preserves the earlier fixtures, hidden assertions, and final output rules. Manifests record `caseVersion` and `comparabilityNote`; guidance and execution contracts differ across versions, so scores across versions are not a controlled comparison.
 
 `node-bugfix` uses version 2. Its task specifies a fixed Node verification command; grading requires a successful result from that command after the edit, linked to the actual tool call. The final-code assertions remain unchanged. Earlier versions checked only for a bash proposal, so their scores are not directly comparable.
 

@@ -4,11 +4,10 @@ import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import type { CostBudget, CostEvidence } from "./budget.ts";
 import type { WorkRecord } from "../src/ext/work.ts";
-import type { ArtifactEntry } from "../src/verification.ts";
 import type { ModelFailure } from "../src/model-failure.ts";
 import { scenarios } from "./scenarios.ts";
 
-export type ScriptStep = { tool: string; args: Record<string, unknown> } | { text: string } | { dynamic: "cancelSchedule" | "readProcLogs" | "readyWork" };
+export type ScriptStep = { tool: string; args: Record<string, unknown> } | { text: string } | { dynamic: "cancelSchedule" | "readProcLogs" };
 export type TrialInput = {
 	id: string;
 	task: string;
@@ -198,58 +197,10 @@ function gradeVerification(id: string, evidence: TrialEvidence): string[] {
 	const errors: string[] = [];
 	try {
 		const record = finalWork(evidence);
-		const verification = record?.verification;
-		const contract = verification?.contract;
-		const receipt = verification?.receipt;
-		if (record?.creator !== "eval-user" || record.status !== "ready_for_review" || record.blockers.length !== 0 || !record.review.trim()) errors.push("Work was not proposed for review with resolved blockers and verification evidence");
-		const outputs = Object.keys(c.outputs ?? {}).filter((path) => !Object.hasOwn(c.fixtures, path));
-		const allowedChanges = [...new Set([...(c.mutable ?? []), ...outputs])].sort();
-		if (!contract?.checks.length || contract.checks.some((check) => !/\bnode\b/.test(check.command)) || !contract.artifacts.includes(".") || outputs.some((path) => !contract.artifacts.includes(path)) || !isDeepStrictEqual([...(contract.allowedChanges ?? [])].sort(), allowedChanges)) errors.push("No strict declared Node verification contract covers the permitted changes and required outputs");
-		if (verification?.status !== "verified" || receipt?.workId !== record?.id || !receipt?.checks.length || !/^[a-f0-9]{64}$/.test(receipt.manifest.digest)) {
-			errors.push("No successful host verification receipt is bound to the current work");
-			return errors;
-		}
-		if (!isDeepStrictEqual(receipt.checks.map(({ name, command }) => ({ name, command })), contract?.checks)) errors.push("The host receipt does not cover every declared verification check");
-		if ((receipt.revision ?? 0) !== (verification.revision ?? 0)) errors.push("The host receipt belongs to an older verification revision");
-		const verificationResult = evidence.observations.findIndex((item) => item.event === "tool_result" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "verify" && item.taskId === receipt.taskId && item.isError === false);
-		const ready = evidence.observations.findIndex((item) => item.event === "tool_result" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready" && item.isError === false);
-		if (verificationResult < 0 || ready <= verificationResult) errors.push("Review was not requested after the successful host verification");
-		const readyTask = evidence.tasks.find((item) => (item as { id?: number }).id === evidence.observations[ready]?.taskId) as { kind?: string; conversationId?: number; input?: { kind?: string }; state?: { status?: string; outcome?: { status?: string; result?: { control?: { terminate?: boolean } } } } } | undefined;
-		if (readyTask?.kind !== "pi.tool" || readyTask.conversationId !== 1 || readyTask.input?.kind !== "model" || readyTask.state?.status !== "terminal" || readyTask.state.outcome?.status !== "completed" || readyTask.state.outcome.result?.control?.terminate !== true) errors.push("Successful review did not terminate its model-issued run through the host");
-		for (const check of receipt.checks) {
-			const task = evidence.tasks.find((item) => (item as { id?: number }).id === check.taskId) as { kind?: string; conversationId?: number; input?: { kind?: string; parent?: number; call?: { name?: string; arguments?: { command?: string } } }; state?: { status?: string; outcome?: { status?: string } } } | undefined;
-			const result = evidence.observations.findIndex((item) => item.event === "tool_result" && item.taskId === check.taskId && item.conversationId === 1 && item.name === "bash" && (item.args as { command?: string })?.command === check.command && item.isError === false);
-			if (check.exitCode !== 0 || check.isError || task?.kind !== "pi.tool" || task.conversationId !== 1 || task.input?.kind !== "nested" || task.input.parent !== receipt.taskId || task.input.call?.name !== "bash" || task.input.call.arguments?.command !== check.command || task.state?.status !== "terminal" || task.state.outcome?.status !== "completed" || result < 0 || result >= verificationResult) errors.push(`The verification receipt has no matching successful nested bash execution: ${check.name}`);
-		}
-		if (ready >= 0 && evidence.observations.slice(ready + 1).some((item) => item.event === "tool" && ["write", "edit", "bash"].includes(item.name ?? ""))) errors.push("Workspace commands continued after requesting review");
-	} catch { errors.push("Invalid host work verification evidence"); }
+		// fire-and-forget 锚点：记录存在、归属正确、仍在当前；无验收终态
+		if (record?.creator !== "eval-user" || record.status !== "active") errors.push("No attributed durable goal is active for this conversation");
+	} catch { errors.push("Invalid durable work evidence"); }
 	return errors;
-}
-
-export function gradeVerifiedArtifacts(id: string, evidence: TrialEvidence, files: Record<string, string>, cwd: string): string[] {
-	if (!scenarios.some((item) => item.id === id)) return [];
-	try {
-		const receipt = finalWork(evidence)?.verification?.receipt;
-		if (receipt === undefined) return ["No verified artifact manifest is available"];
-		const entries = new Map<string, ArtifactEntry>([[".", { path: ".", kind: "directory", bytes: 0 }]]);
-		let bytes = 0;
-		for (const [path, content] of Object.entries(files)) {
-			const parts = path.replace(/\/$/, "").split("/");
-			for (let i = 1; i < parts.length; i++) {
-				const parent = parts.slice(0, i).join("/");
-				entries.set(parent, { path: parent, kind: "directory", bytes: 0 });
-			}
-			if (path.endsWith("/")) entries.set(parts.join("/"), { path: parts.join("/"), kind: "directory", bytes: 0 });
-			else {
-				const size = Buffer.byteLength(content);
-				bytes += size;
-				entries.set(path, { path, kind: "file", bytes: size, sha256: createHash("sha256").update(content).digest("hex") });
-			}
-		}
-		const ordered = [...entries.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-		const manifest = { cwd, digest: createHash("sha256").update(JSON.stringify(ordered)).digest("hex"), files: ordered.filter((entry) => entry.kind === "file").length, bytes };
-		return isDeepStrictEqual(receipt.manifest, manifest) ? [] : ["The current workspace does not match the host-verified artifact manifest"];
-	} catch { return ["Invalid verified artifact manifest"]; }
 }
 
 export function gradeBehavior(id: string, evidence: TrialEvidence, variant?: "approve" | "deny"): string[] {
@@ -281,11 +232,11 @@ export function gradeBehavior(id: string, evidence: TrialEvidence, variant?: "ap
 			try {
 				const saved = JSON.parse(before?.text ?? "{}");
 				const progress = saved.records?.[saved.current];
-					if (!progress?.goal || !progress?.acceptance?.length || !progress?.progress || !progress?.blockers?.length || progress.creator !== "eval-user") errors.push("No attributed durable goal, acceptance criteria, progress and clarification blocker were recorded before restart");
+					if (!progress?.goal || !progress?.progress || !progress?.blockers?.length || progress.creator !== "eval-user") errors.push("No attributed durable goal, progress and clarification blocker were recorded before restart");
 				const final = JSON.parse(evidence.observations.find((item) => item.event === "work_final")?.text ?? "{}");
 				const record = final.records?.[final.current];
-					if (final.current !== saved.current || !isDeepStrictEqual(record?.acceptance, progress?.acceptance) || record?.goal !== progress?.goal) errors.push("The clarified continuation replaced its durable goal or acceptance criteria");
-					if (record?.status !== "ready_for_review" || !record.review?.trim() || record.blockers?.length !== 0) errors.push("Work was not proposed for review with resolved blockers and verification evidence");
+					if (final.current !== saved.current || record?.goal !== progress?.goal) errors.push("The clarified continuation replaced its durable goal");
+					if (record?.status !== "active" || !record?.progress || record.blockers?.length !== 0) errors.push("Work was not finished with resolved blockers and recorded progress");
 			} catch { errors.push("Invalid durable work evidence"); }
 		}
 	}

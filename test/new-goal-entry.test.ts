@@ -22,9 +22,9 @@ const winSqlite = { skip: process.platform === "win32" ? "Windows holds SQLite s
 
 function workRecord(id: string): WorkRecord {
 	return {
-		id, creator: "tg:300", goal: "Keep the previous report", acceptance: ["The old report remains available"],
-		progress: "Waiting for feedback", blockers: ["A reviewer has not replied"], evidence: [], review: "", status: "active", createdAt: 1, updatedAt: 2,
-		limits: { modelAdmissions: 7, toolAdmissions: 11 }, stopped: "model_limit", availableEvidence: {}, members: {}, tasks: {},
+		id, creator: "tg:300", goal: "Keep the previous report",
+		progress: "Waiting for feedback", blockers: ["A reviewer has not replied"], status: "active", createdAt: 1, updatedAt: 2,
+		limits: { modelAdmissions: 7, toolAdmissions: 11 }, stopped: "model_limit", members: {}, tasks: {},
 		usage: { scope: "generation_and_tools", pricingKnown: false, modelAdmissions: 7, toolAdmissions: 3, modelResponses: 7, toolResults: 3, inputTokens: 140, outputTokens: 35, cacheReadTokens: 0, cacheWriteTokens: 0, cost: null },
 	};
 }
@@ -51,7 +51,7 @@ async function panel(t: TestContext, harness: Harness): Promise<string> {
 	return `http://127.0.0.1:${address.port}`;
 }
 
-test("goal panel requests require admitted JSON and use the configured operator across replay", async (t) => {
+test("goal panel requests require admitted JSON, establish the record and use the configured operator across replay", async (t) => {
 	const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
 	t.after(() => harness.close(context));
 	const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
@@ -63,13 +63,14 @@ test("goal panel requests require admitted JSON and use the configured operator 
 		await tx.appendEntry(conversation.id, { kind: "chat.fixture", data: { text: "Keep the old conversation" } });
 	}, context);
 	const base = await panel(t, harness);
-	const body = { id: conversation.id, workId: previous.id, requestId: "panel-original", operator: "untrusted-body" };
+	const body = { id: conversation.id, workId: previous.id, requestId: "panel-original", operator: "untrusted-body", goal: "Renew the durable goal" };
 	const post = (value: unknown, headers: Record<string, string> = { "content-type": "application/json", origin: base }) => fetch(`${base}/api/work/goal`, { method: "POST", headers, body: JSON.stringify(value) });
 	assert.equal((await post(body, { "content-type": "text/plain", origin: base })).status, 415);
 	assert.equal((await post(body, { "content-type": "application/json", origin: "https://untrusted.example" })).status, 403);
 	for (const invalid of [
 		{ ...body, id: "invalid" }, { ...body, workId: undefined }, { ...body, workId: "" },
 		{ ...body, requestId: " " }, { ...body, requestId: "x".repeat(201) },
+		{ ...body, goal: undefined }, { ...body, goal: " " }, { ...body, goal: "x".repeat(4001) },
 	]) assert.equal((await post(invalid)).status, 400);
 	assert.equal((await post({ ...body, id: 999999 })).status, 404);
 	assert.equal((await harness.snapshot(WorkDoc, conversation.id, context))?.current, previous.id);
@@ -80,9 +81,15 @@ test("goal panel requests require admitted JSON and use the configured operator 
 	const first = await response.json();
 	assert.equal(first.changed, true);
 	assert.equal(first.workId, previous.id);
+	assert.ok(first.created);
 	const saved = await (await fetch(`${base}/api/work?id=${conversation.id}`)).json();
-	assert.equal(saved.current, undefined);
-	assert.deepEqual(saved.records[previous.id], previous);
+	assert.equal(saved.current, first.created);
+	assert.equal(saved.records[previous.id].status, "superseded");
+	assert.ok(saved.records[previous.id].updatedAt > previous.updatedAt);
+	assert.deepEqual(saved.records[previous.id].usage, previous.usage);
+	assert.equal(saved.records[first.created].goal, body.goal);
+	assert.equal(saved.records[first.created].creator, "tg:700");
+	assert.equal(saved.records[first.created].status, "active");
 	const journal = await harness.snapshot(NewGoalDoc, conversation.id, context);
 	assert.equal(journal?.requests[body.requestId].operator, "tg:700");
 	const entries = await harness.commit((tx) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, 100), context);
@@ -102,7 +109,11 @@ test("goal panel requests require admitted JSON and use the configured operator 
 	assert.deepEqual(await duplicate.json(), first);
 	assert.equal((await post({ ...body, requestId: "stale-new-request" })).status, 409);
 	assert.equal((await harness.snapshot(WorkDoc, conversation.id, context))?.current, later.id);
-	assert.deepEqual((await harness.snapshot(WorkDoc, conversation.id, context))?.records, { [previous.id]: previous, [later.id]: later });
+	const records = (await harness.snapshot(WorkDoc, conversation.id, context))?.records ?? {};
+	assert.deepEqual(Object.keys(records).sort(), [previous.id, first.created as string, "later-work"].sort());
+	assert.equal(records[previous.id].status, "superseded");
+	assert.equal(records[first.created as string].status, "active");
+	assert.equal(records["later-work"].status, "active");
 	assert.equal((await harness.commit((tx) => tx.scanEntries({ conversationId: conversation.id }, 100), context)).items.filter((entry) => entry.kind === "work.new_goal").length, 1);
 });
 
@@ -148,112 +159,110 @@ async function stoppedState(directory: string, id: number) {
 	} finally { await harness.close(context); }
 }
 
+/** /goal 解绑只改写 status 与 updatedAt；其余字段（含用量与预算）原样保留。 */
 function assertWorkPreserved(actual: WorkRecord, expected: WorkRecord): void {
-	const { members: actualCursors, ...actualWork } = actual;
-	const { members: expectedCursors, ...expectedWork } = expected;
+	const { members: actualCursors, status: _actualStatus, updatedAt: _actualUpdatedAt, ...actualWork } = actual;
+	const { members: expectedCursors, status: _expectedStatus, updatedAt: _expectedUpdatedAt, ...expectedWork } = expected;
 	assert.deepEqual(actualWork, expectedWork);
 	assert.deepEqual(Object.keys(actualCursors), Object.keys(expectedCursors));
 	for (const [member, position] of Object.entries(expectedCursors)) assert.ok(actualCursors[member] >= position);
 }
 
-test("main Telegram goal enforces owner and admin authority without model calls or history reset", { ...posixOnly, timeout: 90_000 }, async (t) => {
-	const start = (goal: string) => ({ tool: "dwell.work", arguments: { action: "start", goal, acceptance: ["The old goal remains inspectable"] } });
-	const f = await mainFixture(t, [start("Original goal"), { text: "Original goal saved." }]);
+test("main Telegram /goal enforces owner and admin authority, establishes and supersedes records without extra model calls", { ...posixOnly, timeout: 90_000 }, async (t) => {
+	const f = await mainFixture(t, [{ text: "Original goal saved." }]);
 	const topic = (id: number, text: string, actor = 200) => message(id, text, { chat: { id: -300, type: "supergroup" }, message_thread_id: 9, from: { id: actor, first_name: "Member" } });
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([topic(299, "/goal@AcceptanceBot")]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。");
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "用法：/goal <目标描述>。命令直接建立目标并开始执行，完成后在此报告结果。");
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 300);
-		f.updates([topic(300, "/ask@AcceptanceBot Keep an explicit old goal.")]);
-		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:300" && event.body.state === "done");
+		f.updates([topic(300, "/goal@AcceptanceBot Sneaky goal", 201)]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "这是他人的任务线，仅线主或管理员可开启新目标。");
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 301);
+		f.updates([topic(301, "/goal@AcceptanceBot Original goal")]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "目标已建立，开始执行…");
+		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith("Original goal saved."));
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-goal:tg-update:100:301" && event.body.state === "done");
 		await f.stop();
-		const conversationId = (await f.snapshot()).inbox.inputs["tg-update:100:300"].conversationId;
+		const conversationId = (await f.snapshot()).inbox.inputs["tg-goal:tg-update:100:301"].conversationId;
 		const before = await stoppedState(f.directory, conversationId);
-		const oldId = before.work.current;
-		assert.ok(oldId);
-		assert.equal(before.work.records[oldId].goal, "Original goal");
-		const afterStart = f.events.length;
-		f.start();
-		await f.until((event) => event.method === "getUpdates", afterStart);
-		f.updates([topic(301, "/goal@AcceptanceBot", 201)]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "这是他人的任务线，仅线主或管理员可开启新目标。", afterStart);
-		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302, afterStart);
-		f.updates([topic(302, "/goal@AcceptanceBot")]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。", afterStart);
-		await f.until((event) => event.method === "getUpdates" && event.body.offset === 303, afterStart);
-		await f.stop();
-		const detached = await stoppedState(f.directory, conversationId);
-		assert.equal(detached.work.current, undefined);
-		assertWorkPreserved(detached.work.records[oldId], before.work.records[oldId]);
-		assert.deepEqual(detached.budget, before.budget);
-		for (const entry of before.entries) assert.deepEqual(detached.entries.find((candidate) => candidate.id === entry.id), entry);
-		assert.equal(detached.journal?.requests["command:tg-update:100:302"].operator, "tg:200");
-		assert.equal(detached.journal?.requests["command:tg-update:100:301"], undefined);
-		const ownerReceipt = (await f.snapshot()).inbox.commands["tg-update:100:302"] as { goalWorkId: string; done: boolean };
-		assert.equal(ownerReceipt.goalWorkId, oldId);
+		const firstId = before.work.current;
+		assert.ok(firstId);
+		assert.equal(before.work.records[firstId].goal, "Original goal");
+		assert.equal(before.work.records[firstId].creator, "tg:200");
+		assert.equal(before.work.records[firstId].status, "active");
+		assert.equal(before.journal?.requests["command:tg-update:100:301"].workId, null);
+		assert.equal(before.journal?.requests["command:tg-update:100:301"].created, firstId);
+		assert.equal(before.journal?.requests["command:tg-update:100:301"].operator, "tg:200");
+		assert.equal(before.journal?.requests["command:tg-update:100:299"], undefined);
+		assert.equal(before.journal?.requests["command:tg-update:100:300"], undefined);
+		assert.equal(f.requests("model").length, 1);
+		const ownerReceipt = (await f.snapshot()).inbox.commands["tg-update:100:301"] as { goalWorkId: string | null; done: boolean };
+		assert.equal(ownerReceipt.goalWorkId, null);
 		assert.equal(ownerReceipt.done, true);
-		assert.equal(f.requests("model").length, 2);
 
 		await writeFile(join(f.directory, "state", "users.json"), JSON.stringify({ members: ["tg:200", "tg:201"], admins: ["tg:201"] }));
 		const laterStart = f.events.length;
-		f.start([start("Later goal"), { text: "Later goal saved." }]);
+		f.start([{ text: "Later goal saved." }]);
 		await f.until((event) => event.method === "getUpdates", laterStart);
-		f.updates([topic(303, "/ask@AcceptanceBot Establish the later goal.")]);
-		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-update:100:303" && event.body.state === "done", laterStart);
+		f.updates([topic(302, "/goal@AcceptanceBot Later goal", 201)]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "已解绑旧目标，新目标已建立，开始执行…", laterStart);
+		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith("Later goal saved."), laterStart);
+		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-goal:tg-update:100:302" && event.body.state === "done", laterStart);
 		await f.stop();
-		const later = await stoppedState(f.directory, conversationId);
-		assert.ok(later.work.current);
-		assert.notEqual(later.work.current, oldId);
-		assert.equal(later.work.records[later.work.current].goal, "Later goal");
+		const detached = await stoppedState(f.directory, conversationId);
+		const secondId = detached.work.current;
+		assert.ok(secondId);
+		assert.notEqual(secondId, firstId);
+		assert.equal(detached.work.records[secondId].goal, "Later goal");
+		assert.equal(detached.work.records[secondId].status, "active");
+		assert.equal(detached.work.records[firstId].status, "superseded");
+		assert.ok(detached.work.records[firstId].updatedAt > before.work.records[firstId].updatedAt);
+		assertWorkPreserved(detached.work.records[firstId], before.work.records[firstId]);
+		assert.deepEqual(detached.budget, before.budget);
+		for (const entry of before.entries) assert.deepEqual(detached.entries.find((candidate) => candidate.id === entry.id), entry);
+		assert.equal(detached.journal?.requests["command:tg-update:100:302"].operator, "tg:201");
+		assert.equal(detached.journal?.requests["command:tg-update:100:302"].workId, firstId);
+		assert.equal(detached.journal?.requests["command:tg-update:100:302"].created, secondId);
+		assert.equal(detached.entries.filter((entry) => entry.kind === "work.new_goal").length, 1);
+		assert.equal(f.requests("model").length, 2, "each goal run admits exactly one generation");
 
 		// Rewind only the isolated transport cursor to redeliver a completed old control request.
 		await writeFile(join(f.directory, "state", "telegram", "100.json"), JSON.stringify({ botId: "100", offset: 302 }));
 		const replayStart = f.events.length;
 		f.start();
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 302, replayStart);
-		f.updates([topic(302, "/goal@AcceptanceBot")]);
+		f.updates([topic(302, "/goal@AcceptanceBot Later goal", 201)]);
 		await f.until((event) => event.method === "getUpdates" && event.body.offset === 303, replayStart);
 		assert.equal(f.requests("telegram", "sendMessage").filter((event) => event.generation === f.generation).length, 0, "A completed old command must not announce or detach the later goal");
-		f.updates([topic(304, "/goal@AcceptanceBot", 201)]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。", replayStart);
-		await f.until((event) => event.method === "getUpdates" && event.body.offset === 305, replayStart);
-		f.updates([topic(305, "/goal@AcceptanceBot", 201)]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，请发送你的目标。", replayStart);
-		await f.until((event) => event.method === "getUpdates" && event.body.offset === 306, replayStart);
+		f.updates([topic(303, "/goal@AcceptanceBot", 201)]);
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "用法：/goal <目标描述>。命令直接建立目标并开始执行，完成后在此报告结果。", replayStart);
+		await f.until((event) => event.method === "getUpdates" && event.body.offset === 304, replayStart);
 		await f.stop();
 		const final = await stoppedState(f.directory, conversationId);
-		assert.equal(final.work.current, undefined);
-		assert.deepEqual(Object.keys(final.work.records), Object.keys(later.work.records));
-		for (const [id, record] of Object.entries(later.work.records)) assertWorkPreserved(final.work.records[id], record);
-		assert.deepEqual(final.budget, later.budget);
-		assert.equal(final.journal?.requests["command:tg-update:100:304"].workId, later.work.current);
-		assert.equal(final.journal?.requests["command:tg-update:100:304"].operator, "tg:201");
+		assert.equal(final.work.current, secondId);
+		assert.deepEqual(Object.keys(final.work.records), Object.keys(detached.work.records));
+		for (const [id, record] of Object.entries(detached.work.records)) assertWorkPreserved(final.work.records[id], record);
+		assert.deepEqual(final.budget, detached.budget);
 		const requests = final.journal?.requests ?? {};
-		assert.deepEqual(Object.keys(requests).sort(), ["command:tg-update:100:299", "command:tg-update:100:302", "command:tg-update:100:304", "command:tg-update:100:305"]);
-		assert.deepEqual(requests["command:tg-update:100:302"], detached.journal?.requests["command:tg-update:100:302"]);
-		assert.equal(Object.values(requests).filter((request) => request.workId !== null).length, 2);
-		assert.equal(Object.values(requests).filter((request) => request.workId === null).length, 2);
-		assert.equal(requests["command:tg-update:100:305"].workId, null);
-		assert.equal(requests["command:tg-update:100:305"].operator, "tg:201");
-		assert.equal(requests["command:tg-update:100:305"].entryId, undefined);
-		assert.equal(final.entries.filter((entry) => entry.kind === "work.new_goal").length, 2);
-		for (const entry of later.entries) assert.deepEqual(final.entries.find((candidate) => candidate.id === entry.id), entry);
-		assert.equal(f.requests("model").length, 4, "Control commands must not admit a model generation");
+		assert.deepEqual(Object.keys(requests).sort(), ["command:tg-update:100:301", "command:tg-update:100:302"]);
+		assert.equal(requests["command:tg-update:100:303"], undefined);
+		assert.equal(final.entries.filter((entry) => entry.kind === "work.new_goal").length, 1);
+		for (const entry of detached.entries) assert.deepEqual(final.entries.find((candidate) => candidate.id === entry.id), entry);
+		assert.equal(f.requests("model").length, 2, "Control commands must not admit a model generation");
 		assert.equal(f.requests("unexpected").length, 0);
 		passed = true;
 	} finally { await f.close(passed); }
 });
 
 test("main Telegram /goal with an objective establishes the work record directly", { ...posixOnly, timeout: 60_000 }, async (t) => {
-	const start = { tool: "dwell.work", arguments: { action: "start", goal: "Direct objective from the command", acceptance: ["The record exists"] } };
-	const f = await mainFixture(t, [start as never, { text: "Record established." }]);
+	const f = await mainFixture(t, [{ text: "Record established." }]);
 	let passed = false;
 	try {
 		await f.until((event) => event.method === "getUpdates");
 		f.updates([message(320, "/goal@AcceptanceBot Direct objective from the command")]);
-		await f.until((event) => event.method === "sendMessage" && event.body.text === "已开启目标模式，正在建立目标…");
+		await f.until((event) => event.method === "sendMessage" && event.body.text === "目标已建立，开始执行…");
 		await f.until((event) => event.method === "editMessageText" && String(event.body.text).startsWith("Record established."));
 		await f.until((event) => event.method === "telegram.output" && event.body.id === "tg-goal:tg-update:100:320" && event.body.state === "done");
 		await f.stop();
@@ -262,6 +271,7 @@ test("main Telegram /goal with an objective establishes the work record directly
 		const work = (await stoppedState(f.directory, conversationId)).work;
 		assert.ok(work.current);
 		assert.equal(work.records[work.current].goal, "Direct objective from the command");
+		assert.equal(work.records[work.current].creator, "tg:200");
 		passed = true;
 	} finally { await f.close(passed); }
 });

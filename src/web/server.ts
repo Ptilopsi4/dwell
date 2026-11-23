@@ -19,8 +19,7 @@ import { clampMinutes, conversationScope, pendingApprovals, setRunAttribution, s
 import { SCHEDULE_TASK_KIND, scanLiveTasks, type ScheduleInput } from "../ext/schedule.ts";
 import { PROC_TASK_KIND, type ProcInput } from "../ext/proc.ts";
 import { BackgroundDoc } from "../ext/background.ts";
-import { acceptWork, getWork, workReadyAnswer } from "../ext/work.ts";
-import { workReadyNotice } from "../answer.ts";
+import { getWork } from "../ext/work.ts";
 import { beginNewGoal } from "../new-goal.ts";
 import { recentReports } from "../report.ts";
 import type { Sessions } from "../sessions.ts";
@@ -228,24 +227,8 @@ export function presentPanelEntry(entry: EntryRecord): EntryRecord {
 		: message) };
 }
 
-/** The browser receives a ready notice only after its receipt's task and answer match. */
-export async function presentPanelAnswerEntry(harness: Pick<Harness, "commit">, conversationId: number, entry: EntryRecord): Promise<EntryRecord & { workReady?: { answerEntryId: number; workId: string; verified: boolean; summary?: string; text: string } }> {
-	const { workReady: _storedNotice, ...stored } = entry as EntryRecord & { workReady?: unknown };
-	const presented = presentPanelEntry(stored);
-	const result = entry.model?.[0];
-	const diagnostics = ToolResultEntry.is(entry) ? entry.data?.diagnostics : undefined;
-	if (entry.kind !== "pi.tool-result" || entry.conversationId !== conversationId || entry.byTaskId === undefined || result?.role !== "toolResult" || result.toolName !== "dwell.work" || result.isError || diagnostics?.some((diagnostic) => diagnostic.severity === "error")) return presented;
-	const details = result.details;
-	if (typeof details !== "object" || details === null || !("workReady" in details) || details.workReady !== true) return presented;
-	const answerEntryId = await harness.commit(async (tx) => {
-		const task = await tx.task(entry.byTaskId!);
-		const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
-		return task?.kind === "pi.tool" && task.conversationId === conversationId && input?.kind === "model" && input.callId === result.toolCallId ? input.assistant : undefined;
-	}, BACKGROUND_CONTEXT);
-	if (answerEntryId === undefined) return presented;
-	const ready = await workReadyAnswer(harness, conversationId, answerEntryId);
-	if (ready === undefined || !("workId" in details) || ready.workId !== details.workId || !("verified" in details) || ready.verified !== details.verified) return presented;
-	return { ...presented, workReady: { ...ready, answerEntryId, text: workReadyNotice(ready.verified, ready.summary) } };
+export async function presentPanelAnswerEntry(harness: Pick<Harness, "commit">, conversationId: number, entry: EntryRecord): Promise<EntryRecord> {
+	return presentPanelEntry(entry);
 }
 
 /** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
@@ -401,42 +384,21 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			json(res, 200, await getWork(harness, id));
 			return;
 		}
-			if (req.method === "POST" && url.pathname === "/api/work/goal") {
-				const body = await readBody(req);
-				const id = Number(body?.id);
-				const workId = body?.workId;
-				const requestId = body?.requestId;
-				if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200) throw new HttpError(400, "会话 ID、当前工作 ID 和请求 ID 为必填项");
-				if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
-				try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId })); }
-				catch (error) {
-					// 只有已知冲突才向操作者呈现原文（409）；其余是内部故障，统一 500 避免英文堆栈或 undefined 透给面板
-					const known = new Set(["该开启目标请求与原记录不一致", "请在父会话中开启新目标", "当前仍在运行或有排队输入，请先等待完成或取消", "当前目标已变化，请刷新后重试", "本会话的目标操作记录已满，请开启新的会话"]);
-					const message = error instanceof Error && error.message !== undefined ? error.message : "";
-					console.error("[dwell] 开启新目标未通过:", error);
-					throw known.has(message) ? new HttpError(409, message) : new HttpError(500, "开启新目标失败，请稍后重试；若持续失败请查看服务日志。");
-				}
-				return;
-			}
-			if (req.method === "POST" && url.pathname === "/api/work/accept") {
+		if (req.method === "POST" && url.pathname === "/api/work/goal") {
 			const body = await readBody(req);
 			const id = Number(body?.id);
-			const workId = typeof body?.workId === "string" ? body.workId : "";
-			if (!Number.isSafeInteger(id) || id <= 0 || workId === "") throw new HttpError(400, "会话 ID 和工作记录 ID 为必填项");
+			const workId = body?.workId;
+			const requestId = body?.requestId;
+			const goal = typeof body?.goal === "string" ? body.goal : "";
+			if (!Number.isSafeInteger(id) || id <= 0 || (workId !== null && (typeof workId !== "string" || workId === "")) || typeof requestId !== "string" || requestId.trim() === "" || requestId.length > 200 || goal.trim() === "" || goal.length > 4000) throw new HttpError(400, "会话 ID、目标描述和请求 ID 为必填项");
 			if (await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) === undefined) throw new HttpError(404, "会话不存在");
-			try { json(res, 200, await acceptWork(harness, id, workId, feishu.operator())); }
+			try { json(res, 200, await beginNewGoal(harness, { conversationId: id, expectedWorkId: workId, operator: feishu.operator(), requestId, goal })); }
 			catch (error) {
-				const messages: Record<string, string> = {
-					"Work record not found": "工作记录不存在，请刷新记录。",
-					"Work must be ready for review before acceptance": "工作状态已变化，请刷新记录。只有待验收的工作才能确认验收。",
-					"Run verify successfully before requesting review or accepting this work": "缺少有效的验证回执，请让 Agent 完成验证后重新提交验收。",
-					"Verified artifacts changed; run verify again before review or acceptance": "验证后的产物已发生变化，请让 Agent 重新验证后再提交验收。",
-					"Work verification changed during acceptance": "验收期间验证记录已更新，请刷新记录后重新核对。",
-				};
-				console.error("[dwell] 工作验收未通过:", error);
-				// 字典命中的是业务冲突（409 给操作者可理解的文案）；其余是内部故障，统一 500 不透传原始英文
+				// 只有已知冲突才向操作者呈现原文（409）；其余是内部故障，统一 500 避免英文堆栈或 undefined 透给面板
+				const known = new Set(["该开启目标请求与原记录不一致", "请在父会话中开启新目标", "当前仍在运行或有排队输入，请先等待完成或取消", "当前目标已变化，请刷新后重试", "本会话的目标操作记录已满，请开启新的会话", "缺少目标描述，用法：/goal <目标描述>"]);
 				const message = error instanceof Error && error.message !== undefined ? error.message : "";
-				throw messages[message] !== undefined ? new HttpError(409, messages[message]) : new HttpError(500, "无法确认验收，请稍后重试；若持续失败请查看服务日志。");
+				console.error("[dwell] 开启新目标未通过:", error);
+				throw known.has(message) ? new HttpError(409, message) : new HttpError(500, "开启新目标失败，请稍后重试；若持续失败请查看服务日志。");
 			}
 			return;
 		}
@@ -476,13 +438,13 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 		if (req.method === "POST" && url.pathname === "/api/reset") {
 			const conv = await convFromBody(req);
 			if (conv === undefined) { json(res, 404, { error: "conversation not found" }); return; }
-			// 清空上下文不清 work 记录：未完结的 goal 会以宿主数据继续注入，提示操作者用 /goal 或验收收尾
-			const open = Object.values((await getWork(harness, conv.id as number)).records).filter((record) => record.status !== "accepted");
+			// 清空上下文不清 work 记录：当前 goal 会以宿主数据继续注入，提示操作者用 /goal 切换
+			const open = Object.values((await getWork(harness, conv.id as number)).records).filter((record) => record.status === "active");
 			await conv.reset(undefined, BACKGROUND_CONTEXT);
 			// 新上下文里落一条展示型分隔回（模型不可见），panel 侧可见「已清空」而非无声空白
 			await conv.submit({ type: "write", entry: { kind: "context.reset", data: { by: "panel" } } }, BACKGROUND_CONTEXT);
 			void feishu.notice(conv.id as number, "管理员在 panel 清空了这条任务线的上下文，之后的消息从新对话开始。");
-			json(res, 200, { ok: true, ...(open.length === 0 ? {} : { notice: `此任务线仍有 ${open.length} 条未验收的工作记录（goal 文本会在新对话中继续注入）；在「工作记录」页验收，或用 /goal 开启目标模式。` }) });
+			json(res, 200, { ok: true, ...(open.length === 0 ? {} : { notice: `此任务线仍有 ${open.length} 条进行中的工作记录（goal 文本会在新对话中继续注入）；用 /goal <描述> 建立新目标可解绑旧目标。` }) });
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/abort") {

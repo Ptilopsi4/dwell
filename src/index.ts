@@ -12,7 +12,7 @@ import { APP_ROOT, DATA_DIR, DEFAULT_CWD, STATE_DIR, initStateDir, stateFile } f
 import { Sessions } from "./sessions.ts";
 import { Users } from "./users.ts";
 import { beginNewGoal, NewGoalDoc } from "./new-goal.ts";
-import { acceptWork, getWork, workBudgetStopReason } from "./ext/work.ts";
+import { getWork, workBudgetStopReason } from "./ext/work.ts";
 import { connectChannel, downloadMessageResource, matchMention, type CardActionEvent, type LarkChannel, type MarkdownStreamController, type SendInput } from "./feishu/channel.ts";
 import { emptyReply, fallbackRoute, groupAdmits, messageAction, messageDestination, sameDestination, type ConversationDestination, type NormalizedMessage, type TelegramDestination } from "./pipeline.ts";
 import { TelegramBot, TelegramError, telegramChatKey, type TelegramCallback } from "./telegram.ts";
@@ -528,6 +528,23 @@ function submitInput(conversation: Conversation, content: string, msg: Normalize
 	);
 }
 
+/** /goal 起跑输入：同 submitInput，但 entry data 钉 work 归属（首跑即绑新建记录，不随后续切目标漂移）。 */
+function submitGoalInput(conversation: Conversation, content: string, msg: NormalizedMessage, workId: string | undefined) {
+	const via = msg.platform ?? "feishu";
+	const authority = sessions.destinationOf(conversation.id as number).kind === "panel" ? "panel" : via;
+	if (!conversationActorAllowed(msg.senderId, conversation.id, authority)) throw new Error("输入提交前使用权限已撤销，未启动模型。");
+	return conversation.submit(
+		{
+			type: "input",
+			content,
+			entry: { kind: "chat.message", data: { sender: msg.senderId, senderName: msg.senderName ?? "", chatType: msg.chatType, via, ...(authority === via ? {} : { authorityVia: authority }), ...(workId === undefined ? {} : { work: { conversationId: conversation.id as number, id: workId } }) } },
+			requestId: msg.requestId ?? msg.messageId,
+			whenBusy: conversationInputMode(conversation.id),
+		},
+		BACKGROUND_CONTEXT,
+	);
+}
+
 /** 流式回复：watch pi.live 的节流 partial，前缀检测 append 增量（轮切换/重试自动重置游标），settled 后补齐最终答案。 */
 async function submitAndReply(
 	conversation: Conversation,
@@ -883,7 +900,6 @@ async function notifyAutonomousPanelResult(conversationId: number, submission: A
 			const answer = await presentAnswer(harness, conversationId, settled.answer);
 			text = answer.text;
 			if (answer.waiting) status = "等待后台任务";
-			else if (answer.ready) status = "待验收";
 		} else {
 			status = "失败";
 			text = await runFailureReason(conversationId, settled);
@@ -1291,8 +1307,7 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 					`私聊：直接发送文字、图片或文件，也可使用 /ask 内容。`,
 					`群聊：使用 /ask${bot} 内容，或回复 ${bot} 的消息继续；群聊需先获准使用。`,
 					"/new：开启新任务线，原任务线与历史消息保留（线主/管理员）",
-					"/goal [描述]：开启目标模式并解绑旧目标；带描述时直接建立该目标（线主/管理员）",
-				"/accept：验收当前待验收的工作目标（线主/管理员）",
+					"/goal <描述>：建立新目标并开始执行（旧目标解绑为历史；线主/管理员）",
 					"/cancel：中止当前任务，不会取消后台任务（线主/管理员）",
 					users.isAllowed(msg.senderId) ? "/approve [分钟]：开启危险命令批准窗口，默认 10 分钟" : "危险操作：需 dwell 管理员点击审批卡批准，群成员不能自行 /approve",
 					"/deny：关闭批准窗口并取消待审请求",
@@ -1315,24 +1330,22 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 				await replyTo(target, "这是他人的任务线，仅线主或管理员可开启新目标。");
 				return;
 			}
+			const objective = parts.slice(1).join(" ").trim();
+			if (objective === "") { await replyTo(target, "用法：/goal <目标描述>。命令直接建立目标并开始执行，完成后在此报告结果。"); return; }
 			const requestId = `command:${msg.requestId ?? msg.messageId}`;
 			const previous = receipt === undefined ? (await harness.snapshot(NewGoalDoc, conversation.id, context))?.requests[requestId] : undefined;
 			const expectedWorkId = receipt === undefined ? previous === undefined ? (await getWork(harness, convId)).current ?? null : previous.workId : receipt.goalWorkId ?? null;
 			let result;
-			try { result = await beginNewGoal(harness, { conversationId: convId, expectedWorkId, operator: msg.senderId, requestId }); }
+			try { result = await beginNewGoal(harness, { conversationId: convId, expectedWorkId, operator: msg.senderId, requestId, goal: objective }); }
 			catch (error) { await replyTo(target, (error as Error).message); return; }
-			const objective = parts.slice(1).join(" ").trim();
-			await replyTo(target, result.changed
-				? objective === "" ? "已开启目标模式，并解绑旧目标。聊天历史、旧记录和预算保留，请发送新的目标。" : "已开启目标模式，并解绑旧目标。正在建立新目标…"
-				: objective === "" ? "已开启目标模式，请发送你的目标。" : "已开启目标模式，正在建立目标…", conversation);
-			if (objective === "") break;
-			// 带描述时直接走普通输入管线（与手发消息同路）：模型据此调 dwell.work start 落记录
+			await replyTo(target, result.changed ? "已解绑旧目标，新目标已建立，开始执行…" : "目标已建立，开始执行…", conversation);
+			// 一发即忘：目标已由 host 落记录，描述作为普通输入起跑（entry data 钉 work 归属），完成后模型直接在本会话报告
 			if (msg.platform === "telegram") {
 				const id = `tg-goal:${msg.requestId ?? msg.messageId}`;
-			await telegramInbox.enqueue(id, { conversationId: convId, sender: msg.senderId, authorityVia: "telegram", destination: target.destination as never, replyTo: msg.messageId, requestId: id, raw: { ...msg, content: objective, resources: [], replyToMessageId: undefined } });
+			await telegramInbox.enqueue(id, { conversationId: convId, sender: msg.senderId, authorityVia: "telegram", destination: target.destination as never, replyTo: msg.messageId, requestId: id, raw: { ...msg, content: objective, resources: [], replyToMessageId: undefined, ...(result.created === undefined ? {} : { work: { conversationId: convId, id: result.created } }) } });
 				telegramWorkers.wake();
 			} else {
-				const submission = await submitInput(conversation, objective, msg);
+				const submission = await submitGoalInput(conversation, objective, msg, result.created);
 				const record = await submission.status(BACKGROUND_CONTEXT);
 				if (record.status !== "queued") void submitAndReply(conversation, submission, target);
 			}
@@ -1417,28 +1430,6 @@ async function runCommand(text: string, conversation: Conversation, msg: Normali
 			} else await conversation.abort(context);
 			await replyTo(target, "已中止当前任务。");
 			break;
-		case "/accept": {
-			if (!isOwner && !admin) {
-				await replyTo(target, "这是他人的任务线，仅线主或管理员可验收。");
-				return;
-			}
-			const current = await getWork(harness, convId);
-			if (current.current === undefined) { await replyTo(target, "当前没有待验收的工作目标。"); return; }
-			const messages: Record<string, string> = {
-				"Work must be ready for review before acceptance": "工作尚未提交验收（模型需先完成并提交评审），当前状态无法验收。",
-				"Run verify successfully before requesting review or accepting this work": "缺少有效的验证回执，请让 Agent 完成验证后重新提交。",
-				"Verified artifacts changed; run verify again before review or acceptance": "验证后的产物已变化，请让 Agent 重新验证。",
-				"Work verification changed during acceptance": "验收期间验证记录已更新，请重试。",
-			};
-			try {
-				const record = await acceptWork(harness, convId, current.current, msg.senderId);
-				await replyTo(target, `已验收（${record.goal.slice(0, 120)}）。`, conversation);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : "";
-				await replyTo(target, messages[message] ?? `验收未通过：${message}`);
-			}
-			break;
-		}
 		case "/approve": {
 			if (!users.isAllowed(msg.senderId)) {
 				await replyTo(target, "群成员任务的危险操作需 dwell 管理员点击审批卡批准；你可以用 /deny 拒绝自己的请求。");
@@ -1545,8 +1536,7 @@ function helpCard(): Record<string, unknown> {
 		body: { elements: [
 			{ tag: "markdown", content: [
 				cmd("/new", "开启新任务线，保留原任务线与历史消息（线主/管理员）"),
-				cmd("/goal", "开启目标模式并解绑旧目标，保留聊天历史与旧记录；命令后可直接跟目标描述（线主/管理员）"),
-				cmd("/accept", "验收当前待验收的工作目标（线主/管理员）"),
+				cmd("/goal <描述>", "建立新目标并开始执行，旧目标解绑为历史，聊天历史保留；完成后 Agent 直接在会话里报告结果（线主/管理员）"),
 				cmd("/status", "查看运行中任务（管理员）"),
 				cmd("/cancel", "中止当前任务（线主/管理员；不影响后台任务）"),
 				cmd("/approve [分钟]", "批准危险命令窗口，默认 10 分钟"),

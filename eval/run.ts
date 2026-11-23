@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadModelsConfig, modelConnectionConfig, type ResolvedModelConnection } from "../src/models.ts";
 import { modelFailure, type ModelFailure } from "../src/model-failure.ts";
-import { cases, gradeBehavior, gradeFiles, gradeVerifiedArtifacts, workspaceFiles, type TrialEvidence, type TrialInput } from "./cases.ts";
+import { cases, gradeBehavior, gradeFiles, workspaceFiles, type TrialEvidence, type TrialInput } from "./cases.ts";
 import { requestCostBound, type CostEvidence } from "./budget.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -188,7 +188,7 @@ export async function run(options: Options): Promise<{ root: string; passed: boo
 				// At this point the harness is closed and the child has exited. Hidden assertions run here.
 				let assertions = gradeBehavior(id, evidence, variant);
 				let files: Record<string, string> = {};
-				try { files = await workspaceFiles(paths.work); assertions.push(...gradeFiles(id, files, variant), ...gradeVerifiedArtifacts(id, evidence, files, paths.work)); }
+				try { files = await workspaceFiles(paths.work); assertions.push(...gradeFiles(id, files, variant)); }
 				catch (error) { assertions.push(String(error)); }
 				if (id === "node-bugfix" || c.hiddenAssertions !== undefined) {
 					const before = JSON.stringify(files);
