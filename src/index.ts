@@ -284,6 +284,10 @@ async function main(): Promise<void> {
 	}
 	if (process.env.DWELL_PANEL_ONLY === "1") {
 		console.log("[dwell] panel-only 模式（未连接飞书或 Telegram）");
+		// 两个 bot 入口都未启用：残留投递记录无人处理，落终态防死行占容量、污染 panel 计数（与仅 Telegram 部署对飞书记录的处置一致）
+		await reattachTelegramReplies();
+		const droppedFeishu = await feishuDeliveries.failPending("feishu-unavailable");
+		if (droppedFeishu > 0) console.error(`[dwell] 飞书入口未启用，${droppedFeishu} 条待发回报已标记失败。`);
 		if (githubEnabled()) void githubCheck();
 		await replayApprovalDecisions();
 		harness.resume();
@@ -369,6 +373,15 @@ async function route(msg: NormalizedMessage): Promise<{ conversation: Conversati
 		}
 	}
 	const members = destination.kind === "telegram" && msg.chatType === "group" && telegramChats?.accessMode(destination) === "members";
+	// 飞书平台侧重投（ack 超时/重连）横跨一次 /new 时，旧消息按默认路由会落到新线、requestId 去重失效：
+	// 已锚定的消息回到原线，让 pi-durable 的 requestId 幂等生效；首投尚无锚点，不受影响
+	if (msg.platform !== "telegram" && msg.replyToMessageId === undefined) {
+		const anchored = sessions.follow(msg.messageId);
+		if (anchored !== undefined) {
+			const conversation = await sessions.byConversation(anchored);
+			if (conversation !== undefined) return { conversation, degraded: false };
+		}
+	}
 	// replyTo 跟随（优先级最高，群聊/私聊通用）
 	if (msg.replyToMessageId !== undefined) {
 		const target = sessions.follow(msg.replyToMessageId);

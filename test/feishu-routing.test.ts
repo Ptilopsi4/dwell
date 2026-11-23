@@ -167,6 +167,21 @@ test("bot reset receipt namespaces stay independent and historical Telegram rece
 	} finally { await t.close(); }
 });
 
+test("retired bot route aliases pruned from the durable doc also leave the projection and sessions.json", { timeout: 60_000 }, async () => {
+	const t = await setup();
+	try {
+		const sessions = t.sessionsFor();
+		const telegram = { ...message("direct"), platform: "telegram" as const, destination: { kind: "telegram" as const, botId: "100", chatId: "200" }, chatId: "tg:100:200", messageId: "tg:100:200:1", senderId: "tg:200" };
+		await sessions.forTelegram(telegram);
+		for (let i = 0; i < 520; i++) await sessions.forTelegram({ ...telegram, messageId: `tg:100:200:${i + 2}` }, `reset-${i}`);
+		const retiredInDoc = (await t.harness.commit(async (tx) => Object.keys((await tx.doc(TelegramSessionDoc)).routes), context)).filter((key) => key.includes("#old:"));
+		const retiredInJson = Object.keys(JSON.parse(await readFile(join(t.directory, "sessions.json"), "utf8")) as Record<string, unknown>).filter((key) => key.includes("#old:"));
+		assert.equal(retiredInDoc.length, 512);
+		assert.ok(retiredInJson.length <= 512, `projection keeps ${retiredInJson.length} retired aliases`);
+		for (const key of retiredInJson) assert.ok(retiredInDoc.includes(key), `${key} was pruned from the doc but survives in sessions.json`);
+	} finally { await t.close(); }
+});
+
 test("Feishu /new starts work after a real Harness has retained 64 goals without deleting the old records", { timeout: 60_000 }, async () => {
 	const t = await setup({ work: true });
 	try {
