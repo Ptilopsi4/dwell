@@ -99,7 +99,7 @@ An empty global allowlist denies private and strict-group tasks; member-enabled 
 | `DWELL_PANEL_ONLY` | `1` starts only the panel, without connecting to Feishu or Telegram, for local development |
 | `DWELL_PANEL_TRUST_LOCAL` | `1` makes the panel accept requests from the local machine |
 
-Messages and approvals from the panel are recorded under `DWELL_PANEL_USER`. Panel-only mode also accepts requests from the local machine.
+Messages and approvals from the panel are recorded under `DWELL_PANEL_USER`. Panel-only mode also accepts requests from the local machine. The operator should be an authorized user: the panel can always decide approvals, but Telegram approval buttons and `/approve` only work for allowlisted users or admins.
 
 Use `DWELL_PANEL_TRUST_LOCAL=1` only for a same-host reverse proxy or an `ssh -L` tunnel. With it enabled, bash can reach the panel, including the approval API. See [Security boundaries](security.md) and [Deployment](deployment.md).
 
