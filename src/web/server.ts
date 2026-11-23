@@ -227,10 +227,6 @@ export function presentPanelEntry(entry: EntryRecord): EntryRecord {
 		: message) };
 }
 
-export async function presentPanelAnswerEntry(harness: Pick<Harness, "commit">, conversationId: number, entry: EntryRecord): Promise<EntryRecord> {
-	return presentPanelEntry(entry);
-}
-
 /** 通讯录查询不阻塞列表：超时即返回未解析，下一轮轮询命中缓存。 */
 const within = <T>(p: Promise<T>, ms: number): Promise<T | undefined> =>
 	Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
@@ -614,7 +610,7 @@ export function startPanel({ harness, sessions, users, directory, feishu, telegr
 			const v = view.value as unknown as { entries: EntryRecord[]; docs?: Record<string, unknown> };
 			const ids = v.entries.map((e) => String(e.id));
 			const append = sent.length > 0 && sent.length <= ids.length && ids[0] === sent[0] && ids[sent.length - 1] === sent[sent.length - 1];
-			const entries = await Promise.all((append ? v.entries.slice(sent.length) : v.entries).map((entry) => presentPanelAnswerEntry(harness, convId, entry)));
+			const entries = await Promise.all((append ? v.entries.slice(sent.length) : v.entries).map((entry) => presentPanelEntry(entry)));
 			if (closed) return;
 			const live = v.docs?.["pi.live"] as LiveDoc | undefined;
 			const slim = live?.run === undefined ? null : {
