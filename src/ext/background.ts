@@ -141,6 +141,9 @@ export function makeBackgroundDeliverer(deps: BackgroundDeps, getHarness: () => 
 				const cap = backgroundCapViolation(live.filter((task) => task.conversationId === parent).length, live.length);
 				// Throwing leaves the decision journal pending; false would permanently discard its delivery.
 				if (cap !== undefined) throw new Error(cap);
+				// 遗留子会话可能只在 WorkspaceDoc 标了 stopped 而无 StopDoc 记录：目标永久不可用，按拒绝投递处理，
+				// 否则 checkBackgroundWorkspace 抛错会让审批决定按 pending 无限退避重试
+				if ((await tx.doc(WorkspaceDoc)).children[String(child)]?.stopped === true) return false;
 				await checkBackgroundWorkspace(tx, parent, child);
 				const work = (await workIdentity(tx, child, approval?.budgetId)) ?? null;
 				if (deps.isAllowed?.(creator, parent, via) === false) return false;
