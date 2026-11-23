@@ -114,6 +114,22 @@ test("concurrent flushes and repeated close preserve the last admitted snapshot"
 	assert.equal(JSON.parse(await readFile(file, "utf8")).metrics[0].sum, 3);
 });
 
+test("a failed final flush during close is logged instead of failing the whole shutdown", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "dwell-telemetry-"));
+	const blocker = join(directory, "blocker");
+	await writeFile(blocker, "not a directory");
+	const telemetry = new RuntimeTelemetry(join(blocker, "runtime-telemetry.json"));
+	await telemetry.start();
+	const errors: string[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+	try {
+		await telemetry.close();
+		assert.ok(errors.some((line) => line.includes("运行观测快照保存失败")), "the flush failure is still reported");
+		await telemetry.flush();
+	} finally { console.error = original; await rm(directory, { recursive: true, force: true }); }
+});
+
 test("closing an unstarted collector preserves the prior runtime snapshot", async (t) => {
 	const { telemetry, file } = await fixture(t);
 	telemetry.context.metrics!.counter("pi.durable.reports").add(4, { type: "task_error" });

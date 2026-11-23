@@ -146,6 +146,7 @@ export class RuntimeTelemetry {
 	}
 	close(): Promise<void> {
 		this.stop();
-		return this.#closing ??= (async () => { await this.#flush?.catch(() => {}); try { if (this.#started) await this.flush(); } finally { this.#closed = true; } })();
+		// 收尾快照失败只记日志（flush 内已打）：纯诊断数据不能把整个关闭判成失败、跳过 panel 优雅关闭
+		return this.#closing ??= (async () => { await this.#flush?.catch(() => {}); try { if (this.#started) await this.flush().catch(() => {}); } finally { this.#closed = true; } })();
 	}
 }
