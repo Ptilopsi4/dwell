@@ -8,7 +8,7 @@ Conversations and task checkpoints live in SQLite, so interrupted work can resum
 - Work with files, run commands, search the web, and return files to the conversation.
 - Schedule work, delegate to background agents, or keep a managed process running.
 - Use approval windows, run budgets, and a single-writer workspace policy to control execution.
-- Verify declared outputs and review the result before recording acceptance.
+- Launch a durable goal with `/goal` and get the result reported back in chat; progress survives compaction and restarts.
 
 dwell runs TypeScript directly on Node.js 26 or later, with no build step.
 It uses [pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.4.0
@@ -56,7 +56,7 @@ isolation is configured; read [Docker deployment](docs/deployment.md#docker) bef
 | --- | --- |
 | Choose a model, vision connection, or environment setting | [Configuration](docs/configuration.md) |
 | Use chats, commands, approvals, attachments, or the panel | [Usage](docs/usage.md) |
-| Understand budgets, background work, verification, and tools | [Agent runtime](docs/agent.md) |
+| Understand budgets, background work, durable goals, and tools | [Agent runtime](docs/agent.md) |
 | Understand trust, credentials, file access, and isolation | [Security](docs/security.md) |
 | Install, monitor, update, back up, or restore a service | [Deployment and operations](docs/deployment.md) |
 | Connect a dedicated GitHub account | [GitHub integration](docs/github.md) |

@@ -208,7 +208,7 @@ So the panel must be opened from **another machine**. A common setup:
 - Set `DWELL_PANEL_URL` if notifications should link to the panel, or if you open it by a domain name instead of an IP
 - Health checks from the server itself only work on `/healthz`; every other path returns 403 from the server
 
-The request policy also applies to readiness, runtime, and work-acceptance APIs. See [Security boundaries](security.md) for the policy, [Runtime alerts](#runtime-alerts) for health and telemetry, and [Agent behavior](agent.md) for verification and operator acceptance. Panel features are described in [Usage](usage.md#web-panel).
+The request policy also applies to readiness, runtime, and work/goal APIs. See [Security boundaries](security.md) for the policy, [Runtime alerts](#runtime-alerts) for health and telemetry, and [Agent behavior](agent.md) for work records. Panel features are described in [Usage](usage.md#web-panel).
 
 A reverse proxy or an `ssh -L` tunnel on the same host makes every request look local, and the panel refuses them all. `DWELL_PANEL_TRUST_LOCAL=1` turns the local-source check off for such setups, but then bash can reach the panel and its approval API again. Prefer a setup where the browser connects from another machine.
 

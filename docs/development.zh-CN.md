@@ -37,7 +37,7 @@ npm run eval     # 合成 faux 评测；忽略宿主模型配置与凭证
 npm run eval -- --cases csv-reconciliation,node-bugfix --trials 1
 ```
 
-这四项含隐藏终态检查的 case 使用 v3 指导，包含留痕修订检查、实际验证回执和宿主结束待验收 run；发布核查还必须显式等待后台结果。v3 保留 v2 的 fixture、隐藏断言和最终产物规则。manifest 记录 `caseVersion` 与 `comparabilityNote`；不同版本的指导和执行契约有变化，跨版本分数不能作为受控对比。
+这四项含隐藏终态检查的 case 使用 v4 指导，对应一发即忘的 goal 流程：目标由宿主直建，Agent 用 `dwell.work` checkpoint 保存进度与阻塞项、自行验证并在会话里报告结果；发布核查还必须显式等待后台结果。v4 保留旧版本的 fixture、隐藏断言和最终产物规则。manifest 记录 `caseVersion` 与 `comparabilityNote`；不同版本的指导和执行契约有变化，跨版本分数不能作为受控对比。
 
 `node-bugfix` 使用 v2。任务给出固定的 Node 验证命令；评分要求编辑后执行该命令，取得与实际工具调用关联的成功回执。最终代码断言保持不变。旧版本只检查是否提出过 bash 调用，其分数不能与 v2 直接比较。
 

@@ -173,29 +173,19 @@ test("Feishu /new starts work after a real Harness has retained 64 goals without
 		const sessions = t.sessionsFor();
 		const msg = message("direct");
 		const original = await sessions.forFeishu(msg);
-		await t.harness.commit(async (tx) => { (await tx.doc(WorkDoc, original.id)).goalMode = true; }, context);
-		const start = (goal: string) => fauxAssistantMessage(fauxToolCall("dwell.work", { action: "start", goal, acceptance: ["The requested result is available"] }), { stopReason: "toolUse" });
-		const submit = async (conversation: typeof original, goal: string) => {
-			t.faux.setResponses([start(goal), fauxAssistantMessage("Goal recorded.")]);
-			return (await conversation.submit({ type: "input", content: goal, entry: { kind: "chat.message", data: { sender: msg.senderId, via: "feishu" } } }, context)).wait(context);
-		};
+		let work = await getWork(t.harness, original.id);
 		for (let index = 0; index < 64; index++) {
-			assert.equal((await submit(original, `Retained goal ${index}`)).status, "done");
-			const work = await getWork(t.harness, original.id);
+			await beginNewGoal(t.harness, { conversationId: original.id, expectedWorkId: work.current ?? null, operator: msg.senderId, requestId: `retained-goal-${index}`, goal: `Retained goal ${index}` });
+			work = await getWork(t.harness, original.id);
 			assert.ok(work.current);
-			await beginNewGoal(t.harness, { conversationId: original.id, expectedWorkId: work.current, operator: msg.senderId, requestId: `retained-goal-${index}` });
 		}
-		await submit(original, "Goal exceeding the old line limit");
+		await assert.rejects(beginNewGoal(t.harness, { conversationId: original.id, expectedWorkId: work.current ?? null, operator: msg.senderId, requestId: "retained-goal-64", goal: "Goal exceeding the old line limit" }), /64 条工作记录/);
 		const exhausted = await getWork(t.harness, original.id);
 		assert.equal(Object.keys(exhausted.records).length, 64);
-		assert.equal(exhausted.current, undefined);
-		const entries = await t.harness.commit(async (tx) => (await tx.scanEntries({ conversationId: original.id, order: "ascending" }, 1000)).items, context);
-		const failure = entries.filter((entry) => ToolResultEntry.is(entry)).at(-1)!;
-		assert.match(JSON.stringify(failure.model), /64 work records/);
+		assert.ok(exhausted.current);
 		const fresh = await sessions.forFeishu(msg, "om_work_limit_new");
-		await t.harness.commit(async (tx) => { (await tx.doc(WorkDoc, fresh.id)).goalMode = true; }, context);
 		assert.notEqual(fresh.id, original.id);
-		assert.equal((await submit(fresh, "Fresh goal after new task line")).status, "done");
+		await beginNewGoal(t.harness, { conversationId: fresh.id, expectedWorkId: null, operator: msg.senderId, requestId: "fresh-goal", goal: "Fresh goal after new task line" });
 		const renewed = await getWork(t.harness, fresh.id);
 		assert.ok(renewed.current);
 		assert.equal(Object.keys(renewed.records).length, 1);

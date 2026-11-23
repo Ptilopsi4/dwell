@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable";
 import { presentPanelEntry } from "../src/web/server.ts";
-import { BACKGROUND_WAIT_NOTICE, WORK_READY_NOTICE } from "../src/answer.ts";
+import { BACKGROUND_WAIT_NOTICE } from "../src/answer.ts";
 
 for (const [detail, expected] of [
 	['HTTP 401 {"message":"private-provider-body; credential=secret"}', "模型连接认证失败"],
@@ -48,12 +48,12 @@ for (const failed of [false, true]) test(`panel background abort ${failed ? "rep
 	assert.equal(refreshed, failed ? 0 : 1);
 });
 
-for (const kind of ["ready", "wait"] as const) for (const severity of ["info", "warn", "error"] as const) test(`panel ${kind} rendering keeps ${severity} diagnostics separate from successful notices`, () => {
+for (const kind of ["wait"] as const) for (const severity of ["info", "warn", "error"] as const) test(`panel ${kind} rendering keeps ${severity} diagnostics separate from successful notices`, () => {
 	const status = { className: "", innerHTML: "" };
 	const meta = { textContent: "" };
 	const classes = new Map<string, boolean>();
 	const row = {
-		_readyCandidate: kind === "ready", _waitCandidate: kind === "wait", _answerEntryId: 12, open: false,
+		_waitCandidate: kind === "wait", _answerEntryId: 12, open: false,
 		classList: { toggle: (name: string, value: boolean) => classes.set(name, value) },
 		querySelector: (selector: string) => selector === ".st" ? status : meta,
 	};
@@ -69,8 +69,7 @@ for (const kind of ["ready", "wait"] as const) for (const severity of ["info", "
 	const entry = {
 		kind: "pi.tool-result", byTaskId: 22,
 		data: { diagnostics: [{ severity, code: "fixture", message: "The diagnostic remains visible" }] },
-		model: [{ role: "toolResult", toolName: kind === "ready" ? "dwell.work" : "dwell.task.wait", toolCallId: "call", isError: false, content: [{ type: "text", text: "Output with the diagnostic" }], details: kind === "ready" ? { workReady: true, workId: "work:1", verified: true } : { waitingForBackground: true } }],
-		...(kind === "ready" ? { workReady: { answerEntryId: 12, workId: "work:1", verified: true, text: WORK_READY_NOTICE } } : {}),
+		model: [{ role: "toolResult", toolName: "dwell.task.wait", toolCallId: "call", isError: false, content: [{ type: "text", text: "Output with the diagnostic" }], details: { waitingForBackground: true } }],
 	};
 	runInNewContext(`${appendRenderer}\nappendEntry(entry);`, {
 		entry, T: { calls: new Map([["call", row]]) }, $: () => ({ appendChild: (notice: typeof notices[number]) => notices.push(notice) }),
@@ -80,12 +79,7 @@ for (const kind of ["ready", "wait"] as const) for (const severity of ["info", "
 	assert.equal(classes.get("bad"), severity === "error");
 	assert.equal(notices.length, severity === "error" ? 0 : 1);
 	if (severity !== "error") {
-		assert.equal(notices[0]!.textContent, kind === "ready" ? `${WORK_READY_NOTICE}查看工作与验收` : BACKGROUND_WAIT_NOTICE);
-		if (kind === "ready") {
-			const button = notices[0]!.children[0]!.children[0]!;
-			button.onclick!();
-			assert.deepEqual(opened, [[7, "work:1"]], "The review action must retain this ready receipt's conversation and work identity");
-		}
+		assert.equal(notices[0]!.textContent, BACKGROUND_WAIT_NOTICE);
 	}
 	if (severity === "warn") assert.match(meta.textContent, /1 条警告/, "Warnings remain visible on the tool row without hiding the host notice");
 });

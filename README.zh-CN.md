@@ -8,7 +8,7 @@
 - 读写文件、执行命令、搜索网页，并把产物发回当前会话。
 - 安排定时任务、交给后台子代理，或启动托管进程。
 - 用审批窗口、运行预算和工作区单写者规则约束执行。
-- 验证声明的产物，提交评审，再由操作者记录验收。
+- 用 `/goal` 建立持久目标，完成后直接在会话里报告结果；进度跨上下文压缩与重启保留。
 
 需要 Node.js 26 或以上，直接运行 TypeScript，无构建步骤。
 基于 [pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.4.0
@@ -54,7 +54,7 @@ Linux 常驻服务见 [systemd 部署指南](docs/deployment.zh-CN.md#2-主机�
 | --- | --- |
 | 选择模型、视觉连接或环境变量 | [配置](docs/configuration.zh-CN.md) |
 | 使用聊天、命令、审批、附件或面板 | [使用指南](docs/usage.zh-CN.md) |
-| 理解预算、后台任务、验证契约和工具 | [代理运行机制](docs/agent.zh-CN.md) |
+| 理解预算、后台任务、持久目标（goal）和工具 | [代理运行机制](docs/agent.zh-CN.md) |
 | 理解互信范围、凭证、文件访问和隔离 | [安全边界](docs/security.zh-CN.md) |
 | 安装、监控、更新、备份和恢复服务 | [部署与运维](docs/deployment.zh-CN.md) |
 | 接入专用 GitHub 账号 | [GitHub 接入](docs/github.zh-CN.md) |

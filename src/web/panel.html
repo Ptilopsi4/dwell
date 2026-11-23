@@ -368,9 +368,9 @@ dialog.dialog::backdrop { background: rgb(0 0 0 / .5); backdrop-filter: blur(2px
 				<button id="archiveBtn">归档</button>
 				<button id="notifyBtn" hidden>私聊通知</button>
 				<button id="copyLinkBtn">复制会话链接</button>
-				<button id="workBtn">工作记录与验收</button>
+				<button id="workBtn">工作记录</button>
 				<button id="stopTaskBtn" hidden>中止当前运行</button>
-					<button id="newGoalBtn">开启目标模式</button>
+					<button id="newGoalBtn">建立新目标</button>
 				<hr>
 				<button id="resetBtn" class="danger">清空上下文</button>
 			</div>
@@ -876,7 +876,7 @@ function appendEntry(entry) {
 	if (entry.kind === "work.new_goal") {
 		const d = document.createElement("div");
 		d.className = "day";
-		d.textContent = "已开启目标模式 · 聊天历史保留";
+			d.textContent = "已解绑旧目标，新目标已建立 · 聊天历史保留";
 		log.appendChild(d);
 		T.group = null;
 		T.lastKind = "day";
@@ -961,7 +961,6 @@ function appendEntry(entry) {
 		for (const call of calls) {
 			const row = addToolRow(call);
 			row._waitCandidate = calls.length === 1 && call.name === "dwell.task.wait";
-			row._readyCandidate = calls.length === 1 && call.name === "dwell.work" && call.arguments?.action === "ready";
 			row._answerEntryId = entry.id;
 		}
 		if (model?.stopReason === "error" || model?.stopReason === "aborted") {
@@ -995,27 +994,6 @@ function appendEntry(entry) {
 			const notice = document.createElement("div");
 			notice.className = "note";
 			notice.textContent = "后台任务处理中，完成后会继续。";
-			log.appendChild(notice);
-			T.group = null;
-			T.lastKind = "note";
-		}
-		const ready = entry.workReady;
-		if (row._readyCandidate && !err && entry.byTaskId !== undefined && model?.toolName === "dwell.work" && model.details?.workReady === true && ready?.answerEntryId === row._answerEntryId && ready.workId === model.details.workId && ready.verified === model.details.verified && typeof ready.text === "string") {
-			const notice = document.createElement("div");
-			notice.className = "note";
-			const body = document.createElement("div");
-			body.className = "work-review-body";
-			body.textContent = ready.text;
-			const review = document.createElement("button");
-			review.type = "button";
-			review.className = "btn work-review-link";
-			review.dataset.variant = "outline";
-			review.dataset.size = "sm";
-			review.textContent = "查看工作与验收";
-			const reviewConversation = Number(convId);
-			review.onclick = () => openWork(reviewConversation, ready.workId);
-			body.appendChild(review);
-			notice.appendChild(body);
 			log.appendChild(notice);
 			T.group = null;
 			T.lastKind = "note";
@@ -1305,16 +1283,22 @@ $("resetBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	closeMenu();
 	try { const res = await api("reset", { conv: Number(convId) }); if (typeof res?.notice === "string" && res.notice !== "") toast(res.notice, true); } catch (err) { toast(err.message, true); }
 }, "确认清空上下文?");
-$("newGoalBtn").onclick = (e) => armConfirm(e.currentTarget, async () => {
-	closeMenu();
+$("newGoalBtn").onclick = (e) => {
+	e.stopPropagation(); $("menu").hidden = true;
+	const goal = prompt("输入新目标描述：命令会直接建立目标并开始执行，旧目标解绑为历史。");
+	if (goal === null || goal.trim() === "") return;
 	const id = Number(convId);
-	try {
-		const work = await api(`work?id=${id}`);
-		const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-		const result = await api("work/goal", { id, workId: work.current ?? null, requestId });
-		toast(result.changed ? "已开启目标模式并解绑旧目标，请发送新的目标。" : "已开启目标模式，请发送你的目标。");
-	} catch (err) { toast(err.message, true); }
-}, "保留历史并开启目标模式?");
+	(async () => {
+		try {
+			const work = await api(`work?id=${id}`);
+			const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+			await api("work/goal", { id, workId: work.current ?? null, requestId, goal });
+			toast("目标已建立，开始执行…");
+			// 描述作为普通输入起跑（与聊天 /goal 同路，面板发送链路自带可见转发）
+			await api("send", { conv: id, content: goal });
+		} catch (err) { toast(err.message, true); }
+	})();
+};
 $("workBtn").onclick = () => { closeMenu(); openWork(Number(convId)); };
 $("stopRun").onclick = (e) => armConfirm(e.currentTarget, async () => {
 	await api("abort", { conv: Number(convId) }).catch((err) => toast(err.message, true));
@@ -1473,7 +1457,7 @@ $("usersBtn").onclick = openUsers;
 
 /* Work acceptance reuses the trusted host API; no model request or verification command is run here. */
 async function openWork(id, selectedWorkId) {
-	$("sheetTitle").textContent = "工作记录与验收";
+	$("sheetTitle").textContent = "工作记录";
 	$("sheetBody").innerHTML = `<p class="rnote">对照目标、验收标准与检查结果审阅产物，再确认验收。需要修改时，关闭此窗口并在任务线发送要求。</p>
 		<div id="workList" aria-live="polite"></div>
 		<div class="dlg-row"><button class="btn" data-variant="outline" data-size="sm" type="button" id="refreshWork">刷新记录</button><button class="btn" data-variant="outline" data-size="sm" value="cancel" type="submit">关闭</button></div>`;
@@ -1511,40 +1495,10 @@ async function openWork(id, selectedWorkId) {
 					} else { const text = document.createElement("p"); text.className = "work-copy"; text.textContent = value; group.appendChild(text); }
 					row.appendChild(group);
 				};
-				section("验收标准", record.acceptance);
+				section("目标", record.goal);
 				if (record.progress) section("进度说明", record.progress);
 				if (record.blockers.length) section("待解决事项", record.blockers);
-				const verification = record.verification;
-				if (verification) {
-					section("产物范围", verification.contract.artifacts);
-					const receipt = verification.receipt;
-					section("验证记录", receipt ? receipt.checks.map((check) => `${check.name}：退出码 ${check.exitCode}`) : "尚无成功的验证回执。");
-					if (receipt) section("验证时间", `${new Date(receipt.verifiedAt).toLocaleString()} · ${receipt.manifest.files} 个文件 · ${receipt.manifest.bytes} 字节`);
-					if (verification.status !== "verified") section("验证状态", verification.failure || "需要重新运行验证。");
-				} else section("验证状态", "未声明验证契约，请自行核对产物与证据。");
-				if (record.review) section("交付说明（Agent）", record.review);
-				if (record.evidence.length) section("补充证据", record.evidence.map((entry) => `工具回执 #${entry}`));
-				if (record.stopped) section("任务已停止", "工作预算已耗尽，可保留本记录并开启新目标。");
-				if (record.status === "accepted") section("验收记录", `${record.acceptedBy} · ${new Date(record.acceptedAt).toLocaleString()}`);
-				if (record.status === "ready_for_review") {
-					const note = document.createElement("p"); note.className = "rnote work-section";
-					note.textContent = verification ? "确认时会重新核对文件版本；不会再次执行检查命令。通过检查仍需要你判断是否符合要求。" : "这项工作没有验证契约。确认前请自行核对产物与证据。";
-					row.appendChild(note);
-					const accept = document.createElement("button"); accept.type = "button"; accept.className = "btn"; accept.dataset.size = "sm"; accept.textContent = "确认验收";
-					const result = document.createElement("p"); result.className = "work-result work-copy"; result.setAttribute("role", "status");
-					accept.onclick = (event) => armConfirm(event.currentTarget, async () => {
-						accept.disabled = true; refresh.disabled = true; result.textContent = "正在确认验收…";
-						try {
-							await api("work/accept", { id, workId: record.id });
-							toast("已记录验收。");
-							if (list.isConnected) await load(record.id);
-						} catch (error) {
-							const detail = /^\d{3} /.test(error.message) ? error.message.replace(/^\d{3} /, "") : "验收请求未完成，结果尚未确认。";
-							result.textContent = `${detail} 请刷新记录确认状态。`;
-						} finally { accept.disabled = false; refresh.disabled = false; }
-					}, verification ? "确认产物符合要求？" : "确认验收未验证的工作？");
-					row.append(accept, result);
-				}
+				if (record.stopped) section("任务已停止", "工作预算已耗尽，可保留本记录并用 /goal 开启新目标。");
 				list.appendChild(row);
 			}
 		} catch (error) { if (list.isConnected) list.textContent = `读取失败：${error.message} 请点击“刷新记录”重试。`; }

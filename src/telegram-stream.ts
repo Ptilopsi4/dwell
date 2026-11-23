@@ -44,7 +44,7 @@ function toolDetail(name: string, args: Record<string, unknown> | undefined): st
 	if (name === "dwell.web.fetch" && typeof args.url === "string") {
 		try { return literal(new URL(args.url).hostname.slice(0, 64)); } catch { return ""; }
 	}
-	const actions: Record<string, string> = { start: "启动", stop: "停止", status: "查看状态", list: "查看列表", send: "发送", wait: "等待", checkpoint: "记录进度", verify: "验证产物", revise: "修订验证", ready: "提交验收", accept: "确认验收", cancel: "取消", create: "创建", remove: "移除" };
+	const actions: Record<string, string> = { start: "启动", stop: "停止", status: "查看状态", list: "查看列表", send: "发送", wait: "等待", checkpoint: "记录进度", cancel: "取消", create: "创建", remove: "移除" };
 	return typeof args.action === "string" ? actions[args.action] ?? "" : "";
 }
 

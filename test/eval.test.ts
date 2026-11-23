@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cases, gradeBehavior, gradeFiles, gradeVerifiedArtifacts, type TrialEvidence } from "../eval/cases.ts";
+import { cases, gradeBehavior, gradeFiles, type TrialEvidence } from "../eval/cases.ts";
 import { assertRealRoot, childEnvironment, estimatedCostUsd, modelReport, parseArgs, prepareTrialEnvironment, run } from "../eval/run.ts";
 import { createModelClient, loadModelsConfig } from "../src/models.ts";
 import { RequestBudget, guardedProvider, requestCostBound } from "../eval/budget.ts";
@@ -131,10 +131,10 @@ test("eval: reports sanitize endpoints and unknown pricing never becomes a zero-
 	assert.equal(estimatedCostUsd({ models: { a: {} } }, true), null);
 });
 
-test("eval: verification guidance versions the revised scenarios and explicit Node check", () => {
+test("eval: fire-and-forget scenarios version their guidance and keep explicit Node checks", () => {
 	const revised = ["invoice-workflow-repair", "ledger-reconciliation", "policy-clarification", "release-background-audit"];
 	for (const c of cases) {
-		assert.equal(c.version, revised.includes(c.id) ? 3 : c.id === "node-bugfix" ? 2 : 1, c.id);
+		assert.equal(c.version, revised.includes(c.id) ? 4 : c.id === "node-bugfix" ? 2 : 1, c.id);
 		assert.equal(c.comparabilityNote === undefined, !revised.includes(c.id) && c.id !== "node-bugfix", c.id);
 		if (c.id === "node-bugfix") {
 			assert.match(c.comparabilityNote!, /not directly comparable/);
@@ -143,10 +143,9 @@ test("eval: verification guidance versions the revised scenarios and explicit No
 		}
 		if (!revised.includes(c.id)) continue;
 		assert.match(c.comparabilityNote!, /not directly comparable/);
-		const first = c.script[0]!;
-		assert.ok("tool" in first && first.tool === "dwell.work" && first.args.action === "start");
-		assert.ok(first.args.verification);
-		assert.ok(c.task.includes("native Node"));
+		// fire-and-forget：剧本里不再有带 action 的 dwell.work 调用，只有 checkpoint 形态
+		assert.ok(!c.script.some((step) => "tool" in step && step.tool === "dwell.work" && "action" in step.args), c.id);
+		assert.ok(c.task.includes("native Node"), c.id);
 	}
 });
 
@@ -217,24 +216,20 @@ test("eval: realistic scenarios verify unseen behavior and reject fixture change
 			const observed = JSON.parse(await readFile(join(result.root, `${id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
 			const manifest = JSON.parse(await readFile(join(result.root, `${id}-1`, "manifest.json"), "utf8"));
 			const outcome = JSON.parse(await readFile(join(result.root, `${id}-1`, "result.json"), "utf8"));
-			assert.equal(manifest.caseVersion, 3);
-			assert.equal(outcome.caseVersion, 3);
+			assert.equal(manifest.caseVersion, 4);
+			assert.equal(outcome.caseVersion, 4);
 			assert.equal(manifest.comparabilityNote, c.comparabilityNote);
 			assert.equal(outcome.comparabilityNote, c.comparabilityNote);
 			assert.deepEqual(gradeFiles(id, files), []);
-			const cwd = join(result.root, `${id}-1`, "workspace");
-			assert.deepEqual(gradeVerifiedArtifacts(id, observed, files, cwd), []);
-			assert.ok(gradeVerifiedArtifacts(id, observed, { ...files, "extra.txt": "unrequested" }, cwd).some((error) => error.includes("does not match")));
 			const forged = structuredClone(observed);
 			const finalObservation = forged.observations.find((item) => item.event === "work_final")!;
 			const finalWork = JSON.parse(finalObservation.text!);
 			const record = finalWork.records[finalWork.current];
-			assert.equal(record.verification.status, "verified");
-			assert.equal(record.status, "ready_for_review");
-			assert.ok(record.verification.receipt.checks.every((check: { exitCode: number; taskId: number }) => check.exitCode === 0 && check.taskId > 0));
-			record.verification.receipt.checks[0].taskId = 999999;
+			assert.equal(record.creator, "eval-user");
+			assert.equal(record.status, "active");
+			record.status = "superseded";
 			finalObservation.text = JSON.stringify(finalWork);
-			assert.ok(gradeBehavior(id, forged).some((error) => error.includes("matching successful nested bash")));
+			assert.ok(gradeBehavior(id, forged).some((error: string) => error.includes("No attributed durable goal is active")));
 			assert.ok(gradeFiles(id, { ...files, "extra.txt": "unrequested" }).length > 0);
 			const fixture = Object.keys(c.fixtures).find((name) => !c.mutable?.includes(name))!;
 			assert.ok(gradeFiles(id, { ...files, [fixture]: "tampered" }).length > 0);
@@ -279,18 +274,16 @@ test("eval: faux review cannot silently clear an unresolved clarification blocke
 	const c = cases.find((item) => item.id === "policy-clarification")!;
 	const original = c.script;
 	try {
-		c.script = original.filter((step) => !("tool" in step && step.tool === "dwell.work" && step.args.action === "checkpoint" && Array.isArray(step.args.blockers) && step.args.blockers.length === 0));
+		c.script = original.filter((step) => !("tool" in step && step.tool === "dwell.work" && Array.isArray(step.args.blockers) && step.args.blockers.length === 0));
 		const result = await run({ mode: "faux", cases: [c.id], trials: 1, out: directory, limits: { deadlineMs: 20_000, requests: 32, tools: 64 } });
 		assert.equal(result.passed, false);
 		const observed = JSON.parse(await readFile(join(result.root, `${c.id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
 		const before = JSON.parse(observed.observations.find((item) => item.event === "work_before_restart")!.text!);
 		const final = JSON.parse(observed.observations.find((item) => item.event === "work_final")!.text!);
 		const record = final.records[final.current];
-		assert.equal(record.verification.status, "verified");
 		assert.equal(record.status, "active");
 		assert.deepEqual(record.blockers, before.records[before.current].blockers);
 		assert.ok(record.blockers.length > 0);
-		assert.ok(!observed.observations.some((item) => item.event === "tool" && item.name === "dwell.work" && (item.args as { action?: string })?.action === "ready"));
 	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -342,41 +335,11 @@ test("eval: aborted work retains its declared contract without replacing the ori
 		const doc = JSON.parse(observations[0]!.text!);
 		const work = doc.records[doc.current];
 		assert.equal(work.status, "active");
-		assert.ok(work.verification.contract.checks.length > 0);
-		assert.deepEqual(work.verification.contract.allowedChanges, ["money.ts", "invoice.ts"]);
+		assert.ok(work.goal);
 		const graded = JSON.parse(await readFile(join(trial, "result.json"), "utf8"));
 		assert.ok(graded.assertions.some((item: string) => item.includes("request budget exceeded")));
-		assert.ok(!graded.assertions.some((item: string) => item.includes("No strict declared Node verification contract")));
+		assert.ok(!graded.assertions.some((item: string) => item.includes("No attributed durable goal is active")));
 	} finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test("eval: a corrected check revision recovers in the same work and finishes without a final model response", posixEval, async () => {
-	const directory = await mkdtemp(join(tmpdir(), "dwell-eval-revise-"));
-	const c = cases.find((item) => item.id === "invoice-workflow-repair")!;
-	const original = c.script;
-	try {
-		const first = structuredClone(original[0]!);
-		assert.ok("tool" in first);
-		const contract = first.args.verification as { checks: { name: string; command: string }[] };
-		const corrected = structuredClone(contract.checks);
-		contract.checks = [{ name: "incorrect preliminary expectation", command: "node --input-type=module -e 'import assert from \"node:assert/strict\"; import {invoice} from \"./invoice.ts\"; assert.equal(invoice([{price:\"1\",quantity:1}],200,80),80)'" }];
-		const beforeVerify = original.findIndex((item) => "tool" in item && item.tool === "dwell.work" && item.args.action === "verify");
-		c.script = [first, ...original.slice(1, beforeVerify + 1), { tool: "dwell.work", args: { action: "revise", checks: corrected, reason: "The requirement adds shipping only to a positive discounted subtotal; the preliminary expectation was incorrect." } }, ...original.slice(beforeVerify)];
-		const result = await run({ mode: "faux", cases: [c.id], trials: 1, out: directory, limits: { deadlineMs: 20_000, requests: 32, tools: 64 } });
-		assert.equal(result.passed, true, JSON.stringify(result.results));
-		const observed = JSON.parse(await readFile(join(result.root, `${c.id}-1`, "evidence.json"), "utf8")) as TrialEvidence;
-		const final = JSON.parse(observed.observations.find((item) => item.event === "work_final")!.text!);
-		const work = final.records[final.current];
-		assert.equal(Object.keys(final.records).length, 1);
-		assert.equal(work.status, "ready_for_review");
-		assert.equal(work.verification.revision, 1);
-		assert.equal(work.verification.revisionHistory.length, 1);
-		assert.equal(work.verification.receipt.revision, 1);
-		assert.ok(observed.observations.some((item) => item.event === "tool_result" && (item.args as { action?: string })?.action === "verify" && item.isError));
-		const ready = observed.observations.findIndex((item) => item.event === "tool_result" && (item.args as { action?: string })?.action === "ready" && !item.isError);
-		assert.ok(ready >= 0);
-		assert.ok(!observed.observations.slice(ready + 1).some((item) => item.event === "request"));
-	} finally { c.script = original; await rm(directory, { recursive: true, force: true }); }
 });
 
 test("eval: successful exit cannot bypass unfinished hidden Node assertions", posixEval, async () => {
