@@ -3,11 +3,11 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 const approvalStateDir = await mkdtemp(join(resolve(), ".approval-test-"));
 process.env.DWELL_STATE = approvalStateDir;
-const { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, makeApprovalExtension, pendingApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey } = await import("../src/ext/approval.ts");
+const { approvals, bashApprovalBlock, conversationScope, dangerMatch, fileToolViolation, fileToolViolationReal, grantApprovalWindow, makeApprovalExtension, pendingApprovals, persistApprovals, runSender, scopeOf, sendPathViolation, splitTargets, stateFileBlocked, takeDecision, windowKey, windowOpen } = await import("../src/ext/approval.ts");
 const { DATA_DIR, STATE_DIR } = await import("../src/state.ts");
 after(() => rm(approvalStateDir, { recursive: true, force: true }));
 
@@ -244,6 +244,28 @@ test("父线与子会话先后被拦：共用待审槽不覆盖，决定后两�
 		approvals.clear();
 		pendingApprovals.clear();
 	}
+});
+
+test("过期审批窗口：判定关闭并从内存与落盘状态移除；排队中的同键新窗口不被误删", async () => {
+	const id = 424242;
+	const key = windowKey(id, "ou_expired");
+	assert.equal(await grantApprovalWindow(key, 10, Date.now() - 1), true, "预置一个已过期窗口");
+	assert.equal(approvals.has(key), true);
+	assert.equal(windowOpen(id, "ou_expired"), false);
+	await persistApprovals(); // 排在清理写入之后
+	assert.equal(approvals.has(key), false, "过期窗口已移除");
+	const saved = JSON.parse(await readFile(join(approvalStateDir, "approvals.json"), "utf8")) as { windows: [string, number][] };
+	assert.equal(saved.windows.some(([k]) => k === key), false, "落盘状态同样不含过期窗口");
+
+	// 授予已入队但尚未发布时观察到旧过期项：清理按到期值精确删，不误删随后发布的新窗口
+	assert.equal(await grantApprovalWindow(key, 10, Date.now() - 1), true);
+	const granting = grantApprovalWindow(key, 10);
+	assert.equal(windowOpen(id, "ou_expired"), false);
+	await granting;
+	await persistApprovals();
+	assert.equal(approvals.has(key), true, "新窗口保留");
+	assert.ok((approvals.get(key) ?? 0) > Date.now());
+	assert.equal(windowOpen(id, "ou_expired"), true);
 });
 
 test("splitTargets：旧版待审（无 targets）视为 scope 自身被拦", () => {

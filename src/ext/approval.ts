@@ -318,6 +318,10 @@ export function windowOpen(conversationId: number, sender: string): boolean {
 	const expiry = approvals.get(key);
 	if (expiry === undefined) return false;
 	if (expiry <= Date.now()) {
+		// 判定保持同步；过期项经串行队列删除并落盘，否则 approvals.json 只增不减。按观察到的到期值精确删，
+		// 不误删队列里刚授予的同键新窗口
+		void changeState((state) => { state.windows = state.windows.filter(([k, at]) => k !== key || at !== expiry); })
+			.catch((err: unknown) => console.error("[dwell] 过期审批窗口清理失败:", err));
 		return false;
 	}
 	return true;
@@ -449,7 +453,7 @@ export async function fileToolViolationReal(tool: string, path: string, cwd: str
 	return violationOf(tool, path, real, { cwd: rcwd, tmp: rtmp, state: rstate, appRoot: rappRoot, data: rdata, sqlite: rsqlite, modelConfig });
 }
 
-/** dwell.lark.send 的来源判定：目标与 cwd 都 realpath 后判包含，不放行系统临时目录（外发比写盘更严）。 */
+/** dwell.send 的来源判定：目标与 cwd 都 realpath 后判包含，不放行系统临时目录（外发比写盘更严）。 */
 export async function sendPathViolation(path: string, cwd: string): Promise<string | undefined> {
 	const real = await resolveReal(resolve(cwd, path));
 	const realCwd = await resolveReal(resolve(cwd));
