@@ -43,13 +43,20 @@ export function matchMention(arg: string, mentions: MentionInfo[]): { id: string
 
 /** 下载用户消息内的资源（图/文件）。走 im/v1/messages/:id/resources/:key（消息资源接口）——
  *  Channel 自带的 downloadResource 走 im/v1/images/:image_key，仅适用于应用自己上传的图，
- *  对用户发送的图片/文件报 234001（实测）。表情包资源此接口也不支持（官方文档），失败由调用方降级。 */
-export async function downloadMessageResource(channel: LarkChannel, messageId: string, fileKey: string, type: "image" | "file"): Promise<Buffer> {
+ *  对用户发送的图片/文件报 234001（实测）。表情包资源此接口也不支持（官方文档），失败由调用方降级。
+ *  流式计数上限与 Telegram 侧 DOWNLOAD_LIMIT 对齐：超限即停止读取，不把整个文件缓冲进内存。 */
+export const MESSAGE_RESOURCE_MAX_BYTES = 20 * 1024 * 1024;
+export async function downloadMessageResource(channel: LarkChannel, messageId: string, fileKey: string, type: "image" | "file", maxBytes = MESSAGE_RESOURCE_MAX_BYTES): Promise<Buffer> {
 	const response = await channel.rawClient.im.v1.messageResource.get({
 		path: { message_id: messageId, file_key: fileKey },
 		params: { type },
 	});
 	const chunks: Buffer[] = [];
-	for await (const chunk of response.getReadableStream()) chunks.push(Buffer.from(chunk));
+	let total = 0;
+	for await (const chunk of response.getReadableStream()) {
+		total += chunk.length;
+		if (total > maxBytes) throw new Error(`消息资源超过 ${Math.round(maxBytes / 1024 / 1024)}MB 上限`);
+		chunks.push(Buffer.from(chunk));
+	}
 	return Buffer.concat(chunks);
 }

@@ -5,6 +5,9 @@ import { Type } from "typebox";
 import type { Directory } from "../feishu/directory.ts";
 import type { ImageDescriber } from "../harness.ts";
 import { sniffImageMime } from "../media.ts";
+
+/** dwell.lark.image 拉图上限（与入站图片的视觉上限一致）。 */
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 import type { ConversationDestination } from "../pipeline.ts";
 
 /** 运行时依赖访问器：装配时变量可能尚未初始化，execute 时解引用。
@@ -284,11 +287,16 @@ function makeImageTool(deps: LarkDeps) {
 				};
 				const response = await resource.get({ path: { message_id: args.message, file_key: imageKey }, params: { type: "image" } });
 				const chunks: Buffer[] = [];
-				for await (const chunk of response.getReadableStream()) chunks.push(Buffer.from(chunk));
+				let total = 0;
+				for await (const chunk of response.getReadableStream()) {
+					// 流式计数上限：超限即停止读取，不先把整张图缓冲进内存再判大小
+					total += chunk.length;
+					if (total > IMAGE_MAX_BYTES) return text("The image is larger than 10MB and cannot be recognized.", true);
+					chunks.push(Buffer.from(chunk));
+				}
 				const buffer = Buffer.concat(chunks);
 				const mime = sniffImageMime(buffer);
 				if (mime === null) return text("Unrecognized image format (not png/jpeg/gif/webp).", true);
-				if (buffer.length > 10 * 1024 * 1024) return text("The image is larger than 10MB and cannot be recognized.", true);
 				const description = await describer(buffer.toString("base64"), mime);
 				return text(`Content of image ${args.message}:\n${description}`);
 			} catch (err) {
