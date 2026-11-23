@@ -321,7 +321,16 @@ See [GitHub integration](github.md) for the dedicated account and token, host gi
 
 The Compose service runs as the non-root `dwell` user, uses `init: true` to reap orphaned children, and mounts `./data` and `./state`. Use `docker run --init` for a standalone container. With models in the state volume, copy a template to `./state/models.json`, set `DWELL_MODELS_FILE=/state/models.json` in `.env`, and fill in the key named by `apiKeyEnv`.
 
-The image sets `NODE_ENV=production` but does not include bubblewrap, so its default `required` sandbox policy refuses startup. Either provide a derived image and container configuration where the sandbox probe passes, or explicitly choose `DWELL_SANDBOX=off` (or `auto` to permit fallback) after configuring an appropriate container boundary. The service does not silently weaken its production policy. Then run `docker compose up -d --build`. Allow at least 30 seconds for shutdown (for example, `docker compose stop -t 35`). Back up stopped volumes and configuration together with the backup CLI from a Node 26 host. Limits of this form:
+The image installs bubblewrap and sets `NODE_ENV=production`, so the `required` policy applies, but Docker's own defaults still deny the unprivileged user namespace the sandbox is built on. A stock Compose service fails the startup probe for three separate reasons: the default seccomp profile allows `clone` only without namespace flags and `unshare`, `mount`, `umount2`, `pivot_root`, and `setns` only with `CAP_SYS_ADMIN`; the masked `/proc` entries stop the wrapper from mounting a fresh `/proc` for its pid namespace; and on Ubuntu 23.10 and later hosts the `docker-default` AppArmor profile does not grant `userns`. Give the service the matching options in `docker-compose.yml`:
+
+```yaml
+    security_opt:
+      - seccomp=/etc/docker/seccomp/dwell-bwrap.json
+      - systempaths=unconfined
+      - apparmor=unconfined
+```
+
+`seccomp=` names a file on the Compose host: copy Docker's default profile for your engine version ([moby/profiles](https://github.com/moby/profiles/tree/main/seccomp)) and add one rule allowing `clone`, `unshare`, `mount`, `umount2`, `pivot_root`, and `setns` without `CAP_SYS_ADMIN`. `seccomp=unconfined` also passes but drops the syscall filter for the whole container. `apparmor=unconfined` is only needed where AppArmor restricts unprivileged user namespaces (check `sysctl kernel.apparmor_restrict_unprivileged_userns`); a custom profile granting `userns` to `bwrap` is narrower. `systempaths=unconfined` exposes the host's `/proc/sys` to the container, which is why the service must keep running as the non-root `dwell` user. The service refuses to start under `required` until the probe passes, so a wrong configuration fails loudly; confirm it on the target host before relying on it. To run without the sandbox instead, explicitly choose `DWELL_SANDBOX=off` (or `auto` to permit fallback) after configuring an appropriate container boundary; the service does not silently weaken its production policy. Then run `docker compose up -d --build`. Allow at least 30 seconds for shutdown (for example, `docker compose stop -t 35`). Back up stopped volumes and configuration together with the backup CLI from a Node 26 host. Limits of this form:
 
 - With `off`, or a failed probe under `auto`, the container boundary supplies isolation; path and command checks alone do not confine shell access
 - `docker-compose.yml` publishes no ports. Add a `ports:` entry to use the panel, and keep it on a private interface (for example `"10.8.0.1:7788:7788"`)
