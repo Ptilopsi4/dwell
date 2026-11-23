@@ -317,6 +317,8 @@ export const makeProcTask = (deps: ProcDeps) =>
 			start: async (task, runtime, context) => {
 				const revoked = () => deps.isAllowed?.(task.input.creator, task.input.conversationId, task.input.creatorVia) === false;
 				if (revoked()) {
+					// 撤权：任务静默终结（不启动、不回报），留运维痕迹与 schedule 的 onCreatorRevoked 对齐
+					console.error(`[dwell] 托管进程 ${task.input.name} 未启动：创建者 ${task.input.creator} 已无会话 #${task.input.conversationId} 的使用权限`);
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 					return;
 				}
@@ -339,6 +341,7 @@ export const makeProcTask = (deps: ProcDeps) =>
 				}
 				if (runtime.signal.aborted) { await log.close(); return; }
 				if (revoked()) {
+					console.error(`[dwell] 托管进程 ${task.input.name} 启动前复查未通过：创建者 ${task.input.creator} 已无会话 #${task.input.conversationId} 的使用权限`);
 					await log.close();
 					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 					return;
@@ -406,6 +409,7 @@ export const makeProcTask = (deps: ProcDeps) =>
 							? formatProcExitReport(input.name, ck.code, ck.lost, Math.round((runtime.now() - ck.startedAt) / 1000), tail, runtime.taskId as number)
 							: `[Background process ${input.name}] taskId: ${runtime.taskId}. ${ck.note}\n${tail}`;
 						if (revoked()) {
+							console.error(`[dwell] 托管进程 ${input.name} 的退出回报已抑制：创建者 ${input.creator} 已无会话 #${input.conversationId} 的使用权限`);
 							await cleanupLogs(runtime);
 							await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 							return;
