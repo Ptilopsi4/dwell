@@ -220,7 +220,11 @@ test("main Telegram /goal enforces owner and admin authority, establishes and su
 		assert.equal(detached.work.records[firstId].status, "superseded");
 		assert.ok(detached.work.records[firstId].updatedAt > before.work.records[firstId].updatedAt);
 		assertWorkPreserved(detached.work.records[firstId], before.work.records[firstId]);
-		assert.deepEqual(detached.budget, before.budget);
+		// 解绑不碰预算，但新目标起跑会新增一条按输入键控的 run 预算记录并成为 current；旧记录原样保留
+		const priorBudgets = before.budget?.records ?? {};
+		for (const [key, record] of Object.entries(priorBudgets)) assert.deepEqual(detached.budget?.records[key], record);
+		assert.equal(Object.keys(detached.budget?.records ?? {}).length, Object.keys(priorBudgets).length + 1);
+		assert.notEqual(detached.budget?.current, before.budget?.current);
 		for (const entry of before.entries) assert.deepEqual(detached.entries.find((candidate) => candidate.id === entry.id), entry);
 		assert.equal(detached.journal?.requests["command:tg-update:100:302"].operator, "tg:201");
 		assert.equal(detached.journal?.requests["command:tg-update:100:302"].workId, firstId);
