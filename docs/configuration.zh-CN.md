@@ -103,7 +103,7 @@ OpenCode Go 模板复用标准 Chat Completions 适配器。注意：选用该�
 | `DWELL_PANEL_ONLY` | 设为 `1` 时只启动面板、不连飞书或 Telegram，用于本地开发 |
 | `DWELL_PANEL_TRUST_LOCAL` | 设为 `1` 时面板接受本机来源的请求 |
 
-面板发出的消息和审批记在 `DWELL_PANEL_USER` 名下。仅面板模式同样接受本机来源的请求。
+面板发出的消息和审批记在 `DWELL_PANEL_USER` 名下。仅面板模式同样接受本机来源的请求。该操作者应为已授权用户：面板始终能处理审批，但 Telegram 审批按钮和 `/approve` 只对白名单用户或管理员生效。
 
 `DWELL_PANEL_TRUST_LOCAL=1` 仅用于同机反代或 `ssh -L` 隧道访问。开启后 bash 能直连面板，包括审批接口。详见[安全边界](security.zh-CN.md)和[部署](deployment.zh-CN.md)。
 
