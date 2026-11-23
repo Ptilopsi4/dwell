@@ -153,6 +153,9 @@ export class TelegramInbox {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(TelegramInboxDoc);
 			const row = doc.inputs[id];
+			if (row === undefined) return;
+			// 终态只允许终态间迁移（如 uncertain→failed 的清理）；非终态写入不得复活 done/uncertain/failed
+			if (["done", "uncertain", "failed"].includes(row.output) && !["done", "uncertain", "failed"].includes(state)) return;
 			row.output = state;
 			if (messageId !== undefined) row.messageId = messageId;
 			let excess = Object.keys(doc.inputs).length - 10_000;
@@ -160,6 +163,16 @@ export class TelegramInbox {
 				if (excess <= 0) break;
 				if (key !== id && ["done", "failed", "uncertain"].includes(doc.inputs[key].output)) { delete doc.inputs[key]; excess--; }
 			}
+		}, BACKGROUND_CONTEXT);
+	}
+	/** 占位登记：单事务内仅当行仍为 pending 且尚无占位时写入；已被 /cancel 或失败处置的行不会被覆写回 tracking 而复活。 */
+	async markTracking(id: string, messageId: string): Promise<boolean> {
+		return this.#harness.commit(async (tx) => {
+			const row = (await tx.doc(TelegramInboxDoc)).inputs[id];
+			if (row === undefined || row.output !== "pending" || row.messageId !== undefined) return false;
+			row.output = "tracking";
+			row.messageId = messageId;
+			return true;
 		}, BACKGROUND_CONTEXT);
 	}
 	async claim(id: string): Promise<TelegramInputReceipt | undefined> {

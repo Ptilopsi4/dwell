@@ -242,6 +242,28 @@ test("failed Telegram preparation leaves no receipt and a later delivery can pre
 	} finally { await t.close(); }
 });
 
+test("placeholder registration is an atomic pending→tracking move and terminal receipts are never revived", async () => {
+	const t = await setup();
+	try {
+		const receipt = { conversationId: 42, sender: "tg:300", destination, replyTo: "tg:100:-200:5" };
+		await t.inbox.prepare("cancelled", receipt, async () => "input cancelled while its placeholder was in flight");
+		await t.inbox.output("cancelled", "failed"); // /cancel lands before the placeholder registers
+		assert.equal(await t.inbox.markTracking("cancelled", "tg:100:-200:90"), false, "a cancelled row is not revived");
+		await t.inbox.output("cancelled", "tracking", "tg:100:-200:90"); // the generic write path is guarded as well
+		assert.equal((await t.inbox.input("cancelled"))?.output, "failed");
+		assert.equal((await t.inbox.input("cancelled"))?.messageId, undefined);
+		assert.deepEqual(await t.inbox.recoverable(), [], "the cancelled input is not picked up again");
+
+		await t.inbox.prepare("live", receipt, async () => "input with a placeholder");
+		assert.equal(await t.inbox.markTracking("live", "tg:100:-200:91"), true);
+		assert.equal(await t.inbox.markTracking("live", "tg:100:-200:92"), false, "a second placeholder does not overwrite the first");
+		assert.equal((await t.inbox.input("live"))?.messageId, "tg:100:-200:91");
+		assert.equal((await t.inbox.input("live"))?.output, "tracking");
+		await t.reopen();
+		assert.equal((await t.inbox.input("live"))?.output, "tracking");
+	} finally { await t.close(); }
+});
+
 test("finished and failed Telegram receipts remain terminal after SQLite reopen", async () => {
 	const t = await setup();
 	try {

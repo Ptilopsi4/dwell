@@ -162,6 +162,12 @@ test("Telegram close aborts an activity request and clears its heartbeat", async
 	assert.equal(f.requests.filter((request) => request.method === "sendChatAction").length, 1);
 });
 
+test("a send refused because the connection is already closed is marked as never sent", async (t) => {
+	const f = await fixture(t);
+	await f.bot.close();
+	await assert.rejects(f.bot.send(destination, "late"), (error: unknown) => error instanceof TelegramError && error.notSent === true && error.uncertain === false);
+});
+
 test("unchanged message edits are idempotent while other 400 responses remain failures", async (t) => {
 	const f = await fixture(t, { respond: (request) => Response.json({ ok: false, error_code: 400, description: request.method === "editMessageText" ? "Bad Request: message is not modified: specified content is exactly the same" : "Bad Request: message is not modified" }, { status: 400 }) });
 	await f.bot.edit(destination, telegramMessageKey(destination, 7), "Already delivered");
