@@ -45,8 +45,8 @@ DWELL_PANEL_HOST=127.0.0.1 DWELL_PANEL_PORT=7788 DWELL_PANEL_ONLY=1 npm start
 已有实例运行时，使用独立的机器人凭证和数据、状态目录。
 Linux 常驻服务见 [systemd 部署指南](docs/deployment.zh-CN.md#2-主机目录布局)，
 包含服务权限、沙箱检查、更新和恢复步骤。
-仓库 Docker 镜像未安装 bubblewrap，默认生产模式会拒绝启动；
-运行前先阅读 [Docker 部署](docs/deployment.zh-CN.md#docker)，配置所需隔离。
+仓库 Docker 镜像自带 bubblewrap，但 Docker 默认配置会拦住沙箱；
+启动前按 [Docker 部署](docs/deployment.zh-CN.md#docker) 给 Compose 服务加上沙箱所需选项。
 
 ## 文档导航
 

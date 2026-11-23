@@ -324,7 +324,16 @@ SIGINT/SIGTERM 会停止输入、关闭运行时并刷盘观测数据，关闭�
 
 Compose 服务以非 root 的 `dwell` 用户运行，通过 `init: true` 回收孤儿子进程，并挂载 `./data` 和 `./state`。单独启动容器时用 `docker run --init`。模型设置放在状态卷时，把模板复制到 `./state/models.json`，在 `.env` 里设 `DWELL_MODELS_FILE=/state/models.json`，填写 `apiKeyEnv` 指定的密钥。
 
-镜像设置了 `NODE_ENV=production`，但不包含 bubblewrap，因此默认 `required` 策略拒绝启动。可以提供派生镜像及容器配置使沙箱探测通过；也可以在配置妥当的容器边界后，明确选择 `DWELL_SANDBOX=off`，或用 `auto` 允许回退。服务不会静默降低生产策略。完成后运行 `docker compose up -d --build`；关闭时至少等 30 秒（例如 `docker compose stop -t 35`）。停止服务后，在 Node 26 宿主机上用备份 CLI 一起备份两个卷和配置。这种形态的限制：
+镜像已安装 bubblewrap 并设置 `NODE_ENV=production`，因此采用 `required` 策略，但 Docker 自身的默认配置仍会拒绝沙箱依赖的非特权用户命名空间。未加配置的 Compose 服务会因三个独立原因通不过启动探测：默认 seccomp 配置只放行不带命名空间标志的 `clone`，`unshare`、`mount`、`umount2`、`pivot_root`、`setns` 要有 `CAP_SYS_ADMIN`；被遮蔽的 `/proc` 条目使 wrapper 无法为自己的 pid 命名空间挂载新的 `/proc`；Ubuntu 23.10 及以上的宿主上，`docker-default` AppArmor 配置不授予 `userns`。在 `docker-compose.yml` 中给服务加上对应的选项：
+
+```yaml
+    security_opt:
+      - seccomp=/etc/docker/seccomp/dwell-bwrap.json
+      - systempaths=unconfined
+      - apparmor=unconfined
+```
+
+`seccomp=` 指向 Compose 宿主上的文件：复制当前引擎版本的 Docker 默认配置（[moby/profiles](https://github.com/moby/profiles/tree/main/seccomp)），增加一条规则，放行不带 `CAP_SYS_ADMIN` 的 `clone`、`unshare`、`mount`、`umount2`、`pivot_root`、`setns`。`seccomp=unconfined` 也能通过，但会让整个容器失去系统调用过滤。`apparmor=unconfined` 只在 AppArmor 限制非特权用户命名空间的宿主上需要（查 `sysctl kernel.apparmor_restrict_unprivileged_userns`）；给 `bwrap` 授予 `userns` 的自定义配置范围更窄。`systempaths=unconfined` 会让容器看到宿主的 `/proc/sys`，因此服务必须始终以非 root 的 `dwell` 用户运行。探测通过前服务在 `required` 下拒绝启动，配错会直接报错；上线前先在目标宿主确认。若要在没有沙箱的情况下运行，先配置妥当的容器边界，再明确选择 `DWELL_SANDBOX=off`，或用 `auto` 允许回退。服务不会静默降低生产策略。完成后运行 `docker compose up -d --build`；关闭时至少等 30 秒（例如 `docker compose stop -t 35`）。停止服务后，在 Node 26 宿主机上用备份 CLI 一起备份两个卷和配置。这种形态的限制：
 
 - `off` 或 `auto` 探测失败时，隔离靠容器边界；路径与命令检查本身不能限制 shell 的访问范围
 - `docker-compose.yml` 没有发布端口。要用面板需加 `ports:`，并绑定到内网接口（例如 `"10.8.0.1:7788:7788"`）

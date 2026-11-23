@@ -47,8 +47,8 @@ User allowlists seed `state/users.json` only on first start; later changes use t
 Use separate bot credentials and data/state directories when another instance is already running.
 For a persistent Linux service, follow the [systemd deployment guide](docs/deployment.md#2-host-layout),
 including service permissions, sandbox checks, updates, and recovery.
-The supplied Docker image lacks bubblewrap and refuses its default production startup until
-isolation is configured; read [Docker deployment](docs/deployment.md#docker) before starting it.
+The Docker image ships bubblewrap but Docker's defaults block its sandbox; the Compose service
+needs the sandbox options in [Docker deployment](docs/deployment.md#docker) before starting it.
 
 ## Documentation
 
