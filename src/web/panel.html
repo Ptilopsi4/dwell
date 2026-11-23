@@ -1482,7 +1482,7 @@ async function openWork(id, selectedWorkId) {
 				heading.textContent = record.goal;
 				const status = document.createElement("span");
 				status.className = "role";
-				status.textContent = ({ active: "进行中", ready_for_review: "待验收", accepted: "已验收" })[record.status];
+				status.textContent = ({ active: "进行中", superseded: "已解绑" })[record.status];
 				heading.appendChild(status);
 				row.appendChild(heading);
 				const section = (title, value) => {
