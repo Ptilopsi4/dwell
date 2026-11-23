@@ -125,7 +125,7 @@ Use `DWELL_PANEL_TRUST_LOCAL=1` only for a same-host reverse proxy or an `ssh -L
 |---|---|
 | `DWELL_RUN_MODEL_LIMIT` | Positive integer, default `32`: normal generation request admissions per run, including durable retries/recovery |
 | `DWELL_RUN_TOOL_LIMIT` | Positive integer, default `128`: unique tool admissions per run, including calls blocked for approval |
-| `DWELL_RUN_TIMEOUT_MINUTES` | Positive integer, default `15`: execution-phase wall-clock limit per run, in minutes |
+| `DWELL_RUN_TIMEOUT_MINUTES` | Positive integer, default `30`: execution-phase wall-clock limit per run, in minutes |
 
 ### Sandbox mode
 

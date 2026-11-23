@@ -129,7 +129,7 @@ OpenCode Go 模板复用标准 Chat Completions 适配器。注意：选用该�
 |---|---|
 | `DWELL_RUN_MODEL_LIMIT` | 正整数，默认 `32`：每轮执行的普通生成请求准入数，包含持久化任务的重试与恢复 |
 | `DWELL_RUN_TOOL_LIMIT` | 正整数，默认 `128`：每轮执行的唯一工具准入数，包含被审批拦截的调用 |
-| `DWELL_RUN_TIMEOUT_MINUTES` | 正整数，默认 `15`：每轮执行阶段的实际耗时上限，单位分钟 |
+| `DWELL_RUN_TIMEOUT_MINUTES` | 正整数，默认 `30`：每轮执行阶段的实际耗时上限，单位分钟 |
 
 ### 沙箱模式
 
