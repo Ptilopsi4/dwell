@@ -21,12 +21,15 @@ export class TelegramError extends Error {
 	readonly code?: number;
 	readonly retryAfter?: number;
 	readonly uncertain: boolean;
-	constructor(message: string, options: { code?: number; retryAfter?: number; uncertain?: boolean } = {}) {
+	/** 请求尚未起跑就失败（如连接已关闭）：确定未发出，可安全重投。 */
+	readonly notSent: boolean;
+	constructor(message: string, options: { code?: number; retryAfter?: number; uncertain?: boolean; notSent?: boolean } = {}) {
 		super(message);
 		this.name = "TelegramError";
 		this.code = options.code;
 		this.retryAfter = options.retryAfter;
 		this.uncertain = options.uncertain ?? false;
+		this.notSent = options.notSent ?? false;
 	}
 }
 
@@ -151,8 +154,8 @@ type ConnectOptions = {
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
-		if (signal.aborted) { reject(new TelegramError("Telegram 连接已关闭")); return; }
-		const abort = () => { clearTimeout(timer); reject(new TelegramError("Telegram 连接已关闭")); };
+		if (signal.aborted) { reject(new TelegramError("Telegram 连接已关闭", { notSent: true })); return; }
+		const abort = () => { clearTimeout(timer); reject(new TelegramError("Telegram 连接已关闭", { notSent: true })); };
 		const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
 		signal.addEventListener("abort", abort, { once: true });
 	});
@@ -252,7 +255,7 @@ export class TelegramBot {
 	}
 
 	async #wait(ms: number, signal = this.#controller.signal): Promise<void> {
-		if (this.#controller.signal.aborted) throw new TelegramError("Telegram 连接已关闭");
+		if (this.#controller.signal.aborted) throw new TelegramError("Telegram 连接已关闭", { notSent: true });
 		signal.throwIfAborted();
 		if (ms > 0) await this.#sleep(ms, signal);
 	}

@@ -321,6 +321,11 @@ async function main(): Promise<void> {
 			await failApprovalNotification(key, pending.requestId ?? "", true);
 			console.error(`[dwell] Telegram 审批提示投递结果未知，可用命令处理（#${scope}）`);
 		}
+		else if (destination.kind === "telegram" && pending.notificationState === "uncertain" && pending.cardMessageId === undefined) {
+			// 上个进程发送中途断连：不重发（结果未知），但留痕并提醒管理员，避免审批在聊天面静默缺席
+			console.error(`[dwell] Telegram 审批提示投递结果未知，可用命令处理（#${scope}）`);
+			await notifyAdmins(`⚠️ 任务 #${scope} 的审批提示投递结果未知，可用 /approve 或 /deny 处理。`);
+		}
 	}
 	// Channel 连上之后才能私发告警
 	if (githubEnabled()) void githubCheck();
@@ -1036,7 +1041,8 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 	// 附件准备可达数秒（下载+视觉描述），typing 指示器可见性差：与飞书先占位卡对齐，先发持久占位再准备
 	const stopPlaceholder = async (text: string): Promise<void> => {
 		const current = await telegramInbox.input(id);
-		if (current?.messageId !== undefined && current.output === "tracking") {
+		// 已取消（failed）但占位已登记的行也要改写，否则聊天里永远停在"正在接收附件…"
+		if (current?.messageId !== undefined && (current.output === "tracking" || current.output === "failed")) {
 			await telegram!.edit(current.destination, current.messageId, text).catch(() => console.error("[dwell] Telegram 占位收尾失败，消息将停留在占位文案"));
 		}
 	};
@@ -1045,13 +1051,17 @@ async function processTelegramInput(id: string, row: TelegramInputReceipt, signa
 		if (msg.resources.length > 0) {
 			// cwd 先取：conversation.agent() 若撞上 /cancel 的 abort 会永久挂起（pi-durable 现状），占位发送只能在其后并行
 			const cwd = (await conversation.agent(BACKGROUND_CONTEXT)).cwd ?? DEFAULT_CWD;
-			// 占位 fire-and-forget：不改变主流程时序（取消窗口保持在下载阶段）；仅 pending 行可登记，防覆盖终态
+			// 占位 fire-and-forget：不改变主流程时序（取消窗口保持在下载阶段）；登记经 markTracking 原子迁移，仅 pending 行可登记
 			void (async () => {
 				try {
-					if ((await telegramInbox.input(id))?.messageId !== undefined || (await telegramInbox.input(id))?.output !== "pending") return;
+					const before = await telegramInbox.input(id);
+					if (before?.messageId !== undefined || before?.output !== "pending") return;
 					const sent = await telegram!.send(row.destination, "正在接收附件…", { replyTo: row.replyTo || undefined });
-					if ((await telegramInbox.input(id))?.output !== "pending") return;
-					await telegramInbox.output(id, "tracking", sent.messageId);
+					if (!(await telegramInbox.markTracking(id, sent.messageId))) {
+						// 发送期间行已被取消/置终态：占位无记录可改，就地收尾
+						if ((await telegramInbox.input(id))?.output === "failed") await telegram!.edit(row.destination, sent.messageId, "已中止当前任务。").catch(() => {});
+						return;
+					}
 					await sessions.anchor(sent.messageId, row.conversationId as ConversationId);
 				} catch { /* 占位失败不阻断处理，replyTelegram 兑底 */ }
 			})();
@@ -1159,9 +1169,15 @@ async function replyTelegram(id: string, conversation: Conversation, submission:
 		await telegramInbox.output(id, "done");
 	} catch (error) {
 		const row = await telegramInbox.input(id).catch(() => undefined);
-		const uncertain = error instanceof TelegramError ? error.uncertain : row?.output === "sending";
-		if (row !== undefined) await telegramInbox.output(id, uncertain ? "uncertain" : "failed").catch(() => {});
-		console.error(`[dwell] Telegram 投递${uncertain ? "状态不确定，未自动重发" : "失败"}（${id}）:`, error);
+		if (error instanceof TelegramError && error.notSent) {
+			// 连接在请求起跑前关闭（shutdown / onFatal）：确定未发出，回滚到 tracking 让重启后重投；占位仍在，无重复风险
+			if (row?.output === "sending") await telegramInbox.output(id, "tracking").catch(() => {});
+			console.error(`[dwell] Telegram 连接已关闭，回复未发出，重启后重投（${id}）`);
+		} else {
+			const uncertain = error instanceof TelegramError ? error.uncertain : row?.output === "sending";
+			if (row !== undefined) await telegramInbox.output(id, uncertain ? "uncertain" : "failed").catch(() => {});
+			console.error(`[dwell] Telegram 投递${uncertain ? "状态不确定，未自动重发" : "失败"}（${id}）:`, error);
+		}
 	} finally { await stopPreview(); telegramReplies.delete(id); }
 }
 
