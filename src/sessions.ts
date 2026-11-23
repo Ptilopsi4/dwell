@@ -332,6 +332,8 @@ export class Sessions {
 			if (route.actorScoped === true) this.actorScoped.add(id);
 			else this.actorScoped.delete(id);
 		}
+		// doc 侧已裁剪的退役别名同步从投影移除，否则内存与 sessions.json 里的 #old: 键随 /new 次数无界增长
+		for (const key of [...this.convKeys.keys()]) if (key.includes("#old:") && !Object.hasOwn(routes, key)) this.convKeys.delete(key);
 	}
 
 	/** Telegram defaults are private-chat, group-sender or forum-topic scoped. */
